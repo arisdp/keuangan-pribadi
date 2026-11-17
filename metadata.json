@@ -1,0 +1,6 @@
+{
+  "name": "Nusantara Wealth",
+  "description": "Aplikasi manajemen keuangan pribadi yang mengintegrasikan pelacakan pengeluaran, anggaran bulanan, strategi pelunasan utang, kalkulator dana darurat, serta analisis pengeluaran otomatis bertenaga AI Gemini.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
