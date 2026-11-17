@@ -481,7 +481,7 @@ export const BackupDataModal: React.FC<BackupDataModalProps> = ({
                     Zona Risiko: Reset Seluruh Data Keuangan
                   </h4>
                   <p className="text-xs text-rose-800 leading-relaxed font-medium">
-                    Tindakan ini akan mengosongkan seluruh jurnal transaksi, saldo akun, utang, investasi, serta rencana anggaran Anda ke kondisi awal.
+                    Tindakan ini akan menghapus seluruh transaksi lama, utang, investasi, transaksi berulang, dan target, serta hanya menyisakan data default awal (saldo akun &amp; limit anggaran Rp 0) agar perhitungan dimulai bersih dari awal.
                   </p>
                 </div>
               </div>

@@ -200,6 +200,34 @@ export interface AIMonthlyComparisonResult {
   actionableRecommendations: string[];
 }
 
+export interface CategoryConsolidationSource {
+  name: string;
+  txCount: number;
+  totalAmount: number;
+  sampleDescriptions: string[];
+}
+
+export interface CategoryConsolidationGroup {
+  id: string;
+  targetMasterCategory: string;
+  transactionType: TransactionType;
+  sourceCategories: CategoryConsolidationSource[];
+  affectedTxCount: number;
+  affectedTotalAmount: number;
+  confidence: 'high' | 'medium';
+  reason: string;
+}
+
+export interface AICategoryConsolidationResult {
+  totalUniqueCategories: number;
+  totalTransactionsScanned: number;
+  recommendedMasterCountAfterMerge: number;
+  efficiencyGainPercent: number;
+  overallSummary: string;
+  consolidationGroups: CategoryConsolidationGroup[];
+  isFallback?: boolean;
+}
+
 export interface User {
   username: string;
   fullName: string;

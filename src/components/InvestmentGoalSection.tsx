@@ -154,15 +154,23 @@ export const InvestmentGoalSection: React.FC<InvestmentGoalSectionProps> = ({
   const [goals, setGoals] = useState<InvestmentGoal[]>(() => {
     try {
       const saved = secureStorage.getItem('nusantara_investment_goals');
-      if (saved) {
+      if (saved !== null) {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+        if (Array.isArray(parsed)) return parsed;
       }
     } catch (e) {
       logger.error('Failed to parse investment goals:', e);
     }
     return DEFAULT_INVESTMENT_GOALS;
   });
+
+  useEffect(() => {
+    const handleDataReset = () => {
+      setGoals([]);
+    };
+    window.addEventListener('nusantara:data-reset', handleDataReset);
+    return () => window.removeEventListener('nusantara:data-reset', handleDataReset);
+  }, []);
 
   useEffect(() => {
     try {

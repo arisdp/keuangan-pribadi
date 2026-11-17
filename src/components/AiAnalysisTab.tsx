@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
-import { Transaction, CategoryBudget, Debt, EmergencyFundConfig, AIAnalysisResult, AIMonthlyComparisonResult, InvestmentAsset, Account } from '../types';
-import { Sparkles, Loader2, ArrowRightLeft, ShieldCheck, AlertTriangle, ArrowUpRight, ArrowDownRight, CheckCircle2, ChevronRight, HelpCircle, TrendingUp, TrendingDown, Coins, Percent, PiggyBank, Wallet, Calendar, Scale, Flame, Snowflake, Zap, Award, ListOrdered } from 'lucide-react';
+import { Transaction, CategoryBudget, Debt, EmergencyFundConfig, AIAnalysisResult, AIMonthlyComparisonResult, AICategoryConsolidationResult, CategoryConsolidationGroup, InvestmentAsset, Account } from '../types';
+import { Sparkles, Loader2, ArrowRightLeft, ShieldCheck, AlertTriangle, ArrowUpRight, ArrowDownRight, CheckCircle2, ChevronRight, HelpCircle, TrendingUp, TrendingDown, Coins, Percent, PiggyBank, Wallet, Calendar, Scale, Flame, Snowflake, Zap, Award, ListOrdered, Layers, ArrowRight, GitMerge } from 'lucide-react';
+import { CategoryNode, DEFAULT_CATEGORY_HIERARCHY, flattenCategoryHierarchy } from '../categoryHierarchy';
+import { showToast } from '../utils/toast';
 import { FormattedNumberInput } from './FormattedNumberInput';
 import { WhatIfSavingsSimulator } from './WhatIfSavingsSimulator';
 import { DebtPriorityScheduler } from './DebtPriorityScheduler';
@@ -13,7 +15,9 @@ interface AiAnalysisTabProps {
   emergencyConfig: EmergencyFundConfig;
   emergencyBalance: number;
   investments: InvestmentAsset[];
+  masterCategories?: CategoryNode[];
   onApplyBudgetSuggestion: (category: string, recommendedLimit: number) => void;
+  onConsolidateCategories?: (sourceCategories: string[], targetCategory: string) => void;
 }
 
 export interface DebtPayoffItem {
@@ -171,7 +175,9 @@ export const AiAnalysisTab: React.FC<AiAnalysisTabProps> = ({
   emergencyConfig,
   emergencyBalance,
   investments = [],
+  masterCategories = [],
   onApplyBudgetSuggestion,
+  onConsolidateCategories,
 }) => {
   const formatterIDR = new Intl.NumberFormat('id-ID', {
     style: 'currency',
@@ -238,6 +244,124 @@ export const AiAnalysisTab: React.FC<AiAnalysisTabProps> = ({
     generalTips: string[];
   } | null>(null);
   const [trendError, setTrendError] = useState<string | null>(null);
+
+  // --- CATEGORY CONSOLIDATION SCANNER STATES ---
+  const [consolidationLoading, setConsolidationLoading] = useState(false);
+  const [consolidationResult, setConsolidationResult] = useState<AICategoryConsolidationResult | null>(null);
+  const [consolidationError, setConsolidationError] = useState<string | null>(null);
+  const [appliedGroupIds, setAppliedGroupIds] = useState<string[]>([]);
+
+  const masterCategoryNames = React.useMemo(() => {
+    const sourceHierarchy =
+      masterCategories && masterCategories.length > 0 ? masterCategories : DEFAULT_CATEGORY_HIERARCHY;
+    const flattened = flattenCategoryHierarchy(sourceHierarchy);
+    return Array.from(
+      new Set(
+        flattened
+          .filter((node) => node.type === 'item')
+          .map((node) => node.name.trim())
+          .filter(Boolean)
+      )
+    );
+  }, [masterCategories]);
+
+  const categoryFragmentationMetrics = React.useMemo(() => {
+    const scannableTxs = transactions.filter(
+      (t) => t.category !== 'Mutasi Masuk' && t.category !== 'Mutasi Keluar'
+    );
+    const masterLowerSet = new Set(masterCategoryNames.map((n) => n.toLowerCase()));
+    const catStats = new Map<string, { name: string; count: number; total: number; isMaster: boolean }>();
+
+    for (const tx of scannableTxs) {
+      const catName = String(tx.category || 'Lainnya').trim();
+      const key = catName.toLowerCase();
+      const existing = catStats.get(key) || {
+        name: catName,
+        count: 0,
+        total: 0,
+        isMaster: masterLowerSet.has(key),
+      };
+      existing.count += 1;
+      existing.total += Math.abs(Number(tx.amount) || 0);
+      catStats.set(key, existing);
+    }
+
+    const entries = Array.from(catStats.values());
+    const nonMasterCategories = entries.filter((e) => !e.isMaster);
+    const lowFrequencyCategories = entries.filter((e) => !e.isMaster && e.count <= 2);
+
+    return {
+      totalScannedTx: scannableTxs.length,
+      uniqueCategoriesCount: entries.length,
+      nonMasterCount: nonMasterCategories.length,
+      lowFrequencyCount: lowFrequencyCategories.length,
+      nonMasterSamples: nonMasterCategories.slice(0, 6).map((c) => c.name),
+    };
+  }, [transactions, masterCategoryNames]);
+
+  const handleRunCategoryConsolidation = async () => {
+    setConsolidationLoading(true);
+    setConsolidationError(null);
+    setAppliedGroupIds([]);
+    try {
+      const response = await fetch('/api/analyze-category-consolidation', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          transactions,
+          masterCategoryNames,
+          budgets,
+        }),
+      });
+      if (!response.ok) {
+        const errData = await response.json();
+        throw new Error(errData.error || 'Gagal memindai fragmentasi kategori transaksi.');
+      }
+      const data: AICategoryConsolidationResult = await response.json();
+      setConsolidationResult(data);
+    } catch (err: any) {
+      console.error(err);
+      setConsolidationError(err.message || 'Gagal tersambung ke layanan konsolidasi kategori AI.');
+    } finally {
+      setConsolidationLoading(false);
+    }
+  };
+
+  const handleApplyConsolidationGroup = (group: CategoryConsolidationGroup) => {
+    if (!onConsolidateCategories) return;
+    if (appliedGroupIds.includes(group.id)) return;
+    const sources = group.sourceCategories.map((s) => s.name).filter(Boolean);
+    if (sources.length === 0) return;
+    onConsolidateCategories(sources, group.targetMasterCategory);
+    setAppliedGroupIds((prev) => (prev.includes(group.id) ? prev : [...prev, group.id]));
+  };
+
+  const handleApplyAllConsolidations = () => {
+    if (!onConsolidateCategories || !consolidationResult) return;
+    const pendingGroups = consolidationResult.consolidationGroups.filter(
+      (g) => !appliedGroupIds.includes(g.id)
+    );
+    if (pendingGroups.length === 0) {
+      showToast({
+        type: 'info',
+        title: 'Semua Rekomendasi Sudah Diterapkan',
+        message: 'Tidak ada kelompok kategori tersisa untuk digabungkan.',
+      });
+      return;
+    }
+
+    pendingGroups.forEach((grp) => {
+      const sources = grp.sourceCategories.map((s) => s.name).filter(Boolean);
+      if (sources.length > 0) {
+        onConsolidateCategories(sources, grp.targetMasterCategory);
+      }
+    });
+
+    setAppliedGroupIds((prev) => [
+      ...prev,
+      ...pendingGroups.map((g) => g.id).filter((id) => !prev.includes(id)),
+    ]);
+  };
 
   const handleRun3MonthTrend = async () => {
     setTrendLoading(true);
@@ -628,14 +752,37 @@ export const AiAnalysisTab: React.FC<AiAnalysisTabProps> = ({
                 </>
               )}
             </button>
+
+            <button
+              onClick={() => {
+                handleRunCategoryConsolidation();
+                document.getElementById('category-consolidation-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+              }}
+              disabled={consolidationLoading}
+              className="flex items-center gap-2 bg-amber-400 hover:bg-amber-300 text-slate-950 disabled:bg-slate-800 disabled:text-slate-500 font-extrabold px-5 py-2.5 rounded-xl text-xs uppercase tracking-wider transition cursor-pointer shadow-md disabled:cursor-not-allowed"
+            >
+              {consolidationLoading ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin text-slate-950" />
+                  Memindai Kategori...
+                </>
+              ) : (
+                <>
+                  <GitMerge className="h-4 w-4 text-slate-900" />
+                  Pindai & Gabung Kategori
+                </>
+              )}
+            </button>
             
-            {(result || anomalyResult || compareResult || trendResult) && (
+            {(result || anomalyResult || compareResult || trendResult || consolidationResult) && (
               <button
                 onClick={() => {
                   setResult(null);
                   setAnomalyResult(null);
                   setCompareResult(null);
                   setTrendResult(null);
+                  setConsolidationResult(null);
+                  setAppliedGroupIds([]);
                 }}
                 className="bg-slate-800/40 hover:bg-slate-800/60 text-slate-200 text-xs px-4 py-2.5 rounded-xl border border-slate-700/50 transition cursor-pointer"
               >
@@ -644,6 +791,292 @@ export const AiAnalysisTab: React.FC<AiAnalysisTabProps> = ({
             )}
           </div>
         </div>
+      </div>
+
+      {/* PEMINDAI EFISIENSI & REKOMENDASI PENGGABUNGAN KATEGORI MASTER */}
+      <div
+        id="category-consolidation-section"
+        className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-md space-y-5"
+      >
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-100 dark:border-slate-800 pb-4">
+          <div className="flex items-start gap-3">
+            <div className="p-3 bg-gradient-to-tr from-amber-500 to-orange-500 text-white rounded-xl shadow-sm shrink-0">
+              <GitMerge className="h-6 w-6" />
+            </div>
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <h3 className="font-extrabold text-slate-800 dark:text-slate-100 text-base">
+                  Pemindai Efisiensi & Penggabungan Kategori Master
+                </h3>
+                <span className="px-2.5 py-0.5 bg-amber-100 dark:bg-amber-950/80 text-amber-900 dark:text-amber-200 text-[10px] font-black rounded-full uppercase">
+                  AI Category Optimizer
+                </span>
+              </div>
+              <p className="text-xs text-slate-500 dark:text-slate-400 font-medium mt-1 leading-relaxed">
+                Memindai seluruh transaksi untuk mendeteksi kategori yang terlalu spesifik (seperti merek kopi, ojol, e-commerce satuan) dan merekomendasikan penggabungan ke kategori master agar laporan & anggaran jauh lebih ringkas.
+              </p>
+            </div>
+          </div>
+
+          <button
+            onClick={handleRunCategoryConsolidation}
+            disabled={consolidationLoading || categoryFragmentationMetrics.totalScannedTx === 0}
+            className="flex items-center justify-center gap-2 bg-slate-900 dark:bg-amber-500 hover:bg-slate-800 dark:hover:bg-amber-400 text-white dark:text-slate-950 disabled:bg-slate-200 dark:disabled:bg-slate-800 disabled:text-slate-400 font-extrabold px-4 py-2.5 rounded-xl text-xs uppercase tracking-wider transition cursor-pointer shadow-sm shrink-0 disabled:cursor-not-allowed"
+          >
+            {consolidationLoading ? (
+              <>
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Memindai {categoryFragmentationMetrics.totalScannedTx} Transaksi...
+              </>
+            ) : (
+              <>
+                <Layers className="h-4 w-4" />
+                {consolidationResult ? 'Pindai Ulang Kategori' : 'Pindai Kategori Transaksi'}
+              </>
+            )}
+          </button>
+        </div>
+
+        {/* Live Metrics Preview from Current Transactions */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div className="p-3.5 bg-slate-50 dark:bg-slate-800/60 border border-slate-200/80 dark:border-slate-700/80 rounded-xl">
+            <span className="text-[10px] font-extrabold text-slate-500 dark:text-slate-400 uppercase tracking-wider block">
+              Total Transaksi Terpindai
+            </span>
+            <span className="text-lg font-black text-slate-800 dark:text-slate-100 font-mono mt-0.5 block">
+              {categoryFragmentationMetrics.totalScannedTx} <span className="text-xs font-bold text-slate-400 font-sans">Transaksi</span>
+            </span>
+          </div>
+
+          <div className="p-3.5 bg-slate-50 dark:bg-slate-800/60 border border-slate-200/80 dark:border-slate-700/80 rounded-xl">
+            <span className="text-[10px] font-extrabold text-slate-500 dark:text-slate-400 uppercase tracking-wider block">
+              Kategori Unik Terdeteksi
+            </span>
+            <span className="text-lg font-black text-slate-800 dark:text-slate-100 font-mono mt-0.5 block">
+              {categoryFragmentationMetrics.uniqueCategoriesCount} <span className="text-xs font-bold text-slate-400 font-sans">dari {masterCategoryNames.length} Master</span>
+            </span>
+          </div>
+
+          <div className={`p-3.5 rounded-xl border ${
+            categoryFragmentationMetrics.nonMasterCount > 0
+              ? 'bg-amber-50/80 dark:bg-amber-950/30 border-amber-200 dark:border-amber-800/70'
+              : 'bg-emerald-50/80 dark:bg-emerald-950/30 border-emerald-200 dark:border-emerald-800/70'
+          }`}>
+            <span className="text-[10px] font-extrabold text-slate-600 dark:text-slate-300 uppercase tracking-wider block">
+              Kategori Spesifik di Luar Master
+            </span>
+            <div className="flex items-baseline justify-between mt-0.5">
+              <span className={`text-lg font-black font-mono ${
+                categoryFragmentationMetrics.nonMasterCount > 0
+                  ? 'text-amber-700 dark:text-amber-300'
+                  : 'text-emerald-700 dark:text-emerald-300'
+              }`}>
+                {categoryFragmentationMetrics.nonMasterCount} <span className="text-xs font-bold font-sans">Kategori</span>
+              </span>
+              {categoryFragmentationMetrics.nonMasterCount > 0 && (
+                <span className="text-[10px] font-bold text-amber-700 dark:text-amber-300">
+                  Perlu Konsolidasi
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {categoryFragmentationMetrics.nonMasterSamples.length > 0 && !consolidationResult && !consolidationLoading && (
+          <div className="p-3 bg-amber-50/60 dark:bg-amber-950/20 border border-amber-200/70 dark:border-amber-800/50 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+            <div className="flex flex-wrap items-center gap-1.5 text-amber-900 dark:text-amber-200 font-medium">
+              <span className="font-bold">Contoh kategori di luar master terdeteksi:</span>
+              {categoryFragmentationMetrics.nonMasterSamples.map((sample) => (
+                <span
+                  key={sample}
+                  className="px-2 py-0.5 bg-white dark:bg-slate-800 border border-amber-200 dark:border-amber-700 rounded-md text-[11px] font-bold text-amber-800 dark:text-amber-300"
+                >
+                  {sample}
+                </span>
+              ))}
+            </div>
+            <span className="text-[11px] text-amber-700 dark:text-amber-300 font-semibold shrink-0">
+              Klik "Pindai Kategori Transaksi" untuk rekomendasi AI
+            </span>
+          </div>
+        )}
+
+        {consolidationError && (
+          <div className="p-4 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 text-rose-900 dark:text-rose-200 rounded-xl flex items-center gap-3 text-xs animate-fadeIn">
+            <AlertTriangle className="h-5 w-5 text-rose-500 shrink-0" />
+            <div>
+              <p className="font-bold">Gagal Memindai Konsolidasi Kategori</p>
+              <p className="text-rose-700 dark:text-rose-300">{consolidationError}</p>
+            </div>
+          </div>
+        )}
+
+        {consolidationLoading && (
+          <div className="p-8 text-center flex flex-col items-center justify-center space-y-3 bg-slate-50 dark:bg-slate-800/40 border border-slate-200 dark:border-slate-700 rounded-xl">
+            <Loader2 className="h-8 w-8 animate-spin text-amber-500" />
+            <div className="space-y-1">
+              <p className="font-bold text-slate-800 dark:text-slate-100 text-xs">
+                Sedang Memindai Seluruh Transaksi & Mencocokkan Kategori Master...
+              </p>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                Menganalisis kesamaan makna deskripsi, frekuensi kategori mikro, dan struktur master kategori Anda.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {consolidationResult && !consolidationLoading && (
+          <div className="space-y-4 animate-fadeIn">
+            {/* Summary & Batch Merge Bar */}
+            <div className="p-4 bg-gradient-to-r from-amber-50 to-orange-50/60 dark:from-amber-950/30 dark:to-orange-950/20 border border-amber-200/80 dark:border-amber-800/60 rounded-xl flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+              <div className="space-y-1.5">
+                <div className="flex flex-wrap items-center gap-2 text-[11px] font-black uppercase tracking-wider text-amber-900 dark:text-amber-200">
+                  <span>Hasil Pemindaian AI</span>
+                  <span className="px-2 py-0.5 bg-white/90 dark:bg-slate-800 text-amber-700 dark:text-amber-300 rounded-full border border-amber-200 dark:border-amber-700 font-mono">
+                    {consolidationResult.totalUniqueCategories} Kategori &rarr; {consolidationResult.recommendedMasterCountAfterMerge} Master
+                  </span>
+                  {consolidationResult.efficiencyGainPercent > 0 && (
+                    <span className="px-2 py-0.5 bg-emerald-100 dark:bg-emerald-900/60 text-emerald-800 dark:text-emerald-200 rounded-full">
+                      +{consolidationResult.efficiencyGainPercent}% Lebih Ringkas
+                    </span>
+                  )}
+                </div>
+                <p className="text-xs text-slate-700 dark:text-slate-300 font-medium leading-relaxed">
+                  {consolidationResult.overallSummary}
+                </p>
+              </div>
+
+              {consolidationResult.consolidationGroups.length > 0 && onConsolidateCategories && (
+                <button
+                  onClick={handleApplyAllConsolidations}
+                  disabled={consolidationResult.consolidationGroups.every((g) => appliedGroupIds.includes(g.id))}
+                  className="flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-emerald-100 dark:disabled:bg-emerald-950/50 text-white disabled:text-emerald-700 dark:disabled:text-emerald-300 font-extrabold px-4 py-2.5 rounded-xl text-xs uppercase tracking-wider transition cursor-pointer shrink-0 shadow-xs disabled:cursor-default"
+                >
+                  <CheckCircle2 className="h-4 w-4" />
+                  {consolidationResult.consolidationGroups.every((g) => appliedGroupIds.includes(g.id))
+                    ? 'Semua Telah Digabungkan'
+                    : 'Gabungkan Semua Rekomendasi'}
+                </button>
+              )}
+            </div>
+
+            {consolidationResult.consolidationGroups.length === 0 ? (
+              <div className="p-5 bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800/70 rounded-xl flex items-center gap-3 text-xs text-emerald-900 dark:text-emerald-200 font-semibold">
+                <CheckCircle2 className="h-5 w-5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                <span>
+                  Struktur kategori transaksi Anda sudah sangat efisien dan konsisten dengan Master Kategori. Tidak diperlukan penggabungan saat ini.
+                </span>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                {consolidationResult.consolidationGroups.map((group) => {
+                  const isApplied = appliedGroupIds.includes(group.id);
+                  const txTypeLabel =
+                    group.transactionType === 'income'
+                      ? 'Pemasukan'
+                      : group.transactionType === 'saving'
+                      ? 'Tabungan'
+                      : group.transactionType === 'investment'
+                      ? 'Investasi'
+                      : 'Pengeluaran';
+
+                  return (
+                    <div
+                      key={group.id}
+                      className={`p-4 rounded-xl border transition space-y-3 flex flex-col justify-between ${
+                        isApplied
+                          ? 'bg-emerald-50/50 dark:bg-emerald-950/20 border-emerald-200 dark:border-emerald-800/60'
+                          : 'bg-slate-50/80 dark:bg-slate-800/50 border-slate-200 dark:border-slate-700/80 hover:border-amber-300 dark:hover:border-amber-700'
+                      }`}
+                    >
+                      <div className="space-y-3">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex items-center gap-1.5">
+                            <span className="px-2 py-0.5 bg-slate-200/80 dark:bg-slate-700 text-slate-700 dark:text-slate-200 text-[10px] font-extrabold rounded-full uppercase">
+                              {txTypeLabel}
+                            </span>
+                            <span
+                              className={`px-2 py-0.5 text-[10px] font-extrabold rounded-full uppercase ${
+                                group.confidence === 'high'
+                                  ? 'bg-emerald-100 dark:bg-emerald-900/60 text-emerald-800 dark:text-emerald-200'
+                                  : 'bg-blue-100 dark:bg-blue-900/60 text-blue-800 dark:text-blue-200'
+                              }`}
+                            >
+                              {group.confidence === 'high' ? 'Rekomendasi Kuat' : 'Saran Efisiensi'}
+                            </span>
+                          </div>
+                          <span className="text-[11px] font-mono font-bold text-slate-500 dark:text-slate-400">
+                            {group.affectedTxCount} tx &bull; {formatterIDR.format(group.affectedTotalAmount)}
+                          </span>
+                        </div>
+
+                        {/* Mapping Flow: Source Specific Categories -> Target Master Category */}
+                        <div className="flex flex-col sm:flex-row sm:items-center gap-3 p-3 bg-white dark:bg-slate-900 rounded-xl border border-slate-200/80 dark:border-slate-700/70">
+                          <div className="flex-1 flex flex-wrap gap-1.5">
+                            {group.sourceCategories.map((src) => (
+                              <div
+                                key={src.name}
+                                className="px-2.5 py-1 bg-rose-50 dark:bg-rose-950/40 border border-rose-200/80 dark:border-rose-800/60 rounded-lg text-[11px]"
+                                title={
+                                  src.sampleDescriptions && src.sampleDescriptions.length > 0
+                                    ? `Contoh: ${src.sampleDescriptions.join(', ')}`
+                                    : undefined
+                                }
+                              >
+                                <span className="font-bold text-rose-800 dark:text-rose-200">{src.name}</span>
+                                <span className="ml-1.5 text-[10px] font-mono text-rose-600 dark:text-rose-300">
+                                  ({src.txCount}x &bull; {formatterIDR.format(src.totalAmount)})
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+
+                          <div className="flex items-center justify-center shrink-0">
+                            <ArrowRight className="h-4 w-4 text-amber-500 rotate-90 sm:rotate-0" />
+                          </div>
+
+                          <div className="shrink-0">
+                            <span className="text-[9px] font-extrabold text-slate-400 uppercase block mb-0.5">
+                              Kategori Master Target
+                            </span>
+                            <span className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 text-white rounded-lg text-xs font-black shadow-xs">
+                              <Layers className="h-3.5 w-3.5" />
+                              {group.targetMasterCategory}
+                            </span>
+                          </div>
+                        </div>
+
+                        <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed font-medium">
+                          {group.reason}
+                        </p>
+                      </div>
+
+                      <div className="pt-2 border-t border-slate-200/70 dark:border-slate-700/60 flex items-center justify-between gap-2">
+                        <span className="text-[10px] font-semibold text-slate-400">
+                          {group.sourceCategories.length} kategori akan disatukan
+                        </span>
+                        {onConsolidateCategories && (
+                          <button
+                            onClick={() => handleApplyConsolidationGroup(group)}
+                            disabled={isApplied}
+                            className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-[11px] font-extrabold uppercase tracking-wider transition cursor-pointer ${
+                              isApplied
+                                ? 'bg-emerald-100 dark:bg-emerald-900/50 text-emerald-700 dark:text-emerald-300 cursor-default'
+                                : 'bg-blue-600 hover:bg-blue-700 text-white shadow-xs'
+                            }`}
+                          >
+                            <CheckCircle2 className="h-3.5 w-3.5" />
+                            {isApplied ? 'Sudah Digabungkan' : 'Terapkan Penggabungan'}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* SIMULASI WHAT-IF HEMAT 10% & PROYEKSI SALDO MASA DEPAN */}

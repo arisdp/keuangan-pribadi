@@ -51,7 +51,14 @@ import { MasterCategoryManager } from './components/MasterCategoryManager';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { BackupDataModal } from './components/BackupDataModal';
 import { AccountingIntegrityModal } from './components/AccountingIntegrityModal';
-import { validateMasterIntegrityOnLoad, getStoredCoaList, factoryResetMasterData } from './coaUtils';
+import {
+  validateMasterIntegrityOnLoad,
+  getStoredCoaList,
+  factoryResetMasterData,
+  DEFAULT_COA_LIST,
+  saveStoredCoaList,
+  clearMasterChangeLogs
+} from './coaUtils';
 import { motion, AnimatePresence } from 'motion/react';
 import { useTheme } from './ThemeContext';
 import { 
@@ -190,9 +197,9 @@ export default function App() {
     if (user) {
       const u: User = JSON.parse(user);
       const saved = secureStorage.getItem(`fin_${u.username}_recurring_transactions`);
-      return saved ? JSON.parse(saved) : INITIAL_RECURRING_TRANSACTIONS;
+      if (saved !== null) return JSON.parse(saved);
     }
-    return INITIAL_RECURRING_TRANSACTIONS;
+    return [];
   });
 
   // Sync recurring transactions to localStorage
@@ -233,28 +240,9 @@ export default function App() {
     if (user) {
       const u: User = JSON.parse(user);
       const saved = secureStorage.getItem(`fin_${u.username}_savings_goals`);
-      if (saved) return JSON.parse(saved);
+      if (saved !== null) return JSON.parse(saved);
     }
-    return [
-      {
-        id: 'goal-1',
-        title: 'Dana Liburan Akhir Tahun',
-        targetAmount: 15000000,
-        currentAmount: 6500000,
-        targetDate: '2026-12-25',
-        category: 'Liburan',
-        notes: 'Target menabung bulanan Rp 1.500.000'
-      },
-      {
-        id: 'goal-2',
-        title: 'DP Rumah Impian',
-        targetAmount: 100000000,
-        currentAmount: 42000000,
-        targetDate: '2028-06-01',
-        category: 'Rumah',
-        notes: 'Alokasi dari bonus tahunan & simpanan rutin'
-      }
-    ];
+    return [];
   });
 
   // Sync savings goals to localStorage
@@ -419,6 +407,7 @@ export default function App() {
   const [showLogoutModal, setShowLogoutModal] = useState<boolean>(false);
   const [showResetDataModal, setShowResetDataModal] = useState<boolean>(false);
   const [resetConfirmText, setResetConfirmText] = useState<string>('');
+  const [isResettingData, setIsResettingData] = useState<boolean>(false);
   const [showBackupModal, setShowBackupModal] = useState<boolean>(false);
   const [showIntegrityModal, setShowIntegrityModal] = useState<boolean>(false);
 
@@ -509,15 +498,22 @@ export default function App() {
   });
 
   const applySyncPackage = (pkg: SyncDataPackage) => {
-    if (pkg.transactions && pkg.transactions.length > 0) setTransactions(pkg.transactions);
-    if (pkg.accounts && pkg.accounts.length > 0) setAccounts(pkg.accounts);
-    if (pkg.budgets && pkg.budgets.length > 0) setBudgets(pkg.budgets);
-    if (pkg.debts && pkg.debts.length > 0) setDebts(pkg.debts);
-    if (pkg.investments && pkg.investments.length > 0) setInvestments(pkg.investments);
+    const hasCloudState =
+      (Array.isArray(pkg.accounts) && pkg.accounts.length > 0) ||
+      (Array.isArray(pkg.transactions) && pkg.transactions.length > 0) ||
+      (Array.isArray(pkg.budgets) && pkg.budgets.length > 0);
+
+    if (!hasCloudState) return;
+
+    if (Array.isArray(pkg.transactions)) setTransactions(pkg.transactions);
+    if (Array.isArray(pkg.accounts) && pkg.accounts.length > 0) setAccounts(pkg.accounts);
+    if (Array.isArray(pkg.budgets)) setBudgets(pkg.budgets);
+    if (Array.isArray(pkg.debts)) setDebts(pkg.debts);
+    if (Array.isArray(pkg.investments)) setInvestments(pkg.investments);
     if (pkg.emergencyConfig) setEmergencyConfig(pkg.emergencyConfig);
-    if (pkg.emergencyTransactions && pkg.emergencyTransactions.length > 0) setEmergencyTransactions(pkg.emergencyTransactions);
-    if (pkg.recurringTransactions && pkg.recurringTransactions.length > 0) setRecurringTransactions(pkg.recurringTransactions);
-    if (pkg.savingsGoals && pkg.savingsGoals.length > 0) setSavingsGoals(pkg.savingsGoals);
+    if (Array.isArray(pkg.emergencyTransactions)) setEmergencyTransactions(pkg.emergencyTransactions);
+    if (Array.isArray(pkg.recurringTransactions)) setRecurringTransactions(pkg.recurringTransactions);
+    if (Array.isArray(pkg.savingsGoals)) setSavingsGoals(pkg.savingsGoals);
   };
 
   useEffect(() => {
@@ -1507,19 +1503,76 @@ export default function App() {
     });
   };
 
-  // Reset to clean starting state (All 0)
-  const handleResetData = () => {
-    setResetConfirmText('');
-    setShowResetDataModal(true);
+  // AI category consolidation handler: merges overly-specific transaction categories into a master category
+  const handleConsolidateCategories = (sourceCategories: string[], targetCategory: string) => {
+    const cleanTarget = targetCategory.trim();
+    if (!cleanTarget || !Array.isArray(sourceCategories) || sourceCategories.length === 0) return;
+
+    const sourceLowerSet = new Set(
+      sourceCategories
+        .map((s) => String(s || '').trim().toLowerCase())
+        .filter((s) => s && s !== cleanTarget.toLowerCase())
+    );
+
+    if (sourceLowerSet.size === 0) return;
+
+    const affectedTxCount = transactions.filter((t) =>
+      sourceLowerSet.has(String(t.category || '').trim().toLowerCase())
+    ).length;
+
+    setTransactions((prev) =>
+      prev.map((t) =>
+        sourceLowerSet.has(String(t.category || '').trim().toLowerCase())
+          ? { ...t, category: cleanTarget }
+          : t
+      )
+    );
+
+    setBudgets((prev) => {
+      let extraLimit = 0;
+      let inferredType: CategoryBudget['type'] = 'expense';
+
+      const remaining = prev.filter((b) => {
+        const lowerCat = String(b.category || '').trim().toLowerCase();
+        if (sourceLowerSet.has(lowerCat)) {
+          extraLimit += Number(b.limit) || 0;
+          inferredType = b.type;
+          return false;
+        }
+        return true;
+      });
+
+      const targetLower = cleanTarget.toLowerCase();
+      const hasTarget = remaining.some((b) => String(b.category || '').trim().toLowerCase() === targetLower);
+
+      if (hasTarget) {
+        return remaining.map((b) =>
+          String(b.category || '').trim().toLowerCase() === targetLower
+            ? { ...b, limit: (Number(b.limit) || 0) + extraLimit }
+            : b
+        );
+      }
+
+      if (extraLimit > 0) {
+        return [...remaining, { category: cleanTarget, type: inferredType, limit: extraLimit }];
+      }
+
+      return remaining;
+    });
+
+    showToast({
+      type: 'success',
+      title: 'Kategori Berhasil Digabungkan',
+      message: `${sourceLowerSet.size} kategori (${affectedTxCount} transaksi) digabungkan ke kategori master "${cleanTarget}".`,
+      duration: 4500,
+    });
   };
 
-  const executeResetData = () => {
-    if (resetConfirmText.trim() !== 'HAPUS') return;
-
+  const getDefaultCleanStarterData = () => {
     const cleanAccounts: Account[] = [
-      { id: 'acc-1', name: 'Dompet Tunai', type: 'cash', startingBalance: 0, currentBalance: 0 },
-      { id: 'acc-2', name: 'Rekening Bank', type: 'bank', startingBalance: 0, currentBalance: 0 },
-      { id: 'acc-3', name: 'Gopay / E-Wallet', type: 'e-wallet', startingBalance: 0, currentBalance: 0 },
+      { id: 'acc-1', name: 'Dompet Tunai', type: 'cash', startingBalance: 0, currentBalance: 0, coaCode: '1100' },
+      { id: 'acc-2', name: 'Rekening Bank', type: 'bank', startingBalance: 0, currentBalance: 0, coaCode: '1200' },
+      { id: 'acc-3', name: 'Gopay / E-Wallet', type: 'e-wallet', startingBalance: 0, currentBalance: 0, coaCode: '1300' },
     ];
     const cleanBudgets: CategoryBudget[] = [
       { category: 'Makanan', type: 'expense', limit: 0 },
@@ -1527,35 +1580,105 @@ export default function App() {
       { category: 'Hiburan', type: 'expense', limit: 0 },
       { category: 'Utilitas & Tagihan', type: 'expense', limit: 0 },
       { category: 'Belanja Bulanan', type: 'expense', limit: 0 },
+      { category: 'Tabungan Darurat', type: 'saving', limit: 0 },
+      { category: 'Investasi Saham', type: 'investment', limit: 0 },
     ];
     const cleanEmergencyConfig: EmergencyFundConfig = {
       jobStability: 'medium',
       dependents: 0,
       monthlyExpense: 0,
     };
+    return { cleanAccounts, cleanBudgets, cleanEmergencyConfig };
+  };
 
-    setTransactions([]);
-    setAccounts(cleanAccounts);
-    setBudgets(cleanBudgets);
-    setDebts([]);
-    setInvestments([]);
-    setEmergencyConfig(cleanEmergencyConfig);
-    setEmergencyTransactions([]);
-    setActiveTab('dashboard');
-    
-    if (currentUser) {
-      const username = currentUser.username;
-      secureStorage.setItem(`fin_${username}_transactions`, JSON.stringify([]));
-      secureStorage.setItem(`fin_${username}_accounts`, JSON.stringify(cleanAccounts));
-      secureStorage.setItem(`fin_${username}_budgets`, JSON.stringify(cleanBudgets));
-      secureStorage.setItem(`fin_${username}_debts`, JSON.stringify([]));
-      secureStorage.setItem(`fin_${username}_investments`, JSON.stringify([]));
-      secureStorage.setItem(`fin_${username}_emergency_config`, JSON.stringify(cleanEmergencyConfig));
-      secureStorage.setItem(`fin_${username}_emergency_transactions`, JSON.stringify([]));
-    }
-
-    setShowResetDataModal(false);
+  // Reset to clean starting state (Delete all old transactions & user records, keep only clean default data with 0 balances)
+  const handleResetData = () => {
     setResetConfirmText('');
+    setShowResetDataModal(true);
+  };
+
+  const executeResetData = async () => {
+    if (resetConfirmText.trim() !== 'HAPUS' || isResettingData) return;
+
+    setIsResettingData(true);
+    try {
+      const { cleanAccounts, cleanBudgets, cleanEmergencyConfig } = getDefaultCleanStarterData();
+
+      // 1. Wipe all historical/transactional states and restore only clean default starter data
+      setTransactions([]);
+      setAccounts(cleanAccounts);
+      setBudgets(cleanBudgets);
+      setDebts([]);
+      setInvestments([]);
+      setRecurringTransactions([]);
+      setSavingsGoals([]);
+      setEmergencyConfig(cleanEmergencyConfig);
+      setEmergencyTransactions([]);
+      setMasterCategories(DEFAULT_CATEGORY_HIERARCHY);
+      setActiveTab('dashboard');
+
+      // 2. Reset auxiliary master COA, logs, and investment goals back to clean default state
+      saveStoredCoaList(DEFAULT_COA_LIST);
+      clearMasterChangeLogs();
+      secureStorage.setItem('nusantara_investment_goals', JSON.stringify([]));
+      window.dispatchEvent(new CustomEvent('nusantara:data-reset'));
+
+      // 3. Persist clean state synchronously to encrypted LocalStorage & immediately sync wipe to Cloud DB
+      if (currentUser) {
+        const username = currentUser.username;
+        const activeUserId = currentUser.uid || (currentUser as any).id || `user-${username}`;
+
+        secureStorage.setItem(`fin_${username}_transactions`, JSON.stringify([]));
+        secureStorage.setItem(`fin_${username}_accounts`, JSON.stringify(cleanAccounts));
+        secureStorage.setItem(`fin_${username}_budgets`, JSON.stringify(cleanBudgets));
+        secureStorage.setItem(`fin_${username}_debts`, JSON.stringify([]));
+        secureStorage.setItem(`fin_${username}_investments`, JSON.stringify([]));
+        secureStorage.setItem(`fin_${username}_recurring_transactions`, JSON.stringify([]));
+        secureStorage.setItem(`fin_${username}_savings_goals`, JSON.stringify([]));
+        secureStorage.setItem(`fin_${username}_emergency_config`, JSON.stringify(cleanEmergencyConfig));
+        secureStorage.setItem(`fin_${username}_emergency_transactions`, JSON.stringify([]));
+        saveStoredCategories(DEFAULT_CATEGORY_HIERARCHY, username);
+
+        const cleanPayload = {
+          transactions: [],
+          accounts: cleanAccounts,
+          budgets: cleanBudgets,
+          debts: [],
+          investments: [],
+          recurringTransactions: [],
+          savingsGoals: [],
+          emergencyConfig: cleanEmergencyConfig,
+          emergencyTransactions: [],
+          userFullName: currentUser.fullName,
+          username: currentUser.username
+        };
+
+        await syncToPostgres(cleanPayload, activeUserId);
+
+        if (cloudSync) {
+          uploadFinancesToSheets({
+            transactions: [],
+            accounts: cleanAccounts,
+            budgets: cleanBudgets,
+            debts: [],
+            investments: [],
+            emergencyFund: cleanEmergencyConfig,
+            emergencyTransactions: []
+          }).catch(() => {});
+        }
+      }
+
+      setShowResetDataModal(false);
+      setResetConfirmText('');
+      showToast({
+        type: 'success',
+        title: 'Data Berhasil Direset ke Awal',
+        message: 'Seluruh transaksi lama, utang, investasi, dan target telah dihapus. Hanya data default (saldo Rp 0) yang dipertahankan.',
+        duration: 5000
+      });
+    } finally {
+      setIsResettingData(false);
+    }
   };
 
   const handleLoginSuccess = (user: User, dataChoice: 'empty' | 'sample') => {
@@ -1571,34 +1694,42 @@ export default function App() {
         setBudgets(INITIAL_BUDGETS);
         setDebts(INITIAL_DEBTS);
         setInvestments(INITIAL_INVESTMENTS);
+        setRecurringTransactions(INITIAL_RECURRING_TRANSACTIONS);
+        setSavingsGoals([
+          {
+            id: 'goal-1',
+            title: 'Dana Liburan Akhir Tahun',
+            targetAmount: 15000000,
+            currentAmount: 6500000,
+            targetDate: '2026-12-25',
+            category: 'Liburan',
+            notes: 'Target menabung bulanan Rp 1.500.000'
+          },
+          {
+            id: 'goal-2',
+            title: 'DP Rumah Impian',
+            targetAmount: 100000000,
+            currentAmount: 42000000,
+            targetDate: '2028-06-01',
+            category: 'Rumah',
+            notes: 'Alokasi dari bonus tahunan & simpanan rutin'
+          }
+        ]);
         setEmergencyConfig(INITIAL_EMERGENCY_CONFIG);
         setEmergencyTransactions(INITIAL_EMERGENCY_TXS);
       } else {
-        const cleanAccounts: Account[] = [
-          { id: 'acc-1', name: 'Dompet Tunai', type: 'cash', startingBalance: 0, currentBalance: 0 },
-          { id: 'acc-2', name: 'Rekening Bank', type: 'bank', startingBalance: 0, currentBalance: 0 },
-          { id: 'acc-3', name: 'Gopay / E-Wallet', type: 'e-wallet', startingBalance: 0, currentBalance: 0 },
-        ];
-        const cleanBudgets: CategoryBudget[] = [
-          { category: 'Makanan', type: 'expense', limit: 0 },
-          { category: 'Transportasi', type: 'expense', limit: 0 },
-          { category: 'Hiburan', type: 'expense', limit: 0 },
-          { category: 'Utilitas & Tagihan', type: 'expense', limit: 0 },
-          { category: 'Belanja Bulanan', type: 'expense', limit: 0 },
-        ];
-        const cleanEmergencyConfig: EmergencyFundConfig = {
-          jobStability: 'medium',
-          dependents: 0,
-          monthlyExpense: 0,
-        };
+        const { cleanAccounts, cleanBudgets, cleanEmergencyConfig } = getDefaultCleanStarterData();
 
         setTransactions([]);
         setAccounts(cleanAccounts);
         setBudgets(cleanBudgets);
         setDebts([]);
         setInvestments([]);
+        setRecurringTransactions([]);
+        setSavingsGoals([]);
         setEmergencyConfig(cleanEmergencyConfig);
         setEmergencyTransactions([]);
+        secureStorage.setItem('nusantara_investment_goals', JSON.stringify([]));
       }
     } else {
       setTransactions(JSON.parse(secureStorage.getItem(`fin_${username}_transactions`) || '[]'));
@@ -1606,6 +1737,8 @@ export default function App() {
       setBudgets(JSON.parse(secureStorage.getItem(`fin_${username}_budgets`) || '[]'));
       setDebts(JSON.parse(secureStorage.getItem(`fin_${username}_debts`) || '[]'));
       setInvestments(JSON.parse(secureStorage.getItem(`fin_${username}_investments`) || '[]'));
+      setRecurringTransactions(JSON.parse(secureStorage.getItem(`fin_${username}_recurring_transactions`) || '[]'));
+      setSavingsGoals(JSON.parse(secureStorage.getItem(`fin_${username}_savings_goals`) || '[]'));
       setEmergencyConfig(JSON.parse(secureStorage.getItem(`fin_${username}_emergency_config`) || '{"jobStability":"medium","dependents":0,"monthlyExpense":0}'));
       setEmergencyTransactions(JSON.parse(secureStorage.getItem(`fin_${username}_emergency_transactions`) || '[]'));
     }
@@ -1629,8 +1762,11 @@ export default function App() {
     setBudgets([]);
     setDebts([]);
     setInvestments([]);
+    setRecurringTransactions([]);
+    setSavingsGoals([]);
     setEmergencyConfig({ jobStability: 'medium', dependents: 0, monthlyExpense: 0 });
     setEmergencyTransactions([]);
+    setMasterCategories(DEFAULT_CATEGORY_HIERARCHY);
     setShowLogoutModal(false);
     setMobileMenuOpen(false);
   };
@@ -2131,7 +2267,9 @@ export default function App() {
                     emergencyConfig={emergencyConfig}
                     emergencyBalance={totalEmergencyBalance}
                     investments={investments}
+                    masterCategories={masterCategories}
                     onApplyBudgetSuggestion={handleApplyBudgetSuggestion}
+                    onConsolidateCategories={handleConsolidateCategories}
                   />
                 )}
               </motion.div>
@@ -2202,20 +2340,27 @@ export default function App() {
                 <div>
                   <h3 className="font-extrabold text-slate-900 dark:text-slate-100 text-base">Reset Seluruh Data Keuangan</h3>
                   <p className="text-xs text-slate-500 dark:text-slate-400 font-medium">
-                    Tindakan ini akan mengosongkan seluruh jurnal transaksi, utang, dan saldo akun Anda.
+                    Menghapus seluruh transaksi lama, utang, investasi, transaksi berulang, dan target, serta menyisakan data default awal (saldo Rp 0).
                   </p>
                 </div>
               </div>
 
+              <div className="p-3 bg-slate-50 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700 rounded-xl text-[11px] text-slate-600 dark:text-slate-300 space-y-1">
+                <p className="font-bold text-slate-800 dark:text-slate-200">Yang akan dipertahankan (kondisi awal Rp 0):</p>
+                <p>• Akun default (Dompet Tunai, Rekening Bank, Gopay / E-Wallet) saldo Rp 0</p>
+                <p>• Kategori master, COA standar, &amp; anggaran default limit Rp 0</p>
+              </div>
+
               <div className="space-y-3">
                 <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed font-medium">
-                  Untuk mengonfirmasi penghapusan permanen, ketik kata <strong className="text-rose-600 font-black">HAPUS</strong> di bawah ini:
+                  Untuk mengonfirmasi penghapusan permanen (lokal &amp; cloud), ketik kata <strong className="text-rose-600 font-black">HAPUS</strong> di bawah ini:
                 </p>
                 <input
                   type="text"
                   placeholder="Ketik HAPUS"
                   value={resetConfirmText}
                   onChange={(e) => setResetConfirmText(e.target.value)}
+                  disabled={isResettingData}
                   className="w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl text-xs font-bold text-slate-900 dark:text-white uppercase focus:outline-none focus:ring-2 focus:ring-rose-500/50"
                 />
               </div>
@@ -2226,16 +2371,17 @@ export default function App() {
                     setShowResetDataModal(false);
                     setResetConfirmText('');
                   }}
-                  className="px-4 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300 font-bold text-xs hover:bg-slate-100 dark:hover:bg-slate-800 transition cursor-pointer"
+                  disabled={isResettingData}
+                  className="px-4 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300 font-bold text-xs hover:bg-slate-100 dark:hover:bg-slate-800 transition cursor-pointer disabled:opacity-50"
                 >
                   Batal
                 </button>
                 <button
-                  disabled={resetConfirmText.trim() !== 'HAPUS'}
+                  disabled={resetConfirmText.trim() !== 'HAPUS' || isResettingData}
                   onClick={executeResetData}
                   className="px-4 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-700 disabled:bg-slate-300 dark:disabled:bg-slate-800 text-white font-bold text-xs shadow-md transition cursor-pointer disabled:cursor-not-allowed"
                 >
-                  Reset Semua Data
+                  {isResettingData ? 'Mereset Data...' : 'Reset Semua Data'}
                 </button>
               </div>
             </div>

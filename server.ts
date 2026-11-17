@@ -1033,6 +1033,393 @@ Pastikan respons murni JSON valid.`;
     }
   });
 
+  function generateFallbackCategoryConsolidation(transactions: any[], masterCategoryNames: string[] = []) {
+    const txList = Array.isArray(transactions) ? transactions : [];
+    const masterSet = new Set(
+      (masterCategoryNames || []).map((c: string) => String(c || '').trim().toLowerCase()).filter(Boolean)
+    );
+    const pickMaster = (candidates: string[], fallbackName: string): string => {
+      for (const cand of candidates) {
+        const found = (masterCategoryNames || []).find(
+          (m: string) => m.trim().toLowerCase() === cand.toLowerCase()
+        );
+        if (found) return found;
+      }
+      return fallbackName;
+    };
+
+    const statsMap = new Map<string, {
+      name: string;
+      type: 'expense' | 'income' | 'saving' | 'investment';
+      txCount: number;
+      totalAmount: number;
+      sampleDescriptions: string[];
+    }>();
+
+    for (const tx of txList) {
+      const rawCat = String(tx?.category || 'Lainnya').trim();
+      const txType = (tx?.type || 'expense') as 'expense' | 'income' | 'saving' | 'investment';
+      if (rawCat === 'Mutasi Masuk' || rawCat === 'Mutasi Keluar') continue;
+      const key = `${txType}::${rawCat}`;
+      const existing = statsMap.get(key) || {
+        name: rawCat,
+        type: txType,
+        txCount: 0,
+        totalAmount: 0,
+        sampleDescriptions: [],
+      };
+      existing.txCount += 1;
+      existing.totalAmount += Math.abs(Number(tx?.amount) || 0);
+      if (tx?.description && existing.sampleDescriptions.length < 3 && !existing.sampleDescriptions.includes(tx.description)) {
+        existing.sampleDescriptions.push(String(tx.description));
+      }
+      statsMap.set(key, existing);
+    }
+
+    const allCategoryStats = Array.from(statsMap.values());
+    const uniqueNamesCount = new Set(allCategoryStats.map(s => s.name.toLowerCase())).size;
+
+    const rules: Array<{
+      targetCandidates: string[];
+      fallbackTarget: string;
+      type: 'expense' | 'income' | 'saving' | 'investment';
+      keywords: RegExp;
+      reason: string;
+    }> = [
+      {
+        targetCandidates: ['Makanan', 'Makanan & Minuman'],
+        fallbackTarget: 'Makanan',
+        type: 'expense',
+        keywords: /(kopi|coffee|starbucks|kenangan|janji\s*jiwa|boba|teh|minum|cafe|kafe|resto|warung|makan|sarapan|siang|malam|kuliner|jajan|snack|cemilan|gofood|grabfood|shopeefood|bakery|martabak|nasi|mie|bakso|ayam|sate|food)/i,
+        reason: 'Kategori konsumsi harian (kopi, jajan, makan siang, pesan antar) lebih efisien digabung ke kategori master Makanan agar kontrol anggaran & rasio pengeluaran lebih akurat.',
+      },
+      {
+        targetCandidates: ['Transportasi'],
+        fallbackTarget: 'Transportasi',
+        type: 'expense',
+        keywords: /(bensin|bbm|pertamina|shell|parkir|tol|e-?toll|gojek|grab|maxim|ojol|ojek|taksi|bluebird|mrt|krl|lrt|transjakarta|busway|kereta|tiket|pesawat|servis\s*motor|servis\s*mobil|ganti\s*oli|cuci\s*mobil|transport)/i,
+        reason: 'Sub-pengeluaran mobilitas (bensin, parkir, tol, ojol, transportasi umum) sebaiknya disatukan ke kategori master Transportasi.',
+      },
+      {
+        targetCandidates: ['Utilitas & Tagihan', 'Tagihan'],
+        fallbackTarget: 'Utilitas & Tagihan',
+        type: 'expense',
+        keywords: /(listrik|pln|token|air|pdam|wifi|internet|indihome|biznet|myrepublic|pulsa|paket\s*data|kuota|telkomsel|xl|indosat|tri|smartfren|ipl|iuran|bpjs|pajak\s*kendaraan|pbb|gas|elpiji|tagihan|utilitas)/i,
+        reason: 'Tagihan rutin rumah tangga dan utilitas digital lebih mudah dipantau jatuh tempo dan trennya jika digabung ke Utilitas & Tagihan.',
+      },
+      {
+        targetCandidates: ['Hiburan'],
+        fallbackTarget: 'Hiburan',
+        type: 'expense',
+        keywords: /(netflix|spotify|youtube|disney|viu|vidio|bioskop|xxi|cgv|tiket\s*konser|game|steam|playstation|ps5|topup\s*game|nonton|karaoke|rekreasi|liburan|wisata|hotel|staycation|hobi|langganan|hiburan)/i,
+        reason: 'Berbagai langganan hiburan digital, rekreasi, dan hobi sebaiknya dikonsolidasikan ke kategori master Hiburan.',
+      },
+      {
+        targetCandidates: ['Belanja Bulanan', 'Kebutuhan Pokok', 'Belanja Online'],
+        fallbackTarget: 'Belanja Bulanan',
+        type: 'expense',
+        keywords: /(supermarket|alfamart|indomaret|superindo|hypermart|transmart|carrefour|lottemart|belanja|sabun|deterjen|skincare|kosmetik|shopee|tokopedia|lazada|blibli|tiktok\s*shop|pakaian|baju|sepatu|rumah\s*tangga)/i,
+        reason: 'Pembelian ritel, kebutuhan harian, dan e-commerce yang terpecah dapat digabungkan ke kategori master Belanja Bulanan.',
+      },
+      {
+        targetCandidates: ['Kesehatan'],
+        fallbackTarget: 'Kesehatan',
+        type: 'expense',
+        keywords: /(dokter|rumah\s*sakit|klinik|apotek|kimia\s*farma|halodoc|alodokter|obat|vitamin|suplemen|lab|tes\s*darah|checkup|gigi|optik|kacamata|gym|fitness|olahraga|medis|kesehatan)/i,
+        reason: 'Biaya medis, obat-obatan, dan kebugaran sebaiknya diringkas ke kategori master Kesehatan.',
+      },
+      {
+        targetCandidates: ['Pendidikan'],
+        fallbackTarget: 'Pendidikan',
+        type: 'expense',
+        keywords: /(buku|gramedia|kursus|udemy|coursera|seminar|webinar|workshop|bootcamp|les|bimbel|spp|uang\s*kuliah|sekolah|ujian|sertifikasi|pendidikan)/i,
+        reason: 'Pengeluaran pengembangan diri, buku, dan biaya studi lebih rapi jika masuk ke kategori master Pendidikan.',
+      },
+      {
+        targetCandidates: ['Sosial'],
+        fallbackTarget: 'Sosial',
+        type: 'expense',
+        keywords: /(donasi|sedekah|infaq|zakat|amal|kitabisa|baznas|hadiah|kado|kondangan|sumbangan|sosial|traktir)/i,
+        reason: 'Aktivitas sosial, donasi, dan hadiah lebih mudah dilacak dalam satu kategori master Sosial.',
+      },
+      {
+        targetCandidates: ['Biaya Bank', 'Biaya Transaksi'],
+        fallbackTarget: 'Biaya Bank',
+        type: 'expense',
+        keywords: /(admin\s*bank|biaya\s*admin|biaya\s*transfer|bi-?fast|materai|pajak\s*bunga|denda|keterlambatan)/i,
+        reason: 'Biaya administrasi perbankan dan transfer kecil sebaiknya disatukan ke kategori master Biaya Bank.',
+      },
+      {
+        targetCandidates: ['Gaji Utama', 'Gaji'],
+        fallbackTarget: 'Gaji Utama',
+        type: 'income',
+        keywords: /(gaji|salary|payroll|thr|tunjangan|uang\s*makan\s*kantor)/i,
+        reason: 'Variasi nama pemasukan gaji dan tunjangan kerja tetap lebih konsisten bila disatukan ke kategori master Gaji Utama.',
+      },
+      {
+        targetCandidates: ['Sampingan'],
+        fallbackTarget: 'Sampingan',
+        type: 'income',
+        keywords: /(freelance|proyek|project|komisi|fee|honor|side\s*job|usaha|jualan|bisnis|sampingan)/i,
+        reason: 'Sumber penghasilan tambahan di luar gaji utama dapat digabung menjadi kategori master Sampingan.',
+      },
+    ];
+
+    const groupsMap = new Map<string, {
+      targetMasterCategory: string;
+      transactionType: 'expense' | 'income' | 'saving' | 'investment';
+      sourceCategories: any[];
+      reason: string;
+      confidence: 'high' | 'medium';
+    }>();
+
+    const assignedSourceKeys = new Set<string>();
+
+    for (const stat of allCategoryStats) {
+      const catLower = stat.name.toLowerCase();
+      const combinedText = `${stat.name} ${stat.sampleDescriptions.join(' ')}`;
+
+      // Check matching rule
+      for (const rule of rules) {
+        if (stat.type !== rule.type) continue;
+        const targetName = pickMaster(rule.targetCandidates, rule.fallbackTarget);
+        const targetLower = targetName.toLowerCase();
+
+        // Skip if already identical to the chosen master category
+        if (catLower === targetLower) continue;
+
+        const isCanonicalAnotherMaster = masterSet.has(catLower) && !rule.targetCandidates.some(c => c.toLowerCase() === catLower);
+        if (isCanonicalAnotherMaster) continue;
+
+        const matchesCategoryName = rule.keywords.test(stat.name);
+        const matchesSampleAndNotMaster = !masterSet.has(catLower) && rule.keywords.test(combinedText);
+
+        if (matchesCategoryName || matchesSampleAndNotMaster) {
+          const groupKey = `${stat.type}::${targetName}`;
+          const grp = groupsMap.get(groupKey) || {
+            targetMasterCategory: targetName,
+            transactionType: stat.type,
+            sourceCategories: [],
+            reason: rule.reason,
+            confidence: matchesCategoryName ? 'high' : 'medium',
+          };
+          grp.sourceCategories.push({
+            name: stat.name,
+            txCount: stat.txCount,
+            totalAmount: stat.totalAmount,
+            sampleDescriptions: stat.sampleDescriptions,
+          });
+          groupsMap.set(groupKey, grp);
+          assignedSourceKeys.add(`${stat.type}::${stat.name}`);
+          break;
+        }
+      }
+    }
+
+    // Also catch remaining overly specific micro-categories (1-2 transactions, not in master categories)
+    for (const stat of allCategoryStats) {
+      const key = `${stat.type}::${stat.name}`;
+      if (assignedSourceKeys.has(key)) continue;
+      if (masterSet.has(stat.name.toLowerCase())) continue;
+
+      if (stat.txCount <= 2) {
+        const targetName =
+          stat.type === 'income'
+            ? pickMaster(['Pendapatan Lain-Lain', 'Sampingan'], 'Pendapatan Lain-Lain')
+            : stat.type === 'saving'
+            ? pickMaster(['Tabungan Darurat'], 'Tabungan Darurat')
+            : stat.type === 'investment'
+            ? pickMaster(['Investasi Saham'], 'Investasi Saham')
+            : pickMaster(['Biaya Lain-Lain', 'Pengeluaran Lainnya'], 'Biaya Lain-Lain');
+
+        if (stat.name.toLowerCase() !== targetName.toLowerCase()) {
+          const groupKey = `${stat.type}::${targetName}`;
+          const grp = groupsMap.get(groupKey) || {
+            targetMasterCategory: targetName,
+            transactionType: stat.type,
+            sourceCategories: [],
+            reason: `Kategori spesifik berfrekuensi rendah (hanya ${stat.txCount} transaksi) belum terdaftar di Master Kategori. Menggabungkannya ke ${targetName} menyederhanakan laporan & anggaran.`,
+            confidence: 'medium' as const,
+          };
+          grp.sourceCategories.push({
+            name: stat.name,
+            txCount: stat.txCount,
+            totalAmount: stat.totalAmount,
+            sampleDescriptions: stat.sampleDescriptions,
+          });
+          groupsMap.set(groupKey, grp);
+        }
+      }
+    }
+
+    const consolidationGroups = Array.from(groupsMap.values())
+      .filter(g => g.sourceCategories.length > 0)
+      .map((g, idx) => ({
+        id: `merge-grp-${idx + 1}`,
+        targetMasterCategory: g.targetMasterCategory,
+        transactionType: g.transactionType,
+        sourceCategories: g.sourceCategories,
+        affectedTxCount: g.sourceCategories.reduce((s, c) => s + c.txCount, 0),
+        affectedTotalAmount: g.sourceCategories.reduce((s, c) => s + c.totalAmount, 0),
+        confidence: g.confidence,
+        reason: g.reason,
+      }))
+      .sort((a, b) => b.affectedTxCount - a.affectedTxCount);
+
+    const mergedSourceCount = consolidationGroups.reduce((s, g) => s + g.sourceCategories.length, 0);
+    const targetNamesNewCount = consolidationGroups.filter(
+      g => !allCategoryStats.some(st => st.name.toLowerCase() === g.targetMasterCategory.toLowerCase())
+    ).length;
+    const recommendedAfterMerge = Math.max(
+      consolidationGroups.length > 0 ? 1 : uniqueNamesCount,
+      uniqueNamesCount - mergedSourceCount + targetNamesNewCount
+    );
+    const efficiencyGainPercent = uniqueNamesCount > 0
+      ? Math.max(0, Math.round(((uniqueNamesCount - recommendedAfterMerge) / uniqueNamesCount) * 100))
+      : 0;
+
+    return {
+      totalUniqueCategories: uniqueNamesCount,
+      totalTransactionsScanned: txList.length,
+      recommendedMasterCountAfterMerge: recommendedAfterMerge,
+      efficiencyGainPercent,
+      overallSummary:
+        consolidationGroups.length > 0
+          ? `Pemindaian ${txList.length} transaksi menemukan ${mergedSourceCount} kategori terlalu spesifik/terpecah yang dapat digabungkan ke ${consolidationGroups.length} kategori master sehingga struktur kategori menjadi ${efficiencyGainPercent}% lebih ringkas.`
+          : `Struktur ${uniqueNamesCount} kategori dari ${txList.length} transaksi sudah selaras dengan kategori master. Tidak ditemukan fragmentasi kategori yang perlu digabungkan.`,
+      consolidationGroups,
+      isFallback: true,
+    };
+  }
+
+  // API Route - AI Transaction Category Consolidation Scanner (Gemini Powered)
+  app.post("/api/analyze-category-consolidation", async (req, res) => {
+    const { transactions = [], masterCategoryNames = [], budgets = [] } = req.body || {};
+    try {
+      const txList = Array.isArray(transactions) ? transactions : [];
+      if (txList.length === 0) {
+        return res.json({
+          totalUniqueCategories: 0,
+          totalTransactionsScanned: 0,
+          recommendedMasterCountAfterMerge: 0,
+          efficiencyGainPercent: 0,
+          overallSummary: "Belum ada transaksi untuk dipindai. Tambahkan transaksi terlebih dahulu untuk menganalisis efisiensi kategori.",
+          consolidationGroups: [],
+        });
+      }
+
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey) {
+        return res.json(generateFallbackCategoryConsolidation(txList, masterCategoryNames));
+      }
+
+      const categorySummaryMap = new Map<string, {
+        category: string;
+        type: string;
+        txCount: number;
+        totalAmount: number;
+        sampleDescriptions: string[];
+      }>();
+
+      for (const tx of txList) {
+        const cat = String(tx?.category || 'Lainnya').trim();
+        const type = String(tx?.type || 'expense');
+        if (cat === 'Mutasi Masuk' || cat === 'Mutasi Keluar') continue;
+        const key = `${type}::${cat}`;
+        const prev = categorySummaryMap.get(key) || {
+          category: cat,
+          type,
+          txCount: 0,
+          totalAmount: 0,
+          sampleDescriptions: [],
+        };
+        prev.txCount += 1;
+        prev.totalAmount += Math.abs(Number(tx?.amount) || 0);
+        if (tx?.description && prev.sampleDescriptions.length < 3 && !prev.sampleDescriptions.includes(tx.description)) {
+          prev.sampleDescriptions.push(String(tx.description));
+        }
+        categorySummaryMap.set(key, prev);
+      }
+
+      const categoryStats = Array.from(categorySummaryMap.values());
+
+      const ai = new GoogleGenAI({
+        apiKey,
+        httpOptions: {
+          headers: {
+            'User-Agent': 'aistudio-build',
+          }
+        }
+      });
+
+      const prompt = `Anda adalah Arsitek Akuntansi Pribadi & Analis Efisiensi Data Keuangan AI.
+Tugas Anda adalah memindai ringkasan kategori dari seluruh transaksi pengguna untuk menemukan kategori yang:
+1. Terlalu spesifik / granular (contoh: "Kopi Kenangan", "Boba", "Parkir Kantor", "Token Listrik Rumah", "GrabFood Malam") yang seharusnya digabung ke kategori master yang lebih efisien.
+2. Duplikat semantik atau variasi ejaan (contoh: "Makan Siang" & "Kuliner" -> "Makanan"; "Ojol" & "Bensin" -> "Transportasi").
+3. Kategori mikro berfrekuensi rendah (1-2 transaksi) yang membuat grafik dan anggaran menjadi terpecah.
+
+Daftar Master Kategori Standar Pengguna (PRIORITASKAN target penggabungan dari daftar ini jika cocok):
+${JSON.stringify(masterCategoryNames || [], null, 2)}
+
+Anggaran Kategori Saat Ini:
+${JSON.stringify(budgets || [], null, 2)}
+
+Ringkasan Seluruh Kategori Transaksi Terdeteksi:
+${JSON.stringify(categoryStats, null, 2)}
+
+Aturan Ketat:
+- JANGAN menyarankan penggabungan jika nama kategori sumber sama persis dengan targetMasterCategory.
+- Kelompokkan berdasarkan targetMasterCategory dan transactionType ('expense' | 'income' | 'saving' | 'investment').
+- Jika struktur kategori sudah rapi dan tidak ada yang perlu digabungkan, kembalikan "consolidationGroups": [].
+- Kembalikan HANYA JSON murni valid sesuai format berikut:
+
+{
+  "totalUniqueCategories": ${new Set(categoryStats.map(c => c.category.toLowerCase())).size},
+  "totalTransactionsScanned": ${txList.length},
+  "recommendedMasterCountAfterMerge": 5,
+  "efficiencyGainPercent": 35,
+  "overallSummary": "Ringkasan eksekutif dalam bahasa Indonesia mengenai temuan fragmentasi kategori dan manfaat penyederhanaannya.",
+  "consolidationGroups": [
+    {
+      "id": "merge-grp-1",
+      "targetMasterCategory": "Makanan",
+      "transactionType": "expense",
+      "sourceCategories": [
+        {
+          "name": "Kopi Kenangan",
+          "txCount": 3,
+          "totalAmount": 90000,
+          "sampleDescriptions": ["Kopi susu gula aren"]
+        }
+      ],
+      "affectedTxCount": 3,
+      "affectedTotalAmount": 90000,
+      "confidence": "high",
+      "reason": "Alasan jelas mengapa kategori-kategori ini lebih efisien digabung ke kategori master target."
+    }
+  ]
+}`;
+
+      const response = await ai.models.generateContent({
+        model: "gemini-2.5-flash",
+        contents: prompt,
+        config: {
+          responseMimeType: "application/json",
+        }
+      });
+
+      const resultText = response.text || "{}";
+      const parsed = JSON.parse(resultText);
+      if (!Array.isArray(parsed.consolidationGroups)) {
+        return res.json(generateFallbackCategoryConsolidation(txList, masterCategoryNames));
+      }
+      res.json(parsed);
+    } catch (error: any) {
+      console.log("[AI Category Consolidation] Using rules-based fallback response.");
+      res.json(generateFallbackCategoryConsolidation(transactions, masterCategoryNames));
+    }
+  });
+
   // Vite integration
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({

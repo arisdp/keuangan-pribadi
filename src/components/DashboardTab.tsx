@@ -2689,35 +2689,74 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
         
         {/* CARD 1: TARGET TABUNGAN (GOAL TRACKER) */}
-        <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4 animate-fadeIn transition-all duration-300 hover:shadow-md hover:border-emerald-300 flex flex-col justify-between">
-          <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-            <div className="flex items-center gap-2.5">
-              <div className="p-2.5 bg-emerald-50 text-emerald-600 rounded-xl">
-                <Target className="h-5 w-5" />
+        <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm space-y-4 animate-fadeIn transition-all duration-300 hover:shadow-md hover:border-emerald-300 dark:hover:border-emerald-700 flex flex-col justify-between">
+          <div className="space-y-3">
+            <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2.5 bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400 rounded-xl">
+                  <Target className="h-5 w-5" />
+                </div>
+                <div>
+                  <h3 className="font-black text-slate-800 dark:text-slate-100 text-xs uppercase tracking-wider">
+                    Target Tabungan (Goal Tracker)
+                  </h3>
+                  <p className="text-[11px] text-slate-400 font-medium">Progres visual kedekatan menuju target nominal impian Anda</p>
+                </div>
               </div>
-              <div>
-                <h3 className="font-black text-slate-800 text-xs uppercase tracking-wider">
-                  Target Tabungan (Goal Tracker)
-                </h3>
-                <p className="text-[11px] text-slate-400 font-medium">Progres pencapaian impian & target finansial Anda</p>
-              </div>
+              <button
+                onClick={handleOpenAddGoal}
+                className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-extrabold rounded-xl shadow-xs transition flex items-center gap-1.5 cursor-pointer shrink-0"
+              >
+                <Plus className="h-4 w-4" />
+                <span>Tambah Target</span>
+              </button>
             </div>
-            <button
-              onClick={handleOpenAddGoal}
-              className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-extrabold rounded-xl shadow-xs transition flex items-center gap-1.5 cursor-pointer shrink-0"
-            >
-              <Plus className="h-4 w-4" />
-              <span>Tambah Target</span>
-            </button>
+
+            {savingsGoals.length > 0 && (() => {
+              const totalGoalTarget = savingsGoals.reduce((sum, g) => sum + (g.targetAmount || 0), 0);
+              const totalGoalSaved = savingsGoals.reduce((sum, g) => sum + (g.currentAmount || 0), 0);
+              const overallGoalPct = totalGoalTarget > 0 ? Math.min(100, (totalGoalSaved / totalGoalTarget) * 100) : 0;
+              const completedCount = savingsGoals.filter(g => g.targetAmount > 0 && g.currentAmount >= g.targetAmount).length;
+
+              return (
+                <div className="p-3 bg-emerald-50/70 dark:bg-emerald-950/25 border border-emerald-200/80 dark:border-emerald-800/60 rounded-xl space-y-2">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="font-extrabold text-emerald-900 dark:text-emerald-200">
+                      Akumulasi Seluruh Target ({completedCount}/{savingsGoals.length} Tercapai)
+                    </span>
+                    <span className="font-mono font-black text-emerald-700 dark:text-emerald-300">
+                      {overallGoalPct.toFixed(1)}%
+                    </span>
+                  </div>
+                  <div
+                    role="progressbar"
+                    aria-label="Total progres seluruh target tabungan"
+                    aria-valuenow={Math.round(overallGoalPct)}
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    className="w-full h-2.5 bg-white/80 dark:bg-slate-800 rounded-full overflow-hidden border border-emerald-200/60 dark:border-emerald-800/50"
+                  >
+                    <div
+                      className="h-full rounded-full bg-gradient-to-r from-emerald-500 to-teal-500 transition-all duration-700 ease-out"
+                      style={{ width: `${overallGoalPct}%` }}
+                    />
+                  </div>
+                  <div className="flex items-center justify-between text-[10px] font-bold text-slate-600 dark:text-slate-300">
+                    <span>Terkumpul: <strong className="font-mono text-emerald-700 dark:text-emerald-300">{formatValue(totalGoalSaved)}</strong></span>
+                    <span>Total Target: <strong className="font-mono text-slate-800 dark:text-slate-100">{formatValue(totalGoalTarget)}</strong></span>
+                  </div>
+                </div>
+              );
+            })()}
           </div>
 
           {savingsGoals.length === 0 ? (
-            <div className="text-center py-10 border border-dashed border-slate-200 rounded-xl space-y-2.5 bg-slate-50/50">
-              <PiggyBank className="h-10 w-10 text-slate-300 mx-auto" />
-              <p className="text-xs text-slate-500 font-medium">Belum ada target tabungan yang dikonfigurasi.</p>
+            <div className="text-center py-10 border border-dashed border-slate-200 dark:border-slate-700 rounded-xl space-y-2.5 bg-slate-50/50 dark:bg-slate-800/30">
+              <PiggyBank className="h-10 w-10 text-slate-300 dark:text-slate-600 mx-auto" />
+              <p className="text-xs text-slate-500 dark:text-slate-400 font-medium">Belum ada target tabungan yang dikonfigurasi.</p>
               <button
                 onClick={handleOpenAddGoal}
-                className="text-xs text-emerald-600 font-bold hover:underline cursor-pointer"
+                className="text-xs text-emerald-600 dark:text-emerald-400 font-bold hover:underline cursor-pointer"
               >
                 + Buat Target Tabungan Pertama
               </button>
@@ -2725,9 +2764,10 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
           ) : (
             <div className="grid grid-cols-1 gap-3 max-h-[460px] overflow-y-auto pr-1">
               {savingsGoals.map((goal) => {
-                const pct = goal.targetAmount > 0 ? Math.min(100, (goal.currentAmount / goal.targetAmount) * 100) : 0;
+                const rawPct = goal.targetAmount > 0 ? (goal.currentAmount / goal.targetAmount) * 100 : 0;
+                const pct = Math.min(100, Math.max(0, rawPct));
                 const remaining = Math.max(0, goal.targetAmount - goal.currentAmount);
-                
+
                 // Calculate days left
                 let daysLeft = 0;
                 if (goal.targetDate) {
@@ -2735,26 +2775,57 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
                   daysLeft = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
                 }
 
+                const proximityMeta = pct >= 100
+                  ? {
+                      label: 'Target Terpenuhi',
+                      badgeClass: 'bg-emerald-100 dark:bg-emerald-900/60 text-emerald-800 dark:text-emerald-200',
+                      barClass: 'bg-gradient-to-r from-emerald-500 to-teal-500',
+                      pctTextClass: 'text-emerald-600 dark:text-emerald-400',
+                    }
+                  : pct >= 75
+                  ? {
+                      label: 'Hampir Tercapai',
+                      badgeClass: 'bg-blue-100 dark:bg-blue-900/60 text-blue-800 dark:text-blue-200',
+                      barClass: 'bg-gradient-to-r from-blue-500 to-emerald-500',
+                      pctTextClass: 'text-blue-600 dark:text-blue-400',
+                    }
+                  : pct >= 40
+                  ? {
+                      label: 'Berjalan Baik',
+                      badgeClass: 'bg-indigo-100 dark:bg-indigo-900/60 text-indigo-800 dark:text-indigo-200',
+                      barClass: 'bg-gradient-to-r from-indigo-500 to-blue-500',
+                      pctTextClass: 'text-indigo-600 dark:text-indigo-400',
+                    }
+                  : {
+                      label: 'Tahap Awal',
+                      badgeClass: 'bg-amber-100 dark:bg-amber-900/60 text-amber-800 dark:text-amber-200',
+                      barClass: 'bg-gradient-to-r from-amber-500 to-orange-500',
+                      pctTextClass: 'text-amber-600 dark:text-amber-400',
+                    };
+
                 return (
-                  <div key={goal.id} className="p-3.5 bg-slate-50/90 rounded-xl border border-slate-150 space-y-2.5 hover:bg-slate-100/90 transition flex flex-col justify-between">
+                  <div key={goal.id} className="p-4 bg-slate-50/90 dark:bg-slate-800/60 rounded-xl border border-slate-200/80 dark:border-slate-700/80 space-y-3 hover:bg-slate-100/80 dark:hover:bg-slate-800 transition flex flex-col justify-between">
                     <div className="flex items-start justify-between gap-2">
-                      <div>
+                      <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-1.5">
-                          <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 text-[9px] font-extrabold rounded-full uppercase">
+                          <span className="px-2 py-0.5 bg-emerald-100 dark:bg-emerald-950/70 text-emerald-800 dark:text-emerald-300 text-[9px] font-extrabold rounded-full uppercase">
                             {goal.category || 'Tabungan'}
+                          </span>
+                          <span className={`px-2 py-0.5 text-[9px] font-extrabold rounded-full uppercase ${proximityMeta.badgeClass}`}>
+                            {proximityMeta.label}
                           </span>
                           {goal.targetDate && (
                             <span className={`text-[9px] font-bold flex items-center gap-1 ${
-                              daysLeft < 0 ? 'text-rose-600' : daysLeft <= 30 ? 'text-amber-600' : 'text-slate-500'
+                              daysLeft < 0 ? 'text-rose-600 dark:text-rose-400' : daysLeft <= 30 ? 'text-amber-600 dark:text-amber-400' : 'text-slate-500 dark:text-slate-400'
                             }`}>
                               <Clock className="h-3 w-3" />
                               {daysLeft < 0 ? 'Lewat Batas' : `Sisa ${daysLeft} Hr`}
                             </span>
                           )}
                         </div>
-                        <h4 className="font-extrabold text-slate-800 text-xs mt-1.5 leading-snug">{goal.title}</h4>
+                        <h4 className="font-extrabold text-slate-800 dark:text-slate-100 text-xs mt-1.5 leading-snug truncate">{goal.title}</h4>
                       </div>
-                      
+
                       <div className="flex items-center gap-1 shrink-0">
                         <button
                           onClick={() => {
@@ -2785,33 +2856,46 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
                       </div>
                     </div>
 
-                    {/* Progress Bar */}
-                    <div className="space-y-1">
+                    {/* Visual Progress Bar */}
+                    <div className="space-y-1.5">
                       <div className="flex justify-between items-baseline text-[10px]">
-                        <span className="font-bold text-slate-600">
-                          Terkumpul: <strong className="text-emerald-600 font-mono">{formatValue(goal.currentAmount)}</strong>
+                        <span className="font-bold text-slate-600 dark:text-slate-300">
+                          Terkumpul: <strong className="text-emerald-600 dark:text-emerald-400 font-mono">{formatValue(goal.currentAmount)}</strong>
                         </span>
-                        <span className="font-bold text-slate-500">
-                          Target: <strong className="text-slate-700 font-mono">{formatValue(goal.targetAmount)}</strong>
+                        <span className="font-bold text-slate-500 dark:text-slate-400">
+                          Target: <strong className="text-slate-700 dark:text-slate-200 font-mono">{formatValue(goal.targetAmount)}</strong>
                         </span>
                       </div>
 
-                      <div className="w-full bg-slate-200 h-2.5 rounded-full overflow-hidden">
+                      <div className="relative">
                         <div
-                          className={`h-full rounded-full transition-all duration-500 ${
-                            pct >= 100
-                              ? 'bg-emerald-500'
-                              : pct >= 50
-                              ? 'bg-blue-500'
-                              : 'bg-amber-500'
-                          }`}
-                          style={{ width: `${pct}%` }}
-                        />
+                          role="progressbar"
+                          aria-label={`Progres ${goal.title}`}
+                          aria-valuenow={Math.round(pct)}
+                          aria-valuemin={0}
+                          aria-valuemax={100}
+                          className="w-full bg-slate-200 dark:bg-slate-700 h-3 rounded-full overflow-hidden relative shadow-inner"
+                        >
+                          <div
+                            className={`h-full rounded-full transition-all duration-700 ease-out ${proximityMeta.barClass}`}
+                            style={{ width: `${pct}%` }}
+                          />
+                          {/* Milestone ticks at 25%, 50%, 75% */}
+                          <div className="absolute inset-y-0 left-1/4 w-px bg-white/40 dark:bg-slate-900/40 pointer-events-none" />
+                          <div className="absolute inset-y-0 left-1/2 w-px bg-white/40 dark:bg-slate-900/40 pointer-events-none" />
+                          <div className="absolute inset-y-0 left-3/4 w-px bg-white/40 dark:bg-slate-900/40 pointer-events-none" />
+                        </div>
                       </div>
 
-                      <div className="flex justify-between items-center text-[9px] font-bold text-slate-400">
-                        <span>Progres: {pct.toFixed(1)}%</span>
-                        <span>{pct >= 100 ? 'Target Terpenuhi! 🎉' : `Kurang: ${formatValue(remaining)}`}</span>
+                      <div className="flex justify-between items-center text-[10px] font-bold">
+                        <span className={`font-mono font-black ${proximityMeta.pctTextClass}`}>
+                          {pct.toFixed(1)}% dari target
+                        </span>
+                        <span className="text-slate-500 dark:text-slate-400">
+                          {pct >= 100
+                            ? 'Target Nominal Tercapai!'
+                            : `Kurang ${formatValue(remaining)} (${(100 - pct).toFixed(1)}%)`}
+                        </span>
                       </div>
                     </div>
                   </div>
