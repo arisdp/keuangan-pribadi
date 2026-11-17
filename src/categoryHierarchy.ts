@@ -1,3 +1,6 @@
+import { secureStorage } from './utils/secureStorage';
+import { logger } from './utils/logger';
+
 export interface CategoryNode {
   id: string;
   name: string;
@@ -171,12 +174,12 @@ export const DEFAULT_CATEGORY_HIERARCHY: CategoryNode[] = [
 export function getStoredCategories(username?: string): CategoryNode[] {
   try {
     const key = username ? `fin_${username}_master_categories` : 'fin_default_master_categories';
-    const saved = localStorage.getItem(key);
+    const saved = secureStorage.getItem(key);
     if (saved) {
       return JSON.parse(saved);
     }
   } catch (err) {
-    console.error('Failed to load categories from storage', err);
+    logger.error('Failed to load categories from storage', err);
   }
   return DEFAULT_CATEGORY_HIERARCHY;
 }
@@ -184,9 +187,9 @@ export function getStoredCategories(username?: string): CategoryNode[] {
 export function saveStoredCategories(categories: CategoryNode[], username?: string) {
   try {
     const key = username ? `fin_${username}_master_categories` : 'fin_default_master_categories';
-    localStorage.setItem(key, JSON.stringify(categories));
+    secureStorage.setItem(key, JSON.stringify(categories));
   } catch (err) {
-    console.error('Failed to save categories to storage', err);
+    logger.error('Failed to save categories to storage', err);
   }
 }
 

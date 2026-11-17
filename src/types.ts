@@ -117,6 +117,14 @@ export interface Debt {
   category: string;
   dueDay?: number; // Hari jatuh tempo bulanan (1-31)
   dueDate?: string; // Tanggal Jatuh Tempo spesifik (YYYY-MM-DD)
+  // Optional KPR (Kredit Pemilikan Rumah) metadata
+  kprScheme?: 'annuity' | 'tiered' | 'flat';
+  propertyPrice?: number;
+  downPayment?: number;
+  tenorMonths?: number;
+  fixedRate?: number;
+  fixedYears?: number;
+  floatingRate?: number;
 }
 
 export interface DebtPayment {

@@ -1,4 +1,5 @@
 import { showToast } from './utils/toast';
+import { secureStorage } from './utils/secureStorage';
 
 export const DEFAULT_POSTGRES_PROVIDER = 'Neon PostgreSQL';
 export const DEFAULT_POSTGRES_SSL_MODE: PostgresSslMode = 'require';
@@ -116,7 +117,7 @@ const MAX_CLIENT_LOGS = 20;
 
 export const logClientInteraction = (entry: Omit<ClientLogEntry, 'id' | 'timestamp'>) => {
   try {
-    const existingStr = localStorage.getItem(CLIENT_LOGS_KEY);
+    const existingStr = secureStorage.getItem(CLIENT_LOGS_KEY);
     const logs: ClientLogEntry[] = existingStr ? JSON.parse(existingStr) : [];
     const newEntry: ClientLogEntry = {
       id: `clog-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
@@ -127,7 +128,7 @@ export const logClientInteraction = (entry: Omit<ClientLogEntry, 'id' | 'timesta
     if (logs.length > MAX_CLIENT_LOGS) {
       logs.length = MAX_CLIENT_LOGS;
     }
-    localStorage.setItem(CLIENT_LOGS_KEY, JSON.stringify(logs));
+    secureStorage.setItem(CLIENT_LOGS_KEY, JSON.stringify(logs));
   } catch {
     // Ignore storage quota errors silently
   }
@@ -135,7 +136,7 @@ export const logClientInteraction = (entry: Omit<ClientLogEntry, 'id' | 'timesta
 
 export const getClientInteractionLogs = (): ClientLogEntry[] => {
   try {
-    const existingStr = localStorage.getItem(CLIENT_LOGS_KEY);
+    const existingStr = secureStorage.getItem(CLIENT_LOGS_KEY);
     return existingStr ? JSON.parse(existingStr) : [];
   } catch {
     return [];
@@ -144,7 +145,7 @@ export const getClientInteractionLogs = (): ClientLogEntry[] => {
 
 export const clearClientInteractionLogs = () => {
   try {
-    localStorage.removeItem(CLIENT_LOGS_KEY);
+    secureStorage.removeItem(CLIENT_LOGS_KEY);
   } catch {}
 };
 
@@ -566,9 +567,9 @@ export const syncToPostgres = async (data: any, userId: string) => {
     }));
   }
   
-  // Always save a copy to localStorage as resilient offline backup
+  // Always save a copy to encrypted localStorage as resilient offline backup
   try {
-    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify({
+    secureStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify({
       ...sanitizedData,
       _lastUpdated: new Date().toISOString()
     }));
@@ -746,7 +747,7 @@ export const syncFromPostgres = async (userId: string) => {
     });
 
     try {
-      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify({
+      secureStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify({
         ...data,
         _lastUpdated: new Date().toISOString()
       }));
@@ -765,7 +766,7 @@ export const syncFromPostgres = async (userId: string) => {
     });
     
     try {
-      const cachedStr = localStorage.getItem(LOCAL_STORAGE_KEY);
+      const cachedStr = secureStorage.getItem(LOCAL_STORAGE_KEY);
       if (cachedStr) {
         const cachedData = JSON.parse(cachedStr);
         

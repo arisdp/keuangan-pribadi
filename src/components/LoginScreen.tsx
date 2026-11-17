@@ -188,7 +188,7 @@ export function LoginScreen({ onLoginSuccess }: LoginScreenProps) {
         fullName: fullName.trim()
       });
 
-      setSuccess('Pendaftaran PostgreSQL berhasil! Mempersiapkan ruang kerja keuangan...');
+      setSuccess('Pendaftaran berhasil! Mempersiapkan ruang kerja keuangan...');
       setTimeout(() => {
         onLoginSuccess({
           username: data.user.username,
@@ -302,13 +302,6 @@ export function LoginScreen({ onLoginSuccess }: LoginScreenProps) {
           </div>
           <h1 className="text-2xl font-black text-white tracking-tight">Nusantara Wealth</h1>
           <p className="text-xs text-slate-400 mt-1 font-medium">Asisten & Jurnal Keuangan Mandiri Cerdas</p>
-          
-          <div className="mt-3.5 inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-slate-900/60 rounded-full border border-slate-700/30">
-            <span className="w-2 h-2 rounded-full bg-emerald-500 shadow-md shadow-emerald-500/35" />
-            <span className="text-[9px] text-slate-300 font-black uppercase tracking-wider">
-              Database Cloud (PostgreSQL) & Mode Offline
-            </span>
-          </div>
         </div>
 
         {/* Info alerts */}
@@ -665,7 +658,7 @@ export function LoginScreen({ onLoginSuccess }: LoginScreenProps) {
                 ) : (
                   <Key className="h-4 w-4" />
                 )}
-                {loading ? 'Memproses Authentikasi...' : authMode === 'register' ? 'Buat Akun Database PostgreSQL' : 'Masuk dengan PostgreSQL'}
+                {loading ? 'Memproses Authentikasi...' : authMode === 'register' ? 'Buat Akun' : 'Masuk'}
               </button>
             </form>
           </>

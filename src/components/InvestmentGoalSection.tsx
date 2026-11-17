@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { InvestmentGoal, InvestmentAsset } from '../types';
 import { FormattedNumberInput } from './FormattedNumberInput';
+import { secureStorage } from '../utils/secureStorage';
+import { logger } from '../utils/logger';
 import {
   Target,
   Plus,
@@ -151,22 +153,22 @@ export const InvestmentGoalSection: React.FC<InvestmentGoalSectionProps> = ({
 
   const [goals, setGoals] = useState<InvestmentGoal[]>(() => {
     try {
-      const saved = localStorage.getItem('nusantara_investment_goals');
+      const saved = secureStorage.getItem('nusantara_investment_goals');
       if (saved) {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed) && parsed.length > 0) return parsed;
       }
     } catch (e) {
-      console.error('Failed to parse investment goals:', e);
+      logger.error('Failed to parse investment goals:', e);
     }
     return DEFAULT_INVESTMENT_GOALS;
   });
 
   useEffect(() => {
     try {
-      localStorage.setItem('nusantara_investment_goals', JSON.stringify(goals));
+      secureStorage.setItem('nusantara_investment_goals', JSON.stringify(goals));
     } catch (e) {
-      console.error('Failed to save investment goals:', e);
+      logger.error('Failed to save investment goals:', e);
     }
   }, [goals]);
 

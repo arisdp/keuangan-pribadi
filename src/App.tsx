@@ -1,9 +1,11 @@
 import { syncToPostgres, syncFromPostgres } from './apiClient';
 import { GlobalToastContainer } from './components/GlobalToastContainer';
+import { GlobalUserMenu } from './components/GlobalUserMenu';
 import { SyncConflictModal } from './components/SyncConflictModal';
 import { SyncDataPackage, detectDataConflict } from './utils/syncConflictDetector';
 import { showToast } from './utils/toast';
-import { useState, useEffect } from 'react';
+import { secureStorage } from './utils/secureStorage';
+import { useState, useEffect, useRef } from 'react';
 import { 
   Transaction, 
   Account, 
@@ -87,79 +89,85 @@ import {
 
 export default function App() {
   const { theme, toggleTheme } = useTheme();
+  const mainScrollRef = useRef<HTMLDivElement | null>(null);
+
+  const scrollWorkspaceToTop = () => {
+    mainScrollRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
 
   // --- 1. CURRENT USER STATE ---
   const [currentUser, setCurrentUser] = useState<User | null>(() => {
-    const saved = localStorage.getItem('fin_current_user');
+    const saved = secureStorage.getItem('fin_current_user');
     return saved ? JSON.parse(saved) : null;
   });
 
   // --- 2. CORE STATES WITH LOCALSTORAGE PERSISTENCE (USER SPECIFIC) ---
   const [transactions, setTransactions] = useState<Transaction[]>(() => {
-    const user = localStorage.getItem('fin_current_user');
+    const user = secureStorage.getItem('fin_current_user');
     if (user) {
       const u: User = JSON.parse(user);
-      const saved = localStorage.getItem(`fin_${u.username}_transactions`);
+      const saved = secureStorage.getItem(`fin_${u.username}_transactions`);
       return saved ? JSON.parse(saved) : [];
     }
     return [];
   });
 
   const [accounts, setAccounts] = useState<Account[]>(() => {
-    const user = localStorage.getItem('fin_current_user');
+    const user = secureStorage.getItem('fin_current_user');
     if (user) {
       const u: User = JSON.parse(user);
-      const saved = localStorage.getItem(`fin_${u.username}_accounts`);
+      const saved = secureStorage.getItem(`fin_${u.username}_accounts`);
       return saved ? JSON.parse(saved) : [];
     }
     return [];
   });
 
   const [budgets, setBudgets] = useState<CategoryBudget[]>(() => {
-    const user = localStorage.getItem('fin_current_user');
+    const user = secureStorage.getItem('fin_current_user');
     if (user) {
       const u: User = JSON.parse(user);
-      const saved = localStorage.getItem(`fin_${u.username}_budgets`);
+      const saved = secureStorage.getItem(`fin_${u.username}_budgets`);
       return saved ? JSON.parse(saved) : [];
     }
     return [];
   });
 
   const [debts, setDebts] = useState<Debt[]>(() => {
-    const user = localStorage.getItem('fin_current_user');
+    const user = secureStorage.getItem('fin_current_user');
     if (user) {
       const u: User = JSON.parse(user);
-      const saved = localStorage.getItem(`fin_${u.username}_debts`);
+      const saved = secureStorage.getItem(`fin_${u.username}_debts`);
       return saved ? JSON.parse(saved) : [];
     }
     return [];
   });
 
   const [investments, setInvestments] = useState<InvestmentAsset[]>(() => {
-    const user = localStorage.getItem('fin_current_user');
+    const user = secureStorage.getItem('fin_current_user');
     if (user) {
       const u: User = JSON.parse(user);
-      const saved = localStorage.getItem(`fin_${u.username}_investments`);
+      const saved = secureStorage.getItem(`fin_${u.username}_investments`);
       return saved ? JSON.parse(saved) : [];
     }
     return [];
   });
 
   const [emergencyConfig, setEmergencyConfig] = useState<EmergencyFundConfig>(() => {
-    const user = localStorage.getItem('fin_current_user');
+    const user = secureStorage.getItem('fin_current_user');
     if (user) {
       const u: User = JSON.parse(user);
-      const saved = localStorage.getItem(`fin_${u.username}_emergency_config`);
+      const saved = secureStorage.getItem(`fin_${u.username}_emergency_config`);
       return saved ? JSON.parse(saved) : { jobStability: 'medium', dependents: 0, monthlyExpense: 0 };
     }
     return { jobStability: 'medium', dependents: 0, monthlyExpense: 0 };
   });
 
   const [emergencyTransactions, setEmergencyTransactions] = useState<EmergencyFundTransaction[]>(() => {
-    const user = localStorage.getItem('fin_current_user');
+    const user = secureStorage.getItem('fin_current_user');
     if (user) {
       const u: User = JSON.parse(user);
-      const saved = localStorage.getItem(`fin_${u.username}_emergency_transactions`);
+      const saved = secureStorage.getItem(`fin_${u.username}_emergency_transactions`);
       return saved ? JSON.parse(saved) : [];
     }
     return [];
@@ -167,7 +175,7 @@ export default function App() {
 
   // --- MASTER CATEGORIES STATE (HIERARCHICAL) ---
   const [masterCategories, setMasterCategories] = useState<CategoryNode[]>(() => {
-    const user = localStorage.getItem('fin_current_user');
+    const user = secureStorage.getItem('fin_current_user');
     const u = user ? JSON.parse(user) : null;
     return getStoredCategories(u?.username);
   });
@@ -178,10 +186,10 @@ export default function App() {
 
   // --- RECURRING TRANSACTIONS STATE ---
   const [recurringTransactions, setRecurringTransactions] = useState<RecurringTransaction[]>(() => {
-    const user = localStorage.getItem('fin_current_user');
+    const user = secureStorage.getItem('fin_current_user');
     if (user) {
       const u: User = JSON.parse(user);
-      const saved = localStorage.getItem(`fin_${u.username}_recurring_transactions`);
+      const saved = secureStorage.getItem(`fin_${u.username}_recurring_transactions`);
       return saved ? JSON.parse(saved) : INITIAL_RECURRING_TRANSACTIONS;
     }
     return INITIAL_RECURRING_TRANSACTIONS;
@@ -190,7 +198,7 @@ export default function App() {
   // Sync recurring transactions to localStorage
   useEffect(() => {
     if (currentUser) {
-      localStorage.setItem(`fin_${currentUser.username}_recurring_transactions`, JSON.stringify(recurringTransactions));
+      secureStorage.setItem(`fin_${currentUser.username}_recurring_transactions`, JSON.stringify(recurringTransactions));
     }
   }, [recurringTransactions, currentUser]);
 
@@ -221,10 +229,10 @@ export default function App() {
 
   // --- SAVINGS GOALS (GOAL TRACKER) STATE ---
   const [savingsGoals, setSavingsGoals] = useState<SavingsGoal[]>(() => {
-    const user = localStorage.getItem('fin_current_user');
+    const user = secureStorage.getItem('fin_current_user');
     if (user) {
       const u: User = JSON.parse(user);
-      const saved = localStorage.getItem(`fin_${u.username}_savings_goals`);
+      const saved = secureStorage.getItem(`fin_${u.username}_savings_goals`);
       if (saved) return JSON.parse(saved);
     }
     return [
@@ -252,7 +260,7 @@ export default function App() {
   // Sync savings goals to localStorage
   useEffect(() => {
     if (currentUser) {
-      localStorage.setItem(`fin_${currentUser.username}_savings_goals`, JSON.stringify(savingsGoals));
+      secureStorage.setItem(`fin_${currentUser.username}_savings_goals`, JSON.stringify(savingsGoals));
     }
   }, [savingsGoals, currentUser]);
 
@@ -432,31 +440,31 @@ export default function App() {
 
     if (Array.isArray(restoredData.transactions)) {
       setTransactions(restoredData.transactions);
-      localStorage.setItem(`fin_${username}_transactions`, JSON.stringify(restoredData.transactions));
+      secureStorage.setItem(`fin_${username}_transactions`, JSON.stringify(restoredData.transactions));
     }
     if (Array.isArray(restoredData.accounts)) {
       setAccounts(restoredData.accounts);
-      localStorage.setItem(`fin_${username}_accounts`, JSON.stringify(restoredData.accounts));
+      secureStorage.setItem(`fin_${username}_accounts`, JSON.stringify(restoredData.accounts));
     }
     if (Array.isArray(restoredData.budgets)) {
       setBudgets(restoredData.budgets);
-      localStorage.setItem(`fin_${username}_budgets`, JSON.stringify(restoredData.budgets));
+      secureStorage.setItem(`fin_${username}_budgets`, JSON.stringify(restoredData.budgets));
     }
     if (Array.isArray(restoredData.debts)) {
       setDebts(restoredData.debts);
-      localStorage.setItem(`fin_${username}_debts`, JSON.stringify(restoredData.debts));
+      secureStorage.setItem(`fin_${username}_debts`, JSON.stringify(restoredData.debts));
     }
     if (Array.isArray(restoredData.investments)) {
       setInvestments(restoredData.investments);
-      localStorage.setItem(`fin_${username}_investments`, JSON.stringify(restoredData.investments));
+      secureStorage.setItem(`fin_${username}_investments`, JSON.stringify(restoredData.investments));
     }
     if (restoredData.emergencyConfig) {
       setEmergencyConfig(restoredData.emergencyConfig);
-      localStorage.setItem(`fin_${username}_emergency_config`, JSON.stringify(restoredData.emergencyConfig));
+      secureStorage.setItem(`fin_${username}_emergency_config`, JSON.stringify(restoredData.emergencyConfig));
     }
     if (Array.isArray(restoredData.emergencyTransactions)) {
       setEmergencyTransactions(restoredData.emergencyTransactions);
-      localStorage.setItem(`fin_${username}_emergency_transactions`, JSON.stringify(restoredData.emergencyTransactions));
+      secureStorage.setItem(`fin_${username}_emergency_transactions`, JSON.stringify(restoredData.emergencyTransactions));
     }
     if (Array.isArray(restoredData.masterCategories)) {
       setMasterCategories(restoredData.masterCategories);
@@ -464,11 +472,11 @@ export default function App() {
     }
     if (Array.isArray(restoredData.recurringTransactions)) {
       setRecurringTransactions(restoredData.recurringTransactions);
-      localStorage.setItem(`fin_${username}_recurring_transactions`, JSON.stringify(restoredData.recurringTransactions));
+      secureStorage.setItem(`fin_${username}_recurring_transactions`, JSON.stringify(restoredData.recurringTransactions));
     }
     if (Array.isArray(restoredData.savingsGoals)) {
       setSavingsGoals(restoredData.savingsGoals);
-      localStorage.setItem(`fin_${username}_savings_goals`, JSON.stringify(restoredData.savingsGoals));
+      secureStorage.setItem(`fin_${username}_savings_goals`, JSON.stringify(restoredData.savingsGoals));
     }
   };
 
@@ -477,7 +485,7 @@ export default function App() {
 
   useEffect(() => {
     if (currentUser) {
-      const seen = localStorage.getItem(`fin_${currentUser.username}_onboarding_seen`);
+      const seen = secureStorage.getItem(`fin_${currentUser.username}_onboarding_seen`);
       if (!seen) {
         setShowOnboarding(true);
       }
@@ -527,7 +535,7 @@ export default function App() {
         try {
           const pgData = await syncFromPostgres(activeUserId);
           if (pgData) {
-            let localDataStr = localStorage.getItem(`nusantara_wealth_backup_${activeUserId}`);
+            let localDataStr = secureStorage.getItem(`nusantara_wealth_backup_${activeUserId}`);
             let localDataPkg: SyncDataPackage | null = null;
             if (localDataStr) {
               try { localDataPkg = JSON.parse(localDataStr); } catch {}
@@ -643,43 +651,43 @@ export default function App() {
   // Sync to localStorage as offline cache fallback
   useEffect(() => {
     if (currentUser) {
-      localStorage.setItem(`fin_${currentUser.username}_transactions`, JSON.stringify(transactions));
+      secureStorage.setItem(`fin_${currentUser.username}_transactions`, JSON.stringify(transactions));
     }
   }, [transactions, currentUser]);
 
   useEffect(() => {
     if (currentUser) {
-      localStorage.setItem(`fin_${currentUser.username}_accounts`, JSON.stringify(accounts));
+      secureStorage.setItem(`fin_${currentUser.username}_accounts`, JSON.stringify(accounts));
     }
   }, [accounts, currentUser]);
 
   useEffect(() => {
     if (currentUser) {
-      localStorage.setItem(`fin_${currentUser.username}_budgets`, JSON.stringify(budgets));
+      secureStorage.setItem(`fin_${currentUser.username}_budgets`, JSON.stringify(budgets));
     }
   }, [budgets, currentUser]);
 
   useEffect(() => {
     if (currentUser) {
-      localStorage.setItem(`fin_${currentUser.username}_debts`, JSON.stringify(debts));
+      secureStorage.setItem(`fin_${currentUser.username}_debts`, JSON.stringify(debts));
     }
   }, [debts, currentUser]);
 
   useEffect(() => {
     if (currentUser) {
-      localStorage.setItem(`fin_${currentUser.username}_investments`, JSON.stringify(investments));
+      secureStorage.setItem(`fin_${currentUser.username}_investments`, JSON.stringify(investments));
     }
   }, [investments, currentUser]);
 
   useEffect(() => {
     if (currentUser) {
-      localStorage.setItem(`fin_${currentUser.username}_emergency_config`, JSON.stringify(emergencyConfig));
+      secureStorage.setItem(`fin_${currentUser.username}_emergency_config`, JSON.stringify(emergencyConfig));
     }
   }, [emergencyConfig, currentUser]);
 
   useEffect(() => {
     if (currentUser) {
-      localStorage.setItem(`fin_${currentUser.username}_emergency_transactions`, JSON.stringify(emergencyTransactions));
+      secureStorage.setItem(`fin_${currentUser.username}_emergency_transactions`, JSON.stringify(emergencyTransactions));
     }
   }, [emergencyTransactions, currentUser]);
 
@@ -983,7 +991,13 @@ export default function App() {
         );
       }
     } else if (targetTx.linkedDebtAction === 'create') {
-      setDebts((prev) => prev.filter(d => !(d.balance === targetTx.amount && d.name === targetTx.description)));
+      setDebts((prev) =>
+        prev.filter((d) =>
+          targetTx.linkedDebtId
+            ? d.id !== targetTx.linkedDebtId
+            : !(d.balance === targetTx.amount && d.name === targetTx.description)
+        )
+      );
     }
 
     // 3. Investment Revert
@@ -1303,45 +1317,179 @@ export default function App() {
   };
 
   // Debt tracker handlers
-  const handleAddDebt = (newDebt: Omit<Debt, 'id'>) => {
+  const formatCurrencyIDR = (value: number) =>
+    new Intl.NumberFormat('id-ID', {
+      style: 'currency',
+      currency: 'IDR',
+      maximumFractionDigits: 0,
+    }).format(value);
+
+  const handleAddDebt = (
+    newDebt: Omit<Debt, 'id'>,
+    bankLink?:
+      | string
+      | {
+          accountId: string;
+          linkAccount?: boolean;
+          transactionType?: 'income' | 'expense';
+        }
+  ) => {
+    const uniqueSuffix = Math.random().toString(36).slice(2, 6);
+    const debtId = `debt-${Date.now()}-${uniqueSuffix}`;
     const d: Debt = {
       ...newDebt,
-      id: `debt-${Date.now()}`,
+      id: debtId,
     };
     setDebts((prev) => [...prev, d]);
+
+    const shouldLinkAccount =
+      typeof bankLink === 'string'
+        ? Boolean(bankLink.trim())
+        : Boolean(bankLink?.accountId && bankLink.linkAccount !== false);
+
+    const resolvedAccountId = shouldLinkAccount
+      ? typeof bankLink === 'string'
+        ? bankLink
+        : bankLink?.accountId
+      : undefined;
+
+    const resolvedTxType: 'income' | 'expense' =
+      typeof bankLink === 'object' && bankLink?.transactionType
+        ? bankLink.transactionType
+        : 'expense';
+
+    if (resolvedAccountId) {
+      const targetAcc = accounts.find((a) => a.id === resolvedAccountId);
+      if (targetAcc) {
+        const tx: Transaction = {
+          id: `tx-debt-${Date.now()}-${uniqueSuffix}`,
+          date: new Date().toISOString().split('T')[0],
+          accountId: targetAcc.id,
+          type: resolvedTxType,
+          category:
+            resolvedTxType === 'expense'
+              ? 'Pengeluaran Pencairan Pinjaman'
+              : 'Penerimaan Utang Baru',
+          description:
+            resolvedTxType === 'expense'
+              ? `Pengeluaran Pencairan Pinjaman: ${newDebt.name}`
+              : `Pencairan Hutang: ${newDebt.name}`,
+          amount: newDebt.balance,
+          linkedDebtId: debtId,
+          linkedDebtAction: 'create',
+        };
+        setTransactions((prev) => [tx, ...prev]);
+        setAccounts((prevAccounts) =>
+          prevAccounts.map((acc) => {
+            if (acc.id === targetAcc.id) {
+              const balanceDiff = resolvedTxType === 'expense' ? -newDebt.balance : newDebt.balance;
+              const nextBalance = acc.currentBalance + balanceDiff;
+              const isCreditOrPaylater = acc.type === 'credit-card' || acc.type === 'paylater';
+              return {
+                ...acc,
+                currentBalance: nextBalance,
+                usedLimit: isCreditOrPaylater ? (acc.creditLimit || 0) - nextBalance : acc.usedLimit,
+              };
+            }
+            return acc;
+          })
+        );
+
+        showToast({
+          type: 'success',
+          title: 'Hutang & Rekening Tersinkronisasi',
+          message:
+            resolvedTxType === 'expense'
+              ? `Hutang "${newDebt.name}" dicatat dan saldo ${targetAcc.name} berkurang ${formatCurrencyIDR(newDebt.balance)}.`
+              : `Hutang "${newDebt.name}" dicatat dan saldo ${targetAcc.name} bertambah ${formatCurrencyIDR(newDebt.balance)}.`,
+          duration: 4500,
+        });
+      } else {
+        showToast({
+          type: 'warning',
+          title: 'Akun Terhubung Tidak Ditemukan',
+          message: `Hutang "${newDebt.name}" disimpan, namun akun bank tujuan tidak ditemukan untuk sinkronisasi saldo.`,
+          duration: 5000,
+        });
+      }
+    }
   };
 
   const handleDeleteDebt = (id: string) => {
     setDebts((prev) => prev.filter((d) => d.id !== id));
   };
 
-  const handlePayDebt = (debtId: string, amount: number, sourceAccountId: string) => {
-    // Reduce Debt Balance
-    setDebts((prev) =>
-      prev.map((d) => {
-        if (d.id === debtId) {
-          return {
-            ...d,
-            balance: Math.max(d.balance - amount, 0),
-          };
-        }
-        return d;
-      })
-    );
-
-    // Register a transaction in logs as "expense"
-    const matchedDebt = debts.find((d) => d.id === debtId);
-    const paymentSource = accounts.find((a) => a.id === sourceAccountId) || accounts[0];
-    if (paymentSource && matchedDebt) {
-      handleAddTransaction({
-        date: new Date().toISOString().split('T')[0],
-        accountId: paymentSource.id,
-        type: 'expense',
-        category: 'Utilitas & Tagihan',
-        description: `Cicilan Pelunasan Hutang: ${matchedDebt.name}`,
-        amount,
+  const handlePayDebt = (debtId: string, amount: number, sourceAccountId: string): boolean => {
+    if (!Number.isFinite(amount) || amount <= 0) {
+      showToast({
+        type: 'warning',
+        title: 'Nominal Tidak Valid',
+        message: 'Masukkan nominal pembayaran cicilan yang lebih besar dari Rp 0.',
+        duration: 4500,
       });
+      return false;
     }
+
+    const matchedDebt = debts.find((d) => d.id === debtId);
+    if (!matchedDebt) {
+      showToast({
+        type: 'error',
+        title: 'Hutang Tidak Ditemukan',
+        message: 'Data hutang yang dipilih tidak tersedia atau sudah dihapus.',
+        duration: 5000,
+      });
+      return false;
+    }
+
+    const paymentSource = accounts.find((a) => a.id === sourceAccountId);
+    if (!paymentSource) {
+      showToast({
+        type: 'error',
+        title: 'Akun Sumber Tidak Valid',
+        message: 'Silakan pilih rekening sumber dana yang valid untuk membayar cicilan.',
+        duration: 5000,
+      });
+      return false;
+    }
+
+    if (paymentSource.currentBalance < amount) {
+      showToast({
+        type: 'error',
+        title: 'Dana Tidak Mencukupi',
+        message: `Saldo ${paymentSource.name} (${formatCurrencyIDR(paymentSource.currentBalance)}) tidak cukup untuk melunasi cicilan "${matchedDebt.name}" sebesar ${formatCurrencyIDR(amount)}.`,
+        duration: 6000,
+      });
+      return false;
+    }
+
+    if (amount > matchedDebt.balance) {
+      showToast({
+        type: 'warning',
+        title: 'Nominal Melebihi Sisa Hutang',
+        message: `Nominal bayar (${formatCurrencyIDR(amount)}) melebihi sisa pokok hutang "${matchedDebt.name}" (${formatCurrencyIDR(matchedDebt.balance)}).`,
+        duration: 5000,
+      });
+      return false;
+    }
+
+    handleAddTransaction({
+      date: new Date().toISOString().split('T')[0],
+      accountId: paymentSource.id,
+      type: 'expense',
+      category: 'Cicilan / Pelunasan Utang',
+      description: `Cicilan Pelunasan Hutang: ${matchedDebt.name}`,
+      amount,
+      linkedDebtId: debtId,
+      linkedDebtAction: 'pay',
+    });
+
+    showToast({
+      type: 'success',
+      title: 'Pembayaran Cicilan Berhasil',
+      message: `Pembayaran ${formatCurrencyIDR(amount)} untuk "${matchedDebt.name}" dari ${paymentSource.name} telah dicatat.`,
+      duration: 4000,
+    });
+    return true;
   };
 
   // AI suggestion application handler
@@ -1397,13 +1545,13 @@ export default function App() {
     
     if (currentUser) {
       const username = currentUser.username;
-      localStorage.setItem(`fin_${username}_transactions`, JSON.stringify([]));
-      localStorage.setItem(`fin_${username}_accounts`, JSON.stringify(cleanAccounts));
-      localStorage.setItem(`fin_${username}_budgets`, JSON.stringify(cleanBudgets));
-      localStorage.setItem(`fin_${username}_debts`, JSON.stringify([]));
-      localStorage.setItem(`fin_${username}_investments`, JSON.stringify([]));
-      localStorage.setItem(`fin_${username}_emergency_config`, JSON.stringify(cleanEmergencyConfig));
-      localStorage.setItem(`fin_${username}_emergency_transactions`, JSON.stringify([]));
+      secureStorage.setItem(`fin_${username}_transactions`, JSON.stringify([]));
+      secureStorage.setItem(`fin_${username}_accounts`, JSON.stringify(cleanAccounts));
+      secureStorage.setItem(`fin_${username}_budgets`, JSON.stringify(cleanBudgets));
+      secureStorage.setItem(`fin_${username}_debts`, JSON.stringify([]));
+      secureStorage.setItem(`fin_${username}_investments`, JSON.stringify([]));
+      secureStorage.setItem(`fin_${username}_emergency_config`, JSON.stringify(cleanEmergencyConfig));
+      secureStorage.setItem(`fin_${username}_emergency_transactions`, JSON.stringify([]));
     }
 
     setShowResetDataModal(false);
@@ -1412,10 +1560,10 @@ export default function App() {
 
   const handleLoginSuccess = (user: User, dataChoice: 'empty' | 'sample') => {
     setCurrentUser(user);
-    localStorage.setItem('fin_current_user', JSON.stringify(user));
+    secureStorage.setItem('fin_current_user', JSON.stringify(user));
 
     const username = user.username;
-    const hasData = localStorage.getItem(`fin_${username}_accounts`);
+    const hasData = secureStorage.getItem(`fin_${username}_accounts`);
     if (!hasData) {
       if (dataChoice === 'sample') {
         setTransactions(INITIAL_TRANSACTIONS);
@@ -1453,13 +1601,13 @@ export default function App() {
         setEmergencyTransactions([]);
       }
     } else {
-      setTransactions(JSON.parse(localStorage.getItem(`fin_${username}_transactions`) || '[]'));
-      setAccounts(JSON.parse(localStorage.getItem(`fin_${username}_accounts`) || '[]'));
-      setBudgets(JSON.parse(localStorage.getItem(`fin_${username}_budgets`) || '[]'));
-      setDebts(JSON.parse(localStorage.getItem(`fin_${username}_debts`) || '[]'));
-      setInvestments(JSON.parse(localStorage.getItem(`fin_${username}_investments`) || '[]'));
-      setEmergencyConfig(JSON.parse(localStorage.getItem(`fin_${username}_emergency_config`) || '{"jobStability":"medium","dependents":0,"monthlyExpense":0}'));
-      setEmergencyTransactions(JSON.parse(localStorage.getItem(`fin_${username}_emergency_transactions`) || '[]'));
+      setTransactions(JSON.parse(secureStorage.getItem(`fin_${username}_transactions`) || '[]'));
+      setAccounts(JSON.parse(secureStorage.getItem(`fin_${username}_accounts`) || '[]'));
+      setBudgets(JSON.parse(secureStorage.getItem(`fin_${username}_budgets`) || '[]'));
+      setDebts(JSON.parse(secureStorage.getItem(`fin_${username}_debts`) || '[]'));
+      setInvestments(JSON.parse(secureStorage.getItem(`fin_${username}_investments`) || '[]'));
+      setEmergencyConfig(JSON.parse(secureStorage.getItem(`fin_${username}_emergency_config`) || '{"jobStability":"medium","dependents":0,"monthlyExpense":0}'));
+      setEmergencyTransactions(JSON.parse(secureStorage.getItem(`fin_${username}_emergency_transactions`) || '[]'));
     }
     setActiveTab('dashboard');
   };
@@ -1475,7 +1623,7 @@ export default function App() {
       } catch {}
     }
     setCurrentUser(null);
-    localStorage.removeItem('fin_current_user');
+    secureStorage.removeItem('fin_current_user');
     setTransactions([]);
     setAccounts([]);
     setBudgets([]);
@@ -1489,7 +1637,7 @@ export default function App() {
 
   const handleCloseOnboarding = () => {
     if (currentUser) {
-      localStorage.setItem(`fin_${currentUser.username}_onboarding_seen`, 'true');
+      secureStorage.setItem(`fin_${currentUser.username}_onboarding_seen`, 'true');
     }
     setShowOnboarding(false);
   };
@@ -1529,16 +1677,16 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 flex font-sans text-slate-900 dark:text-slate-100 transition-colors duration-200">
+    <div className="min-h-screen lg:h-screen lg:overflow-hidden bg-slate-50 dark:bg-slate-950 flex font-sans text-slate-900 dark:text-slate-100 transition-colors duration-200">
       
       {/* SIDEBAR FOR DESKTOP */}
-      <aside className="hidden lg:flex w-64 bg-slate-900 text-white flex-col shrink-0">
-        <div className="p-6 flex items-center gap-3 border-b border-slate-800">
+      <aside className="hidden lg:flex lg:h-full w-64 bg-slate-900 text-white flex-col shrink-0 border-r border-slate-800/80">
+        <div className="p-6 flex items-center gap-3 border-b border-slate-800 shrink-0">
           <div className="w-8 h-8 bg-blue-600 rounded flex items-center justify-center font-bold text-white shadow-sm">N</div>
           <span className="text-xl font-bold tracking-tight text-white">Nusantara Wealth</span>
         </div>
         
-        <nav className="flex-1 px-3 py-4 space-y-4 overflow-y-auto">
+        <nav className="flex-1 min-h-0 px-3 py-4 space-y-4 overflow-y-auto">
           {NAV_GROUPS.map((group) => {
             const isOpen = openNavGroups[group.groupName] ?? true;
             const hasActiveChild = group.items.some((item) => item.id === activeTab);
@@ -1568,7 +1716,10 @@ export default function App() {
                       return (
                         <button
                           key={tab.id}
-                          onClick={() => setActiveTab(tab.id)}
+                          onClick={() => {
+                            setActiveTab(tab.id);
+                            scrollWorkspaceToTop();
+                          }}
                           className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-lg text-xs font-medium transition-all duration-150 cursor-pointer text-left ${
                             isActive
                               ? 'bg-blue-600 text-white font-semibold shadow-sm'
@@ -1643,7 +1794,7 @@ export default function App() {
       </aside>
 
       {/* MAIN CONTAINER */}
-      <div className="flex-1 flex flex-col min-h-screen overflow-hidden">
+      <div className="flex-1 flex flex-col min-h-screen lg:min-h-0 lg:h-full min-w-0">
         
         {/* Header */}
         <header className="h-16 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between px-4 sm:px-6 lg:px-8 shrink-0 sticky top-0 z-20 transition-colors duration-200 gap-3">
@@ -1675,7 +1826,7 @@ export default function App() {
                 value={activeTab}
                 onChange={(e) => {
                   setActiveTab(e.target.value);
-                  window.scrollTo({ top: 0, behavior: 'smooth' });
+                  scrollWorkspaceToTop();
                 }}
                 className="bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-200 text-xs font-bold rounded-lg px-2.5 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer"
               >
@@ -1691,13 +1842,6 @@ export default function App() {
               </select>
             </div>
 
-            {/* Cloud Sync Status Indicator */}
-            <div className="hidden xl:flex items-center gap-1.5 px-2.5 py-1 bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 rounded-full shrink-0 select-none">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shadow-xs" />
-              <span className="text-[9px] text-slate-500 dark:text-slate-400 font-extrabold uppercase tracking-wider">
-                PostgreSQL Cloud & Mode Offline
-              </span>
-            </div>
           </div>
 
           <div className="flex items-center gap-2 sm:gap-3 shrink-0">
@@ -1727,13 +1871,8 @@ export default function App() {
               <Shield className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400 shrink-0" />
               <span className="hidden sm:inline">Backup</span>
             </button>
-            <button
-              onClick={handleLogout}
-              className="lg:hidden p-2 text-slate-500 dark:text-slate-400 hover:text-rose-600 border border-slate-200 dark:border-slate-700 hover:border-rose-200 rounded-lg transition cursor-pointer bg-slate-50/50 dark:bg-slate-800/50 flex items-center justify-center"
-              title="Keluar (Logout)"
-            >
-              <LogOut className="h-4 w-4" />
-            </button>
+
+            <GlobalUserMenu currentUser={currentUser} onLogout={handleLogout} />
           </div>
         </header>
 
@@ -1776,7 +1915,16 @@ export default function App() {
               </div>
             ))}
 
-            <div className="pt-2 border-t border-slate-800">
+            <div className="pt-3 border-t border-slate-800 space-y-2.5">
+              <div className="flex items-center gap-3 px-3 py-2 bg-slate-800/60 rounded-xl border border-slate-800">
+                <div className="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center text-white font-extrabold text-xs shrink-0">
+                  {currentUser?.fullName ? currentUser.fullName.charAt(0).toUpperCase() : 'U'}
+                </div>
+                <div className="min-w-0">
+                  <p className="text-xs font-bold text-slate-100 truncate">{currentUser?.fullName || 'Pengguna'}</p>
+                  <p className="text-[10px] text-slate-400 truncate">@{currentUser?.username || 'user'} • Premium Member</p>
+                </div>
+              </div>
               <button
                 onClick={handleLogout}
                 className="w-full flex items-center gap-3 px-4 py-3 rounded-lg text-xs font-bold uppercase tracking-wider text-rose-400 hover:bg-rose-500/10 transition cursor-pointer"
@@ -1789,7 +1937,10 @@ export default function App() {
         )}
 
         {/* VIEW BODY CONTENT */}
-        <div className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8 bg-slate-50 dark:bg-slate-950 transition-colors duration-200">
+        <div
+          ref={mainScrollRef}
+          className="flex-1 min-h-0 overflow-y-auto p-4 sm:p-6 lg:p-8 bg-slate-50 dark:bg-slate-950 transition-colors duration-200"
+        >
           <div className="max-w-7xl mx-auto">
             {/* Render Active Tab with Smooth Fade-in Transition */}
             <AnimatePresence mode="wait">
@@ -1815,7 +1966,7 @@ export default function App() {
                     onDepositSavingsGoal={handleDepositSavingsGoal}
                     onQuickAction={(tab) => {
                       setActiveTab(tab);
-                      window.scrollTo({ top: 0, behavior: 'smooth' });
+                      scrollWorkspaceToTop();
                     }}
                   />
                 )}
@@ -1881,6 +2032,7 @@ export default function App() {
                   <DebtTab
                     debts={debts}
                     accounts={accounts}
+                    transactions={transactions}
                     onAddDebt={handleAddDebt}
                     onDeleteDebt={handleDeleteDebt}
                     onPayDebt={handlePayDebt}
@@ -1908,7 +2060,7 @@ export default function App() {
                       onUpdateAccounts={(updated) => {
                         setAccounts(updated);
                         if (currentUser) {
-                          localStorage.setItem(`fin_${currentUser.username}_accounts`, JSON.stringify(updated));
+                          secureStorage.setItem(`fin_${currentUser.username}_accounts`, JSON.stringify(updated));
                         }
                       }}
                       onFactoryReset={() => {
@@ -1916,7 +2068,7 @@ export default function App() {
                         setAccounts(resetAccounts);
                         setMasterCategories(DEFAULT_CATEGORY_HIERARCHY);
                         if (currentUser) {
-                          localStorage.setItem(`fin_${currentUser.username}_accounts`, JSON.stringify(resetAccounts));
+                          secureStorage.setItem(`fin_${currentUser.username}_accounts`, JSON.stringify(resetAccounts));
                         }
                       }}
                       onReassignTransactionCategory={(txId, newCategory) => {
@@ -1951,19 +2103,19 @@ export default function App() {
                     onUpdateAccounts={(updated) => {
                       setAccounts(updated);
                       if (currentUser) {
-                        localStorage.setItem(`fin_${currentUser.username}_accounts`, JSON.stringify(updated));
+                        secureStorage.setItem(`fin_${currentUser.username}_accounts`, JSON.stringify(updated));
                       }
                     }}
                     onUpdateTransactions={(updated) => {
                       setTransactions(updated);
                       if (currentUser) {
-                        localStorage.setItem(`fin_${currentUser.username}_transactions`, JSON.stringify(updated));
+                        secureStorage.setItem(`fin_${currentUser.username}_transactions`, JSON.stringify(updated));
                       }
                     }}
                     onUpdateInvestments={(updated) => {
                       setInvestments(updated);
                       if (currentUser) {
-                        localStorage.setItem(`fin_${currentUser.username}_investments`, JSON.stringify(updated));
+                        secureStorage.setItem(`fin_${currentUser.username}_investments`, JSON.stringify(updated));
                       }
                     }}
                     onOpenIntegrityModal={() => setShowIntegrityModal(true)}
@@ -2121,7 +2273,7 @@ export default function App() {
           onUpdateAccounts={(updatedAccs) => {
             setAccounts(updatedAccs);
             if (currentUser) {
-              localStorage.setItem(`fin_${currentUser.username}_accounts`, JSON.stringify(updatedAccs));
+              secureStorage.setItem(`fin_${currentUser.username}_accounts`, JSON.stringify(updatedAccs));
             }
           }}
           onHarmonize={(updatedAccs, missingCategories) => {

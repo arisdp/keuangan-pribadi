@@ -1,4 +1,6 @@
 import { Account, Transaction } from './types';
+import { secureStorage } from './utils/secureStorage';
+import { logger } from './utils/logger';
 
 export interface AccountCOA {
   code: string;
@@ -45,7 +47,7 @@ export const DEFAULT_COA_LIST: AccountCOA[] = [
 
 export const getStoredCoaList = (): AccountCOA[] => {
   try {
-    const saved = localStorage.getItem('app_coa_list');
+    const saved = secureStorage.getItem('app_coa_list');
     if (saved) {
       const parsed = JSON.parse(saved);
       if (Array.isArray(parsed) && parsed.length > 0) {
@@ -53,16 +55,16 @@ export const getStoredCoaList = (): AccountCOA[] => {
       }
     }
   } catch (err) {
-    console.error('Failed to load COA list from localStorage:', err);
+    logger.error('Failed to load COA list from localStorage:', err);
   }
   return DEFAULT_COA_LIST;
 };
 
 export const saveStoredCoaList = (list: AccountCOA[]): void => {
   try {
-    localStorage.setItem('app_coa_list', JSON.stringify(list));
+    secureStorage.setItem('app_coa_list', JSON.stringify(list));
   } catch (err) {
-    console.error('Failed to save COA list to localStorage:', err);
+    logger.error('Failed to save COA list to localStorage:', err);
   }
 };
 
@@ -153,13 +155,13 @@ export interface MasterChangeLog {
 
 export const getMasterChangeLogs = (): MasterChangeLog[] => {
   try {
-    const saved = localStorage.getItem('app_master_change_log');
+    const saved = secureStorage.getItem('app_master_change_log');
     if (saved) {
       const parsed = JSON.parse(saved);
       if (Array.isArray(parsed)) return parsed;
     }
   } catch (err) {
-    console.error('Failed to load master change log:', err);
+    logger.error('Failed to load master change log:', err);
   }
   return [];
 };
@@ -183,15 +185,15 @@ export const addMasterChangeLog = (
   };
   const updatedLogs = [newLog, ...logs].slice(0, 100);
   try {
-    localStorage.setItem('app_master_change_log', JSON.stringify(updatedLogs));
+    secureStorage.setItem('app_master_change_log', JSON.stringify(updatedLogs));
   } catch (err) {
-    console.error('Failed to save master change log:', err);
+    logger.error('Failed to save master change log:', err);
   }
   return updatedLogs;
 };
 
 export const clearMasterChangeLogs = (): void => {
-  localStorage.removeItem('app_master_change_log');
+  secureStorage.removeItem('app_master_change_log');
 };
 
 /* =========================================================================
@@ -504,7 +506,7 @@ export const factoryResetMasterData = (): {
   resetCoaList: AccountCOA[];
   resetAccounts: Account[];
 } => {
-  localStorage.removeItem('app_coa_list');
+  secureStorage.removeItem('app_coa_list');
   const resetCoaList = DEFAULT_COA_LIST;
   saveStoredCoaList(resetCoaList);
 

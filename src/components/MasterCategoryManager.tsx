@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import { secureStorage } from '../utils/secureStorage';
+import { logger } from '../utils/logger';
 import {
   ResponsiveContainer,
   BarChart,
@@ -415,10 +417,10 @@ export const MasterCategoryManager: React.FC<MasterCategoryManagerProps> = ({
     'grp-pengeluaran-lainnya': true,
   });
 
-  // COA List state with LocalStorage persistence
+  // COA List state with Encrypted LocalStorage persistence
   const [coaList, setCoaList] = useState<AccountCOA[]>(() => {
     try {
-      const saved = localStorage.getItem('app_coa_list');
+      const saved = secureStorage.getItem('app_coa_list');
       if (saved) {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed) && parsed.length > 0) {
@@ -426,16 +428,16 @@ export const MasterCategoryManager: React.FC<MasterCategoryManagerProps> = ({
         }
       }
     } catch (err) {
-      console.error('Failed to load COA list from localStorage:', err);
+      logger.error('Failed to load COA list from localStorage:', err);
     }
     return DEFAULT_COA_LIST;
   });
 
-  useEffect(() => {
+  React.useEffect(() => {
     try {
-      localStorage.setItem('app_coa_list', JSON.stringify(coaList));
+      secureStorage.setItem('app_coa_list', JSON.stringify(coaList));
     } catch (err) {
-      console.error('Failed to save COA list to localStorage:', err);
+      logger.error('Failed to save COA list to localStorage:', err);
     }
   }, [coaList]);
 
@@ -519,7 +521,7 @@ export const MasterCategoryManager: React.FC<MasterCategoryManagerProps> = ({
   const handleResetCoaToDefault = () => {
     if (confirm('Apakah Anda yakin ingin mengembalikan seluruh daftar COA ke susunan standar awal bawaan?')) {
       setCoaList(DEFAULT_COA_LIST);
-      localStorage.removeItem('app_coa_list');
+      secureStorage.removeItem('app_coa_list');
       addMasterChangeLog(
         'COA',
         'System Default COA',
