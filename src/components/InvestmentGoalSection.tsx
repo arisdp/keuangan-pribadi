@@ -3,6 +3,8 @@ import { InvestmentGoal, InvestmentAsset } from '../types';
 import { FormattedNumberInput } from './FormattedNumberInput';
 import { secureStorage } from '../utils/secureStorage';
 import { logger } from '../utils/logger';
+import { formatterIDR } from '../utils/formatters';
+import { showToast } from '../utils/toast';
 import {
   Target,
   Plus,
@@ -145,11 +147,6 @@ const DEFAULT_INVESTMENT_GOALS: InvestmentGoal[] = [
 export const InvestmentGoalSection: React.FC<InvestmentGoalSectionProps> = ({
   investments = [],
 }) => {
-  const formatterIDR = new Intl.NumberFormat('id-ID', {
-    style: 'currency',
-    currency: 'IDR',
-    minimumFractionDigits: 0,
-  });
 
   const [goals, setGoals] = useState<InvestmentGoal[]>(() => {
     try {
@@ -198,6 +195,7 @@ export const InvestmentGoalSection: React.FC<InvestmentGoalSectionProps> = ({
   // Top Up Contribution Modal State
   const [topUpGoal, setTopUpGoal] = useState<InvestmentGoal | null>(null);
   const [topUpAmount, setTopUpAmount] = useState<number>(0);
+  const [deleteConfirmGoalId, setDeleteConfirmGoalId] = useState<string | null>(null);
 
   const handleOpenAddModal = () => {
     setEditingGoal(null);
@@ -281,9 +279,18 @@ export const InvestmentGoalSection: React.FC<InvestmentGoalSectionProps> = ({
   };
 
   const handleDeleteGoal = (id: string) => {
-    if (window.confirm('Apakah Anda yakin ingin menghapus target investasi ini?')) {
-      setGoals((prev) => prev.filter((g) => g.id !== id));
-    }
+    setDeleteConfirmGoalId(id);
+  };
+
+  const confirmDeleteGoal = () => {
+    if (!deleteConfirmGoalId) return;
+    setGoals((prev) => prev.filter((g) => g.id !== deleteConfirmGoalId));
+    setDeleteConfirmGoalId(null);
+    showToast({
+      type: 'success',
+      title: 'Target Investasi Dihapus',
+      message: 'Target investasi berhasil dihapus dari daftar Anda.',
+    });
   };
 
   const handleExecuteTopUp = (e: React.FormEvent) => {
@@ -897,6 +904,43 @@ export const InvestmentGoalSection: React.FC<InvestmentGoalSectionProps> = ({
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* In-App Delete Confirmation Modal */}
+      {deleteConfirmGoalId && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 animate-fadeIn">
+          <div className="bg-white dark:bg-slate-900 rounded-2xl max-w-sm w-full p-5 border border-slate-200 dark:border-slate-700 shadow-2xl space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="p-2.5 bg-rose-100 text-rose-600 rounded-xl shrink-0">
+                <AlertTriangle className="h-5 w-5" />
+              </div>
+              <div className="space-y-1">
+                <h4 className="font-extrabold text-sm text-slate-800 dark:text-white">
+                  Hapus Target Investasi?
+                </h4>
+                <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+                  Apakah Anda yakin ingin menghapus target investasi ini? Riwayat progres target ini akan dihapus.
+                </p>
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 pt-2 border-t border-slate-100 dark:border-slate-800">
+              <button
+                type="button"
+                onClick={() => setDeleteConfirmGoalId(null)}
+                className="px-3.5 py-2 rounded-xl text-xs font-bold text-slate-600 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 transition cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={confirmDeleteGoal}
+                className="px-4 py-2 rounded-xl text-xs font-extrabold text-white bg-rose-600 hover:bg-rose-700 transition cursor-pointer shadow-xs"
+              >
+                Ya, Hapus
+              </button>
+            </div>
           </div>
         </div>
       )}

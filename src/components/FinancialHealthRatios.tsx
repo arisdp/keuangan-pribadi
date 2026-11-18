@@ -1,17 +1,10 @@
 import React, { useMemo } from 'react';
-import { Transaction, Account, Debt, InvestmentAsset } from '../types';
+import { Transaction, Account, Debt, InvestmentAsset, EmergencyFundTransaction } from '../types';
+import { calculateCFPFinancialHealthRatios } from '../utils/accountingEngine';
+import { formatterIDR } from '../utils/formatters';
 import { 
   Activity, 
-  Award, 
-  ShieldCheck, 
-  AlertTriangle, 
-  CheckCircle2, 
-  TrendingUp, 
   Sparkles, 
-  Scale, 
-  Info,
-  DollarSign,
-  PieChart
 } from 'lucide-react';
 
 interface FinancialHealthRatiosProps {
@@ -19,131 +12,26 @@ interface FinancialHealthRatiosProps {
   accounts: Account[];
   debts: Debt[];
   investments: InvestmentAsset[];
+  emergencyTransactions?: EmergencyFundTransaction[];
 }
-
-const formatterIDR = new Intl.NumberFormat('id-ID', {
-  style: 'currency',
-  currency: 'IDR',
-  maximumFractionDigits: 0,
-});
 
 export const FinancialHealthRatios: React.FC<FinancialHealthRatiosProps> = ({
   transactions,
   accounts,
   debts,
   investments,
+  emergencyTransactions = [],
 }) => {
-  // CALCULATIONS FOR CFP METRICS & RATIOS
+  // CALCULATIONS FOR CFP METRICS & RATIOS (centralized in accountingEngine)
   const metrics = useMemo(() => {
-    // 1. Monthly Income (this month or average)
-    const now = new Date();
-    const currentYM = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-    
-    // Valid transactions excluding internal transfers
-    const validTxs = transactions.filter(
-      (tx) => tx.category !== 'Mutasi Masuk' && tx.category !== 'Mutasi Keluar'
+    return calculateCFPFinancialHealthRatios(
+      transactions,
+      accounts,
+      debts,
+      investments,
+      emergencyTransactions
     );
-
-    const monthlyIncome = validTxs
-      .filter((tx) => tx.type === 'income' && tx.date.startsWith(currentYM))
-      .reduce((sum, tx) => sum + tx.amount, 0);
-
-    const monthlyExpense = validTxs
-      .filter((tx) => tx.type === 'expense' && tx.date.startsWith(currentYM))
-      .reduce((sum, tx) => sum + tx.amount, 0);
-
-    const monthlySavingsAndInvest = validTxs
-      .filter((tx) => (tx.type === 'saving' || tx.type === 'investment') && tx.date.startsWith(currentYM))
-      .reduce((sum, tx) => sum + tx.amount, 0);
-
-    // Monthly Debt Service (from debts min payment or monthly debt expenses)
-    const monthlyDebtService = debts.reduce((sum, d) => sum + d.minPayment, 0);
-
-    // Liquid Cash & Bank Assets
-    const liquidCash = accounts
-      .filter((a) => a.type !== 'credit-card' && a.type !== 'paylater')
-      .reduce((sum, a) => sum + a.currentBalance, 0);
-
-    // Total Assets (Liquid + Investments)
-    const totalInvestmentValue = investments.reduce((sum, inv) => sum + inv.balance, 0);
-    const totalAssets = liquidCash + totalInvestmentValue;
-
-    // Total Liabilities (Credit Cards + Paylater + Debts)
-    const totalLiabilities = debts.reduce((sum, d) => sum + d.balance, 0) +
-      accounts
-        .filter((a) => a.type === 'credit-card' || a.type === 'paylater')
-        .reduce((sum, a) => sum + Math.abs(a.currentBalance), 0);
-
-    // Net Worth
-    const netWorth = totalAssets - totalLiabilities;
-
-    // --- RATIO 1: DEBT-TO-INCOME (DTI) ---
-    const dtiRatio = monthlyIncome > 0 ? (monthlyDebtService / monthlyIncome) * 100 : 0;
-    let dtiStatus: 'ideal' | 'warning' | 'danger' = 'ideal';
-    if (dtiRatio > 40) dtiStatus = 'danger';
-    else if (dtiRatio > 30) dtiStatus = 'warning';
-
-    // --- RATIO 2: SAVINGS RATIO ---
-    const savingsRatio = monthlyIncome > 0 ? (monthlySavingsAndInvest / monthlyIncome) * 100 : 0;
-    let savingsStatus: 'ideal' | 'warning' | 'danger' = 'ideal';
-    if (savingsRatio < 10) savingsStatus = 'danger';
-    else if (savingsRatio < 20) savingsStatus = 'warning';
-
-    // --- RATIO 3: EMERGENCY FUND COVERAGE (MONTHS) ---
-    const emergencyMonths = monthlyExpense > 0 ? liquidCash / monthlyExpense : 0;
-    let emergencyStatus: 'ideal' | 'warning' | 'danger' = 'ideal';
-    if (emergencyMonths < 3) emergencyStatus = 'danger';
-    else if (emergencyMonths < 6) emergencyStatus = 'warning';
-
-    // --- RATIO 4: LIQUIDITY RATIO ---
-    const currentLiabilities = accounts
-      .filter((a) => a.type === 'credit-card' || a.type === 'paylater')
-      .reduce((sum, a) => sum + Math.abs(a.currentBalance), 0);
-
-    const liquidityRatio = currentLiabilities > 0 ? liquidCash / currentLiabilities : 99;
-    let liquidityStatus: 'ideal' | 'warning' | 'danger' = 'ideal';
-    if (liquidityRatio < 1.0) liquidityStatus = 'danger';
-    else if (liquidityRatio < 1.5) liquidityStatus = 'warning';
-
-    // --- RATIO 5: SOLVENCY RATIO ---
-    const solvencyRatio = totalAssets > 0 ? (netWorth / totalAssets) * 100 : 100;
-
-    // OVERALL HEALTH SCORE (0 - 100)
-    let score = 100;
-    if (dtiStatus === 'danger') score -= 25;
-    else if (dtiStatus === 'warning') score -= 12;
-
-    if (savingsStatus === 'danger') score -= 25;
-    else if (savingsStatus === 'warning') score -= 12;
-
-    if (emergencyStatus === 'danger') score -= 25;
-    else if (emergencyStatus === 'warning') score -= 12;
-
-    if (liquidityStatus === 'danger') score -= 25;
-    else if (liquidityStatus === 'warning') score -= 12;
-
-    score = Math.max(0, Math.min(100, score));
-
-    return {
-      monthlyIncome,
-      monthlyExpense,
-      monthlyDebtService,
-      liquidCash,
-      totalAssets,
-      totalLiabilities,
-      netWorth,
-      dtiRatio,
-      dtiStatus,
-      savingsRatio,
-      savingsStatus,
-      emergencyMonths,
-      emergencyStatus,
-      liquidityRatio,
-      liquidityStatus,
-      solvencyRatio,
-      score,
-    };
-  }, [transactions, accounts, debts, investments]);
+  }, [transactions, accounts, debts, investments, emergencyTransactions]);
 
   return (
     <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-md space-y-6">
@@ -172,9 +60,9 @@ export const FinancialHealthRatios: React.FC<FinancialHealthRatiosProps> = ({
             Skor Finansial:
           </span>
           <span className={`text-lg font-black font-mono px-3 py-0.5 rounded-xl text-white shadow-xs ${
-            metrics.score >= 80 ? 'bg-emerald-600' : metrics.score >= 50 ? 'bg-amber-500' : 'bg-rose-600'
+            metrics.healthScore >= 80 ? 'bg-emerald-600' : metrics.healthScore >= 50 ? 'bg-amber-500' : 'bg-rose-600'
           }`}>
-            {metrics.score} / 100
+            {metrics.healthScore} / 100
           </span>
         </div>
       </div>
@@ -265,7 +153,7 @@ export const FinancialHealthRatios: React.FC<FinancialHealthRatiosProps> = ({
               {metrics.emergencyMonths.toFixed(1)} Bulan
             </span>
             <p className="text-[10px] text-slate-500 dark:text-slate-400 font-semibold">
-              Kas Likuid: {formatterIDR.format(metrics.liquidCash)}
+              Kas & Dana Darurat: {formatterIDR.format(metrics.liquidCash + metrics.emergencyBalance)}
             </p>
           </div>
 
@@ -312,9 +200,9 @@ export const FinancialHealthRatios: React.FC<FinancialHealthRatiosProps> = ({
         <div className="space-y-1">
           <strong className="text-slate-900 dark:text-slate-100 block">Rekomendasi Strategis Perencana Keuangan:</strong>
           <p className="leading-relaxed">
-            {metrics.score >= 80 
+            {metrics.healthScore >= 80 
               ? 'Kondisi kesehatan keuangan Anda berada dalam kategori prima! Pertahankan alokasi pertumbuhan aset secara berkala dan diversifikasikan ke instrumen investasi berimbal hasil optimal.'
-              : metrics.score >= 50
+              : metrics.healthScore >= 50
               ? 'Kondisi keuangan berada dalam taraf stabil namun memerlukan penyesuaian pada porsi utang atau porsi tabungan rutin agar mencapai kemandirian finansial yang kokoh.'
               : 'Disarankan untuk meninjau kembali pengeluaran konsumtif, menghentikan penambahan utang baru, serta memfokuskan alokasi arus kas pada pemulihan dana darurat.'
             }

@@ -37,3 +37,25 @@ export function parseCurrencyInput(value: string, allowNegative = false): { rawS
 
   return { rawString, numberValue };
 }
+
+export const formatterIDR = new Intl.NumberFormat('id-ID', {
+  style: 'currency',
+  currency: 'IDR',
+  minimumFractionDigits: 0,
+  maximumFractionDigits: 0,
+});
+
+export function formatCurrencyIDR(value: number): string {
+  const safeVal = Number.isFinite(value) ? value : 0;
+  return formatterIDR.format(safeVal);
+}
+
+export function formatShortIDR(value: number): string {
+  const abs = Math.abs(value);
+  const sign = value < 0 ? '-' : '';
+  if (abs >= 1_000_000_000) return `${sign}Rp ${(abs / 1_000_000_000).toFixed(1)}M`;
+  if (abs >= 1_000_000) return `${sign}Rp ${(abs / 1_000_000).toFixed(1)}Jt`;
+  if (abs >= 1_000) return `${sign}Rp ${(abs / 1_000).toFixed(0)}rb`;
+  return `${sign}Rp ${Math.round(abs)}`;
+}
+

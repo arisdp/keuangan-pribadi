@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Transaction, CategoryBudget, Debt, EmergencyFundConfig, AIAnalysisResult, AIMonthlyComparisonResult, AICategoryConsolidationResult, CategoryConsolidationGroup, InvestmentAsset, Account } from '../types';
 import { Sparkles, Loader2, ArrowRightLeft, ShieldCheck, AlertTriangle, ArrowUpRight, ArrowDownRight, CheckCircle2, ChevronRight, HelpCircle, TrendingUp, TrendingDown, Coins, Percent, PiggyBank, Wallet, Calendar, Scale, Flame, Snowflake, Zap, Award, ListOrdered, Layers, ArrowRight, GitMerge } from 'lucide-react';
 import { CategoryNode, DEFAULT_CATEGORY_HIERARCHY, flattenCategoryHierarchy } from '../categoryHierarchy';
+import { isOperatingExpense } from '../utils/accountingEngine';
 import { showToast } from '../utils/toast';
 import { FormattedNumberInput } from './FormattedNumberInput';
 import { WhatIfSavingsSimulator } from './WhatIfSavingsSimulator';
@@ -434,7 +435,7 @@ export const AiAnalysisTab: React.FC<AiAnalysisTabProps> = ({
 
   // --- AUTOMATIC WEEKLY & MONTHLY EXPENSE AUDIT WITH SPIKE NOTIFICATIONS ---
   const weeklyMonthlyAudit = React.useMemo(() => {
-    const expenseTxs = transactions.filter(t => t.type === 'expense');
+    const expenseTxs = transactions.filter((t) => isOperatingExpense(t));
     if (expenseTxs.length === 0) {
       return {
         currentWeekTotal: 0,
@@ -2243,7 +2244,11 @@ export const AiAnalysisTab: React.FC<AiAnalysisTabProps> = ({
                       <button
                         onClick={() => {
                           onApplyBudgetSuggestion(sug.category, sug.recommendedBudget);
-                          alert(`Batas anggaran untuk "${sug.category}" berhasil disesuaikan menjadi ${formatterIDR.format(sug.recommendedBudget)}!`);
+                          showToast({
+                            type: 'success',
+                            title: 'Anggaran Diperbarui',
+                            message: `Batas anggaran untuk "${sug.category}" berhasil disesuaikan menjadi ${formatterIDR.format(sug.recommendedBudget)}.`,
+                          });
                         }}
                         className="bg-blue-600 hover:bg-blue-700 text-white text-[10px] font-bold uppercase px-3 py-1.5 rounded-lg transition cursor-pointer"
                       >

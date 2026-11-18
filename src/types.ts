@@ -13,10 +13,23 @@ export interface Transaction {
   linkedDebtAction?: 'create' | 'pay';
   linkedInvestmentId?: string;
   linkedInvestmentAction?: 'buy' | 'sell';
+  linkedEmergencyTxId?: string;
   // Investment unit detail properties
   unitPrice?: number;
   units?: number;
   unitName?: string;
+  // Non-cash Adjusting Entries properties
+  isAdjustment?: boolean;
+  adjustmentType?: 'investment_depreciation' | 'debt_interest_accrual';
+  adjustmentPeriodKey?: string; // e.g., YYYY-MM
+  adjustmentRatePct?: number;
+  adjustmentDurationDays?: number;
+  coaDebitCode?: string;
+  coaCreditCode?: string;
+  linkedKprBreakdown?: {
+    principalPart?: number;
+    interestPart?: number;
+  };
 }
 
 export interface RecurringTransaction {
@@ -107,6 +120,18 @@ export interface CategoryBudget {
   limit: number;
 }
 
+export interface KprCoaMappingConfig {
+  propertyAssetCode: string; // e.g. '1600'
+  principalLiabilityCode: string; // e.g. '2310'
+  interestExpenseCode: string; // e.g. '5810'
+  accruedInterestCode: string; // e.g. '2390'
+  provisiAdminLegalCode: string; // e.g. '5820'
+  taxInsuranceCode: string; // e.g. '5830'
+  disbursementIncomeCategory: string; // e.g. 'Pencairan KPR'
+  principalPaymentCategory: string; // e.g. 'Cicilan KPR'
+  interestExpenseCategory: string; // e.g. 'Beban Bunga KPR'
+}
+
 export interface Debt {
   id: string;
   name: string;
@@ -117,14 +142,26 @@ export interface Debt {
   category: string;
   dueDay?: number; // Hari jatuh tempo bulanan (1-31)
   dueDate?: string; // Tanggal Jatuh Tempo spesifik (YYYY-MM-DD)
+  startDate?: string; // Tanggal mulai pinjaman (YYYY-MM-DD) untuk akrual bunga
   // Optional KPR (Kredit Pemilikan Rumah) metadata
   kprScheme?: 'annuity' | 'tiered' | 'flat';
+  kprPresetId?: string;
   propertyPrice?: number;
   downPayment?: number;
   tenorMonths?: number;
   fixedRate?: number;
   fixedYears?: number;
   floatingRate?: number;
+  kprFeesSummary?: {
+    provisiFee: number;
+    adminFee: number;
+    appraisalFee?: number;
+    notaryAjbFee: number;
+    bphtbTax: number;
+    insuranceFee: number;
+    totalClosingCosts: number;
+  };
+  kprCoaSnapshot?: Partial<KprCoaMappingConfig>;
 }
 
 export interface DebtPayment {
@@ -147,6 +184,7 @@ export interface EmergencyFundTransaction {
   amount: number;
   location: string;
   description: string;
+  linkedTransactionId?: string;
 }
 
 export interface AIAnalysisResult {
@@ -257,6 +295,34 @@ export interface InvestmentGoal {
   notes?: string;
   monthlyContribution?: number; // Routine top-up per month (Rp)
   annualReturnRate?: number; // Expected annual return % (e.g., 8, 10)
+}
+
+export interface KprPreset {
+  id: string;
+  name: string;
+  description: string;
+  scheme: 'annuity' | 'tiered' | 'flat';
+  tenorYears: number;
+  dpPercent: number;
+  annualRate: number;
+  fixedRate: number;
+  fixedYears: number;
+  floatingRate: number;
+  floatingCapRate?: number;
+  earlyRepaymentPenaltyPct?: number;
+  provisiPct: number;
+  adminFee: number;
+  appraisalFee?: number;
+  notaryAjbPct: number;
+  bphtbPct: number;
+  insurancePct: number;
+  coaMappingOverrides?: Partial<
+    Pick<
+      KprCoaMappingConfig,
+      'propertyAssetCode' | 'principalLiabilityCode' | 'interestExpenseCode' | 'provisiAdminLegalCode' | 'taxInsuranceCode'
+    >
+  >;
+  isDefault?: boolean;
 }
 
 export interface UserFinancialData {

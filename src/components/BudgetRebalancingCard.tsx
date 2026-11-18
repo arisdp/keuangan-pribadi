@@ -1,6 +1,8 @@
 import React, { useState, useMemo } from 'react';
 import { CategoryBudget, Transaction } from '../types';
-import { RefreshCw, Sparkles, ArrowRight, CheckCircle2, TrendingUp, TrendingDown, AlertCircle, Sliders, Check, RotateCcw } from 'lucide-react';
+import { isInternalTransfer, classifyTransaction } from '../utils/accountingEngine';
+import { formatterIDR } from '../utils/formatters';
+import { RefreshCw, Sparkles, TrendingUp, TrendingDown, CheckCircle2, Sliders, Check } from 'lucide-react';
 
 interface BudgetRebalancingCardProps {
   budgets: CategoryBudget[];
@@ -45,13 +47,6 @@ export const BudgetRebalancingCard: React.FC<BudgetRebalancingCardProps> = ({
   // Track applied items in session
   const [appliedCategories, setAppliedCategories] = useState<Set<string>>(new Set());
 
-  const formatterIDR = new Intl.NumberFormat('id-ID', {
-    style: 'currency',
-    currency: 'IDR',
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 0,
-  });
-
   // Compute actual spending in target month per budget category
   const rebalanceSuggestions: RebalanceSuggestion[] = useMemo(() => {
     const filteredBudgets = activeType === 'all'
@@ -59,9 +54,10 @@ export const BudgetRebalancingCard: React.FC<BudgetRebalancingCardProps> = ({
       : budgets.filter((b) => b.type === activeType);
 
     return filteredBudgets.map((b) => {
-      // Calculate actual spent in target month
+      // Calculate actual spent in target month (excluding internal transfers & loan proceeds)
       const prevMonthActual = transactions
         .filter((t) => {
+          if (isInternalTransfer(t) || classifyTransaction(t) === 'debt_proceeds') return false;
           const isCategoryMatch = t.category.toLowerCase() === b.category.toLowerCase();
           const isTypeMatch = t.type === b.type;
           const isMonthMatch = t.date.startsWith(targetYm);

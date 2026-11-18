@@ -1,17 +1,17 @@
 import React, { useState, useMemo } from 'react';
 import { Transaction } from '../types';
 import { CategoryNode } from '../categoryHierarchy';
+import { calculateIncomeStatementSummary, isInternalTransfer } from '../utils/accountingEngine';
+import { formatterIDR } from '../utils/formatters';
 import {
   ChevronRight,
   ChevronDown,
   Printer,
-  Calendar,
   Search,
   Maximize2,
   Minimize2,
   Table,
   Filter,
-  Sparkles,
 } from 'lucide-react';
 
 interface HierarchicalPivotReportProps {
@@ -71,14 +71,6 @@ export const HierarchicalPivotReport: React.FC<HierarchicalPivotReportProps> = (
     setExpandedRows({});
   };
 
-  // Formatter IDR
-  const formatterIDR = new Intl.NumberFormat('id-ID', {
-    style: 'currency',
-    currency: 'IDR',
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 0,
-  });
-
   // Extract available years from transactions
   const availableYears = useMemo(() => {
     const years = new Set<string>();
@@ -94,12 +86,12 @@ export const HierarchicalPivotReport: React.FC<HierarchicalPivotReportProps> = (
     return Array.from(years).sort().reverse();
   }, [transactions]);
 
-  // Generate dynamic Month Columns from transactions
+  // Generate dynamic Month Columns from non-transfer transactions
   const monthColumns = useMemo<MonthColumn[]>(() => {
     const monthKeys = new Set<string>();
 
     transactions.forEach((tx) => {
-      if (!tx.date) return;
+      if (!tx.date || isInternalTransfer(tx)) return;
       const ym = tx.date.substring(0, 7); // "YYYY-MM"
       if (selectedYear === 'all' || ym.startsWith(selectedYear)) {
         monthKeys.add(ym);
@@ -134,13 +126,12 @@ export const HierarchicalPivotReport: React.FC<HierarchicalPivotReportProps> = (
     });
   }, [transactions, selectedYear]);
 
-  // Build Transaction Amount Map per category name/id and per month
-  // Key format: `${catLower}_${ym}` -> amount
+  // Build Transaction Amount Map per category name/id and per month (excluding internal transfers)
   const categoryMonthAmountMap = useMemo(() => {
     const map: Record<string, number> = {};
 
     transactions.forEach((tx) => {
-      if (!tx.date || !tx.amount) return;
+      if (!tx.date || !tx.amount || isInternalTransfer(tx)) return;
       const ym = tx.date.substring(0, 7);
       if (selectedYear !== 'all' && !ym.startsWith(selectedYear)) return;
 
@@ -260,6 +251,17 @@ export const HierarchicalPivotReport: React.FC<HierarchicalPivotReportProps> = (
       </React.Fragment>
     );
   };
+
+  // Operating Net Profit per Month (Laba Rugi Operasional murni) & Total Hierarchy Accumulation
+  const operatingNetPerMonth = useMemo(() => {
+    const monthTotals: Record<string, number> = {};
+    monthColumns.forEach((m) => {
+      const monthTxs = transactions.filter((tx) => tx.date && tx.date.startsWith(m.key));
+      monthTotals[m.key] = calculateIncomeStatementSummary(monthTxs).netOperatingProfit;
+    });
+    const totalOverall = Object.values(monthTotals).reduce((sum, v) => sum + v, 0);
+    return { monthTotals, totalOverall };
+  }, [transactions, monthColumns]);
 
   // Grand Total Summary per Month across all Categories
   const grandTotalPerMonth = useMemo(() => {
@@ -395,11 +397,27 @@ export const HierarchicalPivotReport: React.FC<HierarchicalPivotReportProps> = (
             {masterCategories.map((typeNode) => renderTreeRow(typeNode))}
           </tbody>
 
-          {/* Table Footer / Grand Total Row */}
+          {/* Table Footer / Operating Laba Rugi & Grand Total Rows */}
           <tfoot>
-            <tr className="bg-blue-600 text-white font-black text-xs border-t-2 border-blue-400">
+            <tr className="bg-emerald-700 text-white font-black text-xs border-t-2 border-emerald-400">
               <td className="py-3 px-4 uppercase tracking-wider">
-                JUMLAH TOTAL AKUMULASI BERSIH (SURPLUS / DEFISIT)
+                SURPLUS / DEFISIT OPERASIONAL (LABA RUGI BERSIH)
+              </td>
+              {monthColumns.map((m) => {
+                const total = operatingNetPerMonth.monthTotals[m.key] || 0;
+                return (
+                  <td key={m.key} className="py-3 px-3 text-right font-mono text-xs whitespace-nowrap">
+                    {total === 0 ? 'Rp 0' : formatterIDR.format(total)}
+                  </td>
+                );
+              })}
+              <td className="py-3 px-4 text-right font-mono text-sm bg-emerald-900 border-l border-emerald-500 whitespace-nowrap">
+                {formatterIDR.format(operatingNetPerMonth.totalOverall)}
+              </td>
+            </tr>
+            <tr className="bg-blue-600 text-white font-black text-xs border-t border-blue-400">
+              <td className="py-3 px-4 uppercase tracking-wider">
+                AKUMULASI BERSIH SELURUH KATEGORI (TERMASUK NON-OPERASIONAL)
               </td>
               {monthColumns.map((m) => {
                 const total = grandTotalPerMonth.monthTotals[m.key] || 0;

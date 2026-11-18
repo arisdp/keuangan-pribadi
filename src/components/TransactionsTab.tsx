@@ -1,10 +1,13 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Transaction, Account, TransactionType, CategoryBudget, Debt, InvestmentAsset, RecurringTransaction } from '../types';
+import { Transaction, Account, TransactionType, CategoryBudget, Debt, InvestmentAsset, RecurringTransaction, KprCoaMappingConfig } from '../types';
 import { CategoryNode, flattenCategoryHierarchy } from '../categoryHierarchy';
 import { FormattedNumberInput } from './FormattedNumberInput';
-import { PlusCircle, ArrowLeftRight, Trash2, Calendar, FileText, DollarSign, ArrowUpRight, ArrowDownLeft, Wallet, Percent, Search, AlertTriangle, ShieldCheck, Sparkles, Repeat, Play, Power, Clock, CheckCircle2, RefreshCw, Coins, Info, Filter, SlidersHorizontal, CheckSquare, Square, X, RotateCcw, ChevronDown, ChevronUp, Tag, Flame, Bell, BellRing, Award, Layers } from 'lucide-react';
-import { getStoredCoaList, AccountCOA } from '../coaUtils';
+import { PlusCircle, ArrowLeftRight, Trash2, Calendar, FileText, DollarSign, ArrowUpRight, ArrowDownLeft, Wallet, Percent, Search, AlertTriangle, ShieldCheck, Sparkles, Repeat, Play, Power, Clock, CheckCircle2, RefreshCw, Coins, Info, Filter, SlidersHorizontal, CheckSquare, Square, X, RotateCcw, ChevronDown, ChevronUp, Tag, Flame, Bell, BellRing, Award, Layers, Home } from 'lucide-react';
+import { getStoredCoaList, getAccountCoaMapping, AccountCOA } from '../coaUtils';
+import { DEFAULT_KPR_COA_MAPPING, resolveEffectiveKprCoaMapping, resolveTransactionCoaCodes } from '../utils/kprPresets';
+import { showToast } from '../utils/toast';
+import { getAccountCreditBill, isCreditAccount } from '../utils/accountingEngine';
 
 interface TransactionsTabProps {
   transactions: Transaction[];
@@ -14,6 +17,9 @@ interface TransactionsTabProps {
   investments: InvestmentAsset[];
   recurringTransactions?: RecurringTransaction[];
   masterCategories?: CategoryNode[];
+  kprCoaMapping?: KprCoaMappingConfig;
+  preselectedPayDebtId?: string | null;
+  onClearPreselectedPayDebt?: () => void;
   onAddTransaction: (tx: Omit<Transaction, 'id'> & {
     linkedDebtId?: string;
     linkedDebtAction?: 'create' | 'pay';
@@ -36,7 +42,7 @@ interface TransactionsTabProps {
       units?: number;
       unitName?: string;
     };
-  }) => void;
+  }) => boolean | void;
   onDeleteTransaction: (id: string) => void;
   onTransferFunds: (amount: number, fromAccountId: string, toAccountId: string, description: string) => void;
   onAddRecurringTransaction?: (rec: Omit<RecurringTransaction, 'id'>) => void;
@@ -55,6 +61,9 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
   investments = [],
   recurringTransactions = [],
   masterCategories = [],
+  kprCoaMapping = DEFAULT_KPR_COA_MAPPING,
+  preselectedPayDebtId = null,
+  onClearPreselectedPayDebt,
   onAddTransaction,
   onDeleteTransaction,
   onTransferFunds,
@@ -65,19 +74,22 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
   onManualRunRecurring,
   onBatchUpdateCategories,
 }) => {
-  // Combine explicit debts with credit/paylater accounts that have used limits
+  // Combine explicit debts with credit/paylater accounts that have bills
   const accountDebts = accounts
-    .filter(a => (a.type === 'credit-card' || a.type === 'paylater') && a.usedLimit && a.usedLimit > 0)
-    .map(a => ({
-      id: `acc-debt-${a.id}`,
-      name: `${a.name} (Tagihan)`,
-      balance: a.usedLimit || 0,
-      interestRate: 0, 
-      minPayment: (a.usedLimit || 0) * 0.1, 
-      purpose: 'consumptive' as const,
-      category: a.type === 'credit-card' ? 'Kartu Kredit' : 'PayLater / Fintech',
-      dueDay: a.dueDay,
-    }));
+    .filter(a => isCreditAccount(a) && getAccountCreditBill(a) > 0)
+    .map(a => {
+      const bill = getAccountCreditBill(a);
+      return {
+        id: `acc-debt-${a.id}`,
+        name: `${a.name} (Tagihan)`,
+        balance: bill,
+        interestRate: 0,
+        minPayment: a.minPayment ?? bill * 0.1,
+        purpose: 'consumptive' as const,
+        category: a.type === 'credit-card' ? 'Kartu Kredit' : 'PayLater / Fintech',
+        dueDay: a.dueDay,
+      };
+    });
 
   const allDebts = [...debts, ...accountDebts];
 
@@ -106,14 +118,22 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
 
   const handleEnablePushNotifications = async () => {
     if (!('Notification' in window)) {
-      alert('Browser Anda tidak mendukung Web Notification API.');
+      showToast({
+        type: 'warning',
+        title: 'Tidak Didukung Browser',
+        message: 'Browser Anda tidak mendukung Web Notification API.',
+      });
       return;
     }
 
     try {
       const perm = await Notification.requestPermission();
       if (perm === 'granted') {
-        alert('✅ Pemberitahuan Push Aktif! Service Worker (sw.js) akan otomatis mengingatkan Anda saat tagihan rutin jatuh tempo dalam 3 hari.');
+        showToast({
+          type: 'success',
+          title: 'Pemberitahuan Push Aktif',
+          message: 'Pengingat otomatis akan dikirim saat tagihan rutin jatuh tempo dalam 3 hari.',
+        });
         
         if ('serviceWorker' in navigator) {
           const payload = {
@@ -131,7 +151,11 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
           }
         }
       } else {
-        alert('Izin pemberitahuan belum diberikan atau diblokir di setelan browser.');
+        showToast({
+          type: 'warning',
+          title: 'Izin Notifikasi Ditolak',
+          message: 'Izin pemberitahuan belum diberikan atau diblokir di setelan browser.',
+        });
       }
     } catch (err) {
       console.error('Notification permission error:', err);
@@ -147,6 +171,17 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
   const [amount, setAmount] = useState<string>('');
   const [isSuggestingCategory, setIsSuggestingCategory] = useState<boolean>(false);
   const [hasManuallySelectedCategory, setHasManuallySelectedCategory] = useState<boolean>(false);
+
+  const isDebtPayCategory = (cat: string) => {
+    const normalized = cat.trim().toLowerCase();
+    return (
+      normalized === 'cicilan / pelunasan utang' ||
+      normalized === 'cicilan kpr' ||
+      normalized === 'pelunasan utang' ||
+      normalized === kprCoaMapping.principalPaymentCategory.trim().toLowerCase()
+    );
+  };
+  const isDebtPayMode = type === 'expense' && isDebtPayCategory(category);
 
   // Natural Language AI Transaction Parsing States
   const [naturalLanguageInput, setNaturalLanguageInput] = useState<string>('');
@@ -553,6 +588,52 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
 
   // Linked Features Form States
   const [linkedDebtId, setLinkedDebtId] = useState<string>('');
+
+  const activateDebtPaymentMode = (targetDebtId?: string) => {
+    setType('expense');
+    setCategory('Cicilan / Pelunasan Utang');
+    setHasManuallySelectedCategory(true);
+
+    const liquidAccs = accounts.filter((a) => a.type !== 'credit-card' && a.type !== 'paylater');
+    const currentAcc = accounts.find((a) => a.id === accountId);
+    if (!currentAcc || currentAcc.type === 'credit-card' || currentAcc.type === 'paylater') {
+      const preferred =
+        liquidAccs.find((a) => a.type === 'bank' && a.currentBalance > 0) ||
+        liquidAccs.find((a) => a.currentBalance > 0) ||
+        liquidAccs[0];
+      if (preferred) {
+        setAccountId(preferred.id);
+      }
+    }
+
+    if (targetDebtId && targetDebtId !== '__choose__') {
+      setLinkedDebtId(targetDebtId);
+      const matched = allDebts.find((d) => d.id === targetDebtId && d.balance > 0);
+      if (matched) {
+        const defaultAmt =
+          matched.minPayment > 0 ? Math.min(matched.minPayment, matched.balance) : matched.balance;
+        setAmount(String(Math.round(defaultAmt)));
+        const isKpr = matched.category === 'KPR / Properti' || Boolean((matched as Debt).kprScheme);
+        if (isKpr) {
+          setCategory(kprCoaMapping.principalPaymentCategory || 'Cicilan KPR');
+        }
+        setDescription(
+          isKpr ? `Pembayaran Cicilan KPR: ${matched.name}` : `Pembayaran Cicilan Hutang: ${matched.name}`
+        );
+      }
+    }
+  };
+
+  // Pre-fill Jurnal Transaksi form when navigated from DebtTab
+  React.useEffect(() => {
+    if (!preselectedPayDebtId) return;
+    activateDebtPaymentMode(preselectedPayDebtId);
+    onClearPreselectedPayDebt?.();
+    setTimeout(() => {
+      document.getElementById('tx-input-form-card')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 80);
+  }, [preselectedPayDebtId]);
+
   const [newDebtName, setNewDebtName] = useState<string>('');
   const [newDebtInterestRate, setNewDebtInterestRate] = useState<string>('');
   const [newDebtMinPayment, setNewDebtMinPayment] = useState<string>('');
@@ -783,11 +864,78 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
     e.preventDefault();
     const parsedAmount = parseFloat(amount);
     if (!accountId || !category || !parsedAmount || parsedAmount <= 0) {
-      alert('Mohon isi semua data transaksi dengan benar.');
+      showToast({
+        type: 'warning',
+        title: 'Data Transaksi Belum Lengkap',
+        message: 'Mohon pilih akun, kategori, dan masukkan nominal transaksi (> Rp 0) dengan benar.',
+        duration: 4500,
+      });
       return;
     }
 
-    if (type === 'expense') {
+    // Capture special fields
+    const isDebtPay = isDebtPayMode;
+    const isDebtCreate = category === 'Penerimaan Utang Baru';
+    const isInvBuy = (type as string) === 'investment' || category === 'Beli Investasi Baru';
+    const isInvSell = category === 'Penjualan Investasi';
+    const isInvestmentContext = isInvBuy || isInvSell || (type as string) === 'investment' || linkedInvestmentId !== '';
+
+    // Strict validation for unified Debt & KPR installment payment / payoff
+    if (isDebtPay) {
+      if (!linkedDebtId) {
+        showToast({
+          type: 'warning',
+          title: 'Pilih Hutang atau KPR Target',
+          message: 'Silakan pilih kewajiban hutang atau KPR yang akan dibayar / dilunasi.',
+          duration: 4500,
+        });
+        return;
+      }
+
+      const targetDebt = allDebts.find((d) => d.id === linkedDebtId);
+      if (!targetDebt) {
+        showToast({
+          type: 'error',
+          title: 'Target Hutang Tidak Ditemukan',
+          message: 'Data hutang atau KPR yang dipilih tidak tersedia.',
+          duration: 5000,
+        });
+        return;
+      }
+
+      if (linkedDebtId === `acc-debt-${accountId}`) {
+        showToast({
+          type: 'warning',
+          title: 'Rekening Pembayar Tidak Valid',
+          message: 'Gunakan rekening kas/bank lain untuk membayar tagihan kartu kredit/paylater ini.',
+          duration: 5000,
+        });
+        return;
+      }
+
+      const sourceAcc = accounts.find((a) => a.id === accountId);
+      if (!sourceAcc || sourceAcc.currentBalance < parsedAmount) {
+        showToast({
+          type: 'error',
+          title: 'Dana Tidak Mencukupi',
+          message: `Saldo ${sourceAcc ? sourceAcc.name : 'rekening'} (${formatterIDR.format(sourceAcc?.currentBalance || 0)}) tidak cukup untuk membayar cicilan sebesar ${formatterIDR.format(parsedAmount)}.`,
+          duration: 6000,
+        });
+        return;
+      }
+
+      if (parsedAmount > targetDebt.balance) {
+        showToast({
+          type: 'warning',
+          title: 'Nominal Melebihi Sisa Pokok',
+          message: `Nominal pembayaran (${formatterIDR.format(parsedAmount)}) melebihi sisa saldo "${targetDebt.name}" (${formatterIDR.format(targetDebt.balance)}).`,
+          duration: 5000,
+        });
+        return;
+      }
+    }
+
+    if (type === 'expense' && !isDebtPay) {
       const txMonth = date.substring(0, 7);
       const budgetForCat = budgets.find(
         (b) => b.category.toLowerCase() === category.toLowerCase() && b.type === 'expense'
@@ -820,13 +968,6 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
       }
     }
 
-    // Capture special fields
-    const isDebtPay = category === 'Cicilan / Pelunasan Utang';
-    const isDebtCreate = category === 'Penerimaan Utang Baru';
-    const isInvBuy = (type as string) === 'investment' || category === 'Beli Investasi Baru';
-    const isInvSell = category === 'Penjualan Investasi';
-    const isInvestmentContext = isInvBuy || isInvSell || (type as string) === 'investment' || linkedInvestmentId !== '';
-
     const parsedUnitPrice = parseFloat(invUnitPrice);
     const parsedQty = parseFloat(invQuantity);
 
@@ -852,13 +993,40 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
       : (effectiveUnits && parsedAmount > 0 ? parsedAmount / effectiveUnits : undefined);
     const effectiveUnitName = invUnitName === 'Lot' ? 'Lembar' : invUnitName;
 
-    onAddTransaction({
+    let resolvedCoaDebitCode: string | undefined;
+    let resolvedCoaCreditCode: string | undefined;
+    const sourceAccObj = accounts.find((a) => a.id === accountId);
+    const sourceAccCoa = sourceAccObj ? getAccountCoaMapping(sourceAccObj, storedCoaList) : { code: '1200', name: 'Rekening Bank' };
+
+    if (isDebtPay && linkedDebtId) {
+      const targetDebt = allDebts.find((d) => d.id === linkedDebtId);
+      const isKprDebt = Boolean(
+        targetDebt && (targetDebt.category === 'KPR / Properti' || Boolean((targetDebt as Debt).kprScheme))
+      );
+      if (isKprDebt && targetDebt) {
+        const effKprCoa = resolveEffectiveKprCoaMapping(kprCoaMapping, (targetDebt as Debt).kprCoaSnapshot);
+        resolvedCoaDebitCode = effKprCoa.principalLiabilityCode;
+        resolvedCoaCreditCode = sourceAccCoa.code;
+      }
+    }
+
+    if (!resolvedCoaDebitCode || !resolvedCoaCreditCode) {
+      const autoCoa = resolveTransactionCoaCodes({ type, category, accountId }, accounts, storedCoaList, kprCoaMapping);
+      if (autoCoa.isKprRelated) {
+        resolvedCoaDebitCode = autoCoa.debitCode;
+        resolvedCoaCreditCode = autoCoa.creditCode;
+      }
+    }
+
+    const didSave = onAddTransaction({
       date,
       accountId,
       type,
       category,
       description: description || category,
       amount: parsedAmount,
+      coaDebitCode: resolvedCoaDebitCode,
+      coaCreditCode: resolvedCoaCreditCode,
       unitPrice: isInvestmentContext ? effectiveUnitPrice : undefined,
       units: isInvestmentContext ? effectiveUnits : undefined,
       unitName: isInvestmentContext ? effectiveUnitName : undefined,
@@ -882,6 +1050,8 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
       } : undefined,
     });
 
+    if (didSave === false) return;
+
     // Reset form
     setDescription('');
     setAmount('');
@@ -899,18 +1069,30 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
     e.preventDefault();
     const parsedAmount = parseFloat(transferAmount);
     if (!fromAccount || !toAccount || !parsedAmount || parsedAmount <= 0) {
-      alert('Mohon lengkapi data transfer rekening dengan benar.');
+      showToast({
+        type: 'warning',
+        title: 'Data Mutasi Belum Lengkap',
+        message: 'Mohon lengkapi rekening asal, tujuan, dan nominal transfer yang valid.',
+      });
       return;
     }
     if (fromAccount === toAccount) {
-      alert('Rekening asal dan tujuan tidak boleh sama.');
+      showToast({
+        type: 'warning',
+        title: 'Rekening Sama',
+        message: 'Rekening asal dan rekening tujuan transfer tidak boleh sama.',
+      });
       return;
     }
 
     // Check balance
     const sourceAcc = accounts.find(a => a.id === fromAccount);
     if (sourceAcc && sourceAcc.currentBalance < parsedAmount) {
-      alert(`Saldo ${sourceAcc.name} tidak mencukupi untuk transfer.`);
+      showToast({
+        type: 'error',
+        title: 'Saldo Tidak Mencukupi',
+        message: `Saldo ${sourceAcc.name} (${formatterIDR.format(sourceAcc.currentBalance)}) tidak mencukupi untuk transfer.`,
+      });
       return;
     }
 
@@ -930,6 +1112,7 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
   const [recDayOfMonth, setRecDayOfMonth] = useState<number>(1);
   const [recDescription, setRecDescription] = useState<string>('');
   const [editingRecId, setEditingRecId] = useState<string | null>(null);
+  const [deleteRecurringConfirm, setDeleteRecurringConfirm] = useState<{ id: string; title: string } | null>(null);
 
   const handleOpenAddRecModal = () => {
     setEditingRecId(null);
@@ -959,7 +1142,11 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
     e.preventDefault();
     const parsedAmount = parseFloat(recAmount);
     if (!recTitle.trim() || isNaN(parsedAmount) || parsedAmount <= 0) {
-      alert('Mohon lengkapi judul dan nominal yang valid.');
+      showToast({
+        type: 'warning',
+        title: 'Input Tidak Lengkap',
+        message: 'Mohon lengkapi judul dan nominal transaksi rutin yang valid.',
+      });
       return;
     }
 
@@ -1196,7 +1383,7 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
     const matchesType = filterType === 'all' || tx.type === filterType;
     const query = searchQuery.trim().toLowerCase();
     const acc = accounts.find(a => a.id === tx.accountId);
-    const accName = acc ? acc.name.toLowerCase() : '';
+    const accName = tx.isAdjustment ? 'jurnal penyesuaian non-kas' : (acc ? acc.name.toLowerCase() : '');
 
     const matchesSearch = !query || 
       tx.description.toLowerCase().includes(query) || 
@@ -1242,11 +1429,11 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
   });
 
   const filteredIncomeTotal = filteredTransactions
-    .filter(tx => tx.type === 'income')
+    .filter(tx => !tx.isAdjustment && tx.type === 'income')
     .reduce((sum, tx) => sum + tx.amount, 0);
 
   const filteredExpenseTotal = filteredTransactions
-    .filter(tx => tx.type === 'expense')
+    .filter(tx => !tx.isAdjustment && tx.type === 'expense')
     .reduce((sum, tx) => sum + tx.amount, 0);
 
   return (
@@ -1255,10 +1442,26 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
       <div className="space-y-6 lg:col-span-1">
         
         {/* Input Transaksi Baru */}
-        <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
-          <div className="flex items-center gap-2 mb-4">
-            <PlusCircle className="h-5 w-5 text-blue-600" />
-            <h3 className="font-semibold text-slate-800 text-sm uppercase tracking-wider">Input Transaksi</h3>
+        <div id="tx-input-form-card" className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
+          <div className="flex items-center justify-between gap-2 mb-4">
+            <div className="flex items-center gap-2">
+              <PlusCircle className="h-5 w-5 text-blue-600" />
+              <h3 className="font-semibold text-slate-800 text-sm uppercase tracking-wider">Input Transaksi</h3>
+            </div>
+            {allDebts.filter((d) => d.balance > 0).length > 0 && (
+              <button
+                type="button"
+                onClick={() => activateDebtPaymentMode()}
+                className={`px-2.5 py-1 rounded-lg text-[10px] font-extrabold uppercase tracking-wider flex items-center gap-1 transition cursor-pointer border ${
+                  isDebtPayMode
+                    ? 'bg-emerald-600 text-white border-emerald-600 shadow-xs'
+                    : 'bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border-emerald-200'
+                }`}
+              >
+                <Wallet className="h-3 w-3" />
+                Bayar Hutang / KPR
+              </button>
+            )}
           </div>
 
           {/* AI Natural Language Input Section */}
@@ -1503,37 +1706,201 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
 
             {/* --- Kaitan Khusus Modul (Hutang, Investasi, dsb.) --- */}
             
-            {/* 1. Pembayaran Cicilan Hutang */}
-            {type === 'expense' && category === 'Cicilan / Pelunasan Utang' && (
-              <div className="bg-blue-50/50 p-4 rounded-xl border border-blue-100 space-y-3 animate-slide-in">
-                <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase text-blue-800">
-                  <ShieldCheck className="h-4 w-4 text-blue-600 shrink-0" />
-                  Koneksi Pembayaran Hutang
-                </div>
-                <div>
-                  <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Pilih Hutang yang Dibayar</label>
-                  {allDebts.filter(d => d.balance > 0).length === 0 ? (
-                    <div className="text-xs text-rose-600 bg-rose-50 px-3 py-2 rounded-lg border border-rose-100 font-medium">
-                      Belum ada catatan utang yang aktif. Silakan tambah data utang melalui menu "Utang & Pelunasan" atau tambah penerimaan utang baru.
+            {/* 1. Pembayaran Cicilan Hutang & KPR (Satu Proses Terpusat) */}
+            {isDebtPayMode && (() => {
+              const activeDebtsList = allDebts.filter((d) => d.balance > 0);
+              const selectedDebtObj = activeDebtsList.find((d) => d.id === linkedDebtId);
+              const sourceAccObj = accounts.find((a) => a.id === accountId);
+              const parsedPayAmt = parseFloat(amount) || 0;
+              const isInsufficientSource = Boolean(sourceAccObj && parsedPayAmt > 0 && sourceAccObj.currentBalance < parsedPayAmt);
+              const isOverDebtBalance = Boolean(selectedDebtObj && parsedPayAmt > selectedDebtObj.balance);
+              const isSameCardAccount = Boolean(linkedDebtId && linkedDebtId === `acc-debt-${accountId}`);
+
+              return (
+                <div className="bg-emerald-50/70 p-4 rounded-xl border border-emerald-200 space-y-3 animate-slide-in">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-1.5 text-[10px] font-extrabold uppercase text-emerald-900">
+                      <ShieldCheck className="h-4 w-4 text-emerald-600 shrink-0" />
+                      Pembayaran Cicilan Hutang &amp; KPR
                     </div>
-                  ) : (
-                    <select
-                      value={linkedDebtId}
-                      onChange={(e) => setLinkedDebtId(e.target.value)}
-                      className="w-full bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-700 font-semibold"
-                      required
-                    >
-                      <option value="">-- Pilih Hutang --</option>
-                      {allDebts.filter(d => d.balance > 0).map(d => (
-                        <option key={d.id} value={d.id}>
-                          {d.name} ({formatterIDR.format(d.balance)})
-                        </option>
-                      ))}
-                    </select>
+                    <span className="text-[9px] font-extrabold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 uppercase">
+                      1 Proses Terintegrasi
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-emerald-800/90 leading-snug">
+                    Mencatat pengeluaran jurnal, memotong saldo rekening sumber, dan mengurangi sisa pokok hutang/KPR secara bersamaan tanpa duplikasi.
+                  </p>
+
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-600 uppercase tracking-wider mb-1">
+                      Pilih Hutang / KPR yang Dibayar atau Dilunasi
+                    </label>
+                    {activeDebtsList.length === 0 ? (
+                      <div className="text-xs text-rose-600 bg-rose-50 px-3 py-2 rounded-lg border border-rose-100 font-medium">
+                        Belum ada catatan utang atau KPR aktif. Silakan tambah utang atau KPR baru melalui menu <strong>Hutang</strong> terlebih dahulu.
+                      </div>
+                    ) : (
+                      <select
+                        value={linkedDebtId}
+                          onChange={(e) => {
+                          const nextId = e.target.value;
+                          setLinkedDebtId(nextId);
+                          const picked = activeDebtsList.find((d) => d.id === nextId);
+                          if (picked) {
+                            const suggested =
+                              picked.minPayment > 0 ? Math.min(picked.minPayment, picked.balance) : picked.balance;
+                            setAmount(String(Math.round(suggested)));
+                            const isKpr =
+                              picked.category === 'KPR / Properti' || Boolean((picked as Debt).kprScheme);
+                            if (isKpr) {
+                              setCategory(kprCoaMapping.principalPaymentCategory || 'Cicilan KPR');
+                            } else if (category.trim().toLowerCase() === (kprCoaMapping.principalPaymentCategory || 'Cicilan KPR').toLowerCase()) {
+                              setCategory('Cicilan / Pelunasan Utang');
+                            }
+                            setDescription(
+                              isKpr
+                                ? `Pembayaran Cicilan KPR: ${picked.name}`
+                                : `Pembayaran Cicilan Hutang: ${picked.name}`
+                            );
+                          }
+                        }}
+                        className="w-full bg-white border border-emerald-300 rounded-lg px-2.5 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500 text-slate-800 font-bold cursor-pointer"
+                        required
+                      >
+                        <option value="">-- Pilih Hutang / KPR / Tagihan --</option>
+                        {activeDebtsList.map((d) => {
+                          const isKpr = d.category === 'KPR / Properti' || Boolean((d as Debt).kprScheme);
+                          return (
+                            <option key={d.id} value={d.id}>
+                              {isKpr ? '[KPR] ' : ''}{d.name} — Sisa: {formatterIDR.format(d.balance)}
+                            </option>
+                          );
+                        })}
+                      </select>
+                    )}
+                  </div>
+
+                  {selectedDebtObj && (
+                    <div className="bg-white rounded-xl border border-emerald-200/80 p-3 space-y-2.5 text-[11px]">
+                      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-2">
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          {(selectedDebtObj.category === 'KPR / Properti' || Boolean((selectedDebtObj as Debt).kprScheme)) && (
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-indigo-100 text-indigo-700 rounded text-[9px] font-extrabold uppercase shrink-0">
+                              <Home className="h-2.5 w-2.5" /> KPR
+                            </span>
+                          )}
+                          <span className="font-extrabold text-slate-800 truncate">{selectedDebtObj.name}</span>
+                        </div>
+                        <span className="text-[10px] font-bold text-slate-500">
+                          Bunga {selectedDebtObj.interestRate}% • Jth Tempo Tgl {selectedDebtObj.dueDay || '-'}
+                        </span>
+                      </div>
+
+                      {(selectedDebtObj.category === 'KPR / Properti' || Boolean((selectedDebtObj as Debt).kprScheme)) && (() => {
+                        const effCoa = resolveEffectiveKprCoaMapping(kprCoaMapping, (selectedDebtObj as Debt).kprCoaSnapshot);
+                        const srcCoa = sourceAccObj ? getAccountCoaMapping(sourceAccObj, storedCoaList) : { code: '1200', name: 'Bank' };
+                        return (
+                          <div className="text-[10px] font-mono tabular-nums text-indigo-700 bg-indigo-50/70 border border-indigo-100 rounded-lg px-2.5 py-1.5">
+                            COA Jurnal Pokok: Dr {effCoa.principalLiabilityCode} · Cr {srcCoa.code}
+                          </div>
+                        );
+                      })()}
+
+                      <div className="grid grid-cols-2 gap-2 text-[10px]">
+                        <div className="bg-slate-50 p-2 rounded-lg">
+                          <span className="text-slate-500 block font-semibold">Sisa Pokok Saat Ini</span>
+                          <strong className="text-rose-600 font-mono text-xs">
+                            {formatterIDR.format(selectedDebtObj.balance)}
+                          </strong>
+                        </div>
+                        <div className="bg-slate-50 p-2 rounded-lg">
+                          <span className="text-slate-500 block font-semibold">Cicilan Bulanan</span>
+                          <strong className="text-slate-800 font-mono text-xs">
+                            {formatterIDR.format(selectedDebtObj.minPayment || 0)}
+                          </strong>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap gap-2">
+                        {selectedDebtObj.minPayment > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const cicilan = Math.round(Math.min(selectedDebtObj.minPayment, selectedDebtObj.balance));
+                              setAmount(String(cicilan));
+                              const isKpr =
+                                selectedDebtObj.category === 'KPR / Properti' ||
+                                Boolean((selectedDebtObj as Debt).kprScheme);
+                              setDescription(
+                                isKpr
+                                  ? `Pembayaran Cicilan KPR: ${selectedDebtObj.name}`
+                                  : `Pembayaran Cicilan Hutang: ${selectedDebtObj.name}`
+                              );
+                            }}
+                            className="flex-1 py-1.5 px-2.5 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded-lg text-[10px] font-extrabold transition cursor-pointer"
+                          >
+                            Isi Cicilan ({formatterIDR.format(Math.min(selectedDebtObj.minPayment, selectedDebtObj.balance))})
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setAmount(String(Math.round(selectedDebtObj.balance)));
+                            const isKpr =
+                              selectedDebtObj.category === 'KPR / Properti' ||
+                              Boolean((selectedDebtObj as Debt).kprScheme);
+                            setDescription(
+                              isKpr
+                                ? `Pelunasan Penuh KPR: ${selectedDebtObj.name}`
+                                : `Pelunasan Penuh Hutang: ${selectedDebtObj.name}`
+                            );
+                          }}
+                          className="flex-1 py-1.5 px-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[10px] font-extrabold transition cursor-pointer"
+                        >
+                          Lunasi Penuh ({formatterIDR.format(selectedDebtObj.balance)})
+                        </button>
+                      </div>
+
+                      {parsedPayAmt > 0 && (
+                        <div className="pt-2 border-t border-slate-100 space-y-1 text-[10px]">
+                          {sourceAccObj && (
+                            <div className="flex justify-between gap-2">
+                              <span className="text-slate-500 font-semibold">Saldo {sourceAccObj.name}:</span>
+                              <span className={`font-mono font-bold ${isInsufficientSource ? 'text-rose-600' : 'text-slate-800'}`}>
+                                {formatterIDR.format(sourceAccObj.currentBalance)} &rarr; {formatterIDR.format(sourceAccObj.currentBalance - parsedPayAmt)}
+                              </span>
+                            </div>
+                          )}
+                          <div className="flex justify-between gap-2">
+                            <span className="text-slate-500 font-semibold">Sisa Pokok Setelah Bayar:</span>
+                            <span className={`font-mono font-bold ${isOverDebtBalance ? 'text-rose-600' : 'text-emerald-700'}`}>
+                              {isOverDebtBalance
+                                ? 'Melebihi sisa hutang!'
+                                : selectedDebtObj.balance - parsedPayAmt <= 0
+                                ? 'Rp 0 (LUNAS!)'
+                                : formatterIDR.format(selectedDebtObj.balance - parsedPayAmt)}
+                            </span>
+                          </div>
+                        </div>
+                      )}
+
+                      {(isInsufficientSource || isOverDebtBalance || isSameCardAccount) && (
+                        <div className="p-2 bg-rose-50 border border-rose-200 rounded-lg text-[10px] font-bold text-rose-700 flex items-start gap-1.5">
+                          <AlertTriangle className="h-3.5 w-3.5 text-rose-600 shrink-0 mt-0.5" />
+                          <span>
+                            {isSameCardAccount
+                              ? 'Tidak dapat membayar tagihan kartu/paylater menggunakan rekening tagihan yang sama.'
+                              : isInsufficientSource
+                              ? `Saldo ${sourceAccObj?.name} tidak mencukupi untuk nominal cicilan ini.`
+                              : `Nominal bayar melebihi sisa pokok hutang (${formatterIDR.format(selectedDebtObj.balance)}).`}
+                          </span>
+                        </div>
+                      )}
+                    </div>
                   )}
                 </div>
-              </div>
-            )}
+              );
+            })()}
 
             {/* 2. Penerimaan Hutang Baru */}
             {type === 'income' && category === 'Penerimaan Utang Baru' && (
@@ -1842,7 +2209,11 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
                   placeholder="Contoh: Beli saham BBRI / Emas 5 gram"
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
-                  onBlur={handleSuggestCategory}
+                  onBlur={() => {
+                    if (!hasManuallySelectedCategory) {
+                      handleSuggestCategory();
+                    }
+                  }}
                   className="w-full bg-slate-50 border border-slate-200 rounded-lg pl-9 pr-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-700"
                 />
               </div>
@@ -2112,7 +2483,11 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
                         onClick={() => {
                           if (onManualRunRecurring) {
                             onManualRunRecurring(rec.id);
-                            alert(`Transaksi rutin '${rec.title}' (${formatterIDR.format(rec.amount)}) berhasil langsung ditambahkan ke jurnal transaksi!`);
+                            showToast({
+                              type: 'success',
+                              title: 'Transaksi Rutin Dicatat',
+                              message: `'${rec.title}' (${formatterIDR.format(rec.amount)}) berhasil ditambahkan ke jurnal transaksi.`,
+                            });
                           }
                         }}
                         className="flex-1 flex items-center justify-center gap-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 text-[10px] font-bold py-1.5 px-2 rounded-lg transition cursor-pointer"
@@ -2143,11 +2518,7 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
                       </button>
 
                       <button
-                        onClick={() => {
-                          if (confirm(`Apakah Anda yakin ingin menghapus jadwal rutin '${rec.title}'?`)) {
-                            onDeleteRecurringTransaction && onDeleteRecurringTransaction(rec.id);
-                          }
-                        }}
+                        onClick={() => setDeleteRecurringConfirm({ id: rec.id, title: rec.title })}
                         className="p-1.5 rounded-lg border bg-rose-50 hover:bg-rose-100 text-rose-600 border-rose-200 text-[10px] transition cursor-pointer"
                         title="Hapus Jadwal"
                       >
@@ -2858,7 +3229,13 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
                           </div>
                         </td>
                         <td className="py-3.5 px-4 font-semibold text-slate-700 whitespace-nowrap">
-                          {acc ? acc.name : 'Unknown Account'}
+                          {tx.isAdjustment ? (
+                            <span className="inline-flex items-center px-2 py-0.5 rounded bg-indigo-50 text-indigo-700 text-[10px] font-bold border border-indigo-200">
+                              Non-Kas / Penyesuaian
+                            </span>
+                          ) : (
+                            acc ? acc.name : 'Unknown Account'
+                          )}
                         </td>
                         <td className="py-3.5 px-4">
                           <span className={`inline-block px-2 py-0.5 rounded font-bold uppercase text-[9px] ${
@@ -2871,6 +3248,17 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
                         </td>
                         <td className="py-3.5 px-4 text-slate-800 font-medium max-w-[200px]" title={tx.description}>
                           <div className="truncate font-semibold">{tx.description}</div>
+                          {(() => {
+                            const coaInfo = resolveTransactionCoaCodes(tx, accounts, storedCoaList, kprCoaMapping);
+                            if ((tx.coaDebitCode && tx.coaCreditCode) || coaInfo.isKprRelated) {
+                              return (
+                                <div className="mt-0.5 text-[10px] font-mono tabular-nums text-slate-500 truncate">
+                                  Dr {coaInfo.debitCode} · Cr {coaInfo.creditCode}
+                                </div>
+                              );
+                            }
+                            return null;
+                          })()}
                           {(tx.unitPrice || tx.units) && (
                             <div className="flex items-center gap-1 mt-0.5 text-[10px] text-indigo-600 font-bold">
                               <Coins className="h-3 w-3 shrink-0" />
@@ -3303,6 +3691,49 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
               )}
             </div>
 
+          </div>
+        </div>
+      )}
+
+      {/* IN-APP CONFIRMATION MODAL: DELETE RECURRING */}
+      {deleteRecurringConfirm && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 animate-fadeIn">
+          <div className="bg-white rounded-2xl max-w-sm w-full p-5 shadow-2xl border border-slate-200 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="p-2.5 bg-rose-100 text-rose-600 rounded-xl shrink-0">
+                <AlertTriangle className="h-5 w-5" />
+              </div>
+              <div className="space-y-1">
+                <h4 className="font-extrabold text-sm text-slate-800">Hapus Jadwal Rutin?</h4>
+                <p className="text-xs text-slate-600 leading-relaxed">
+                  Apakah Anda yakin ingin menghapus jadwal transaksi rutin <strong>"{deleteRecurringConfirm.title}"</strong>?
+                </p>
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setDeleteRecurringConfirm(null)}
+                className="px-3.5 py-2 rounded-xl text-xs font-bold text-slate-600 bg-slate-100 hover:bg-slate-200 transition cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  onDeleteRecurringTransaction && onDeleteRecurringTransaction(deleteRecurringConfirm.id);
+                  showToast({
+                    type: 'success',
+                    title: 'Jadwal Rutin Dihapus',
+                    message: `Jadwal '${deleteRecurringConfirm.title}' berhasil dihapus.`,
+                  });
+                  setDeleteRecurringConfirm(null);
+                }}
+                className="px-4 py-2 rounded-xl text-xs font-extrabold text-white bg-rose-600 hover:bg-rose-700 transition cursor-pointer shadow-xs"
+              >
+                Ya, Hapus
+              </button>
+            </div>
           </div>
         </div>
       )}

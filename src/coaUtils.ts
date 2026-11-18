@@ -17,11 +17,15 @@ export const DEFAULT_COA_LIST: AccountCOA[] = [
   { code: '1300', name: 'E-Wallet (GoPay, OVO, ShopeePay)', category: 'Asset', normalBalance: 'Debet', description: 'Dompet digital dan transaksi online' },
   { code: '1400', name: 'Alokasi Dana Darurat', category: 'Asset', normalBalance: 'Debet', description: 'Dana cadangan darurat likuid' },
   { code: '1500', name: 'Portofolio Investasi (Saham/Emas/Reksadana)', category: 'Asset', normalBalance: 'Debet', description: 'Investasi pasar modal dan logam mulia' },
+  { code: '1590', name: 'Akumulasi Penyesuaian Nilai Investasi', category: 'Asset', normalBalance: 'Kredit', description: 'Akun kontra untuk koreksi/depresiasi nilai aset investasi (non-kas)' },
+  { code: '1600', name: 'Aset Properti & KPR', category: 'Asset', normalBalance: 'Debet', description: 'Nilai perolehan aset properti residensial atau komersial melalui KPR' },
   
   // 2000: Kewajiban
   { code: '2100', name: 'Utang Kartu Kredit', category: 'Liability', normalBalance: 'Kredit', description: 'Tagihan penggunaan limit kartu kredit' },
   { code: '2200', name: 'Utang Paylater', category: 'Liability', normalBalance: 'Kredit', description: 'Tagihan pinjaman paylater singkat' },
-  { code: '2300', name: 'Pinjaman Personal / Bank / KPR', category: 'Liability', normalBalance: 'Kredit', description: 'Kewajiban pinjaman jangka panjang' },
+  { code: '2300', name: 'Pinjaman Personal / Bank / KTA', category: 'Liability', normalBalance: 'Kredit', description: 'Kewajiban pinjaman personal dan multi-guna jangka panjang' },
+  { code: '2310', name: 'Utang Pokok KPR (Kredit Pemilikan Rumah)', category: 'Liability', normalBalance: 'Kredit', description: 'Kewajiban pokok pinjaman fasilitas Kredit Pemilikan Rumah' },
+  { code: '2390', name: 'Utang Bunga Akrual', category: 'Liability', normalBalance: 'Kredit', description: 'Akumulasi kewajiban bunga pinjaman berjalan hasil jurnal penyesuaian' },
   
   // 3000: Ekuitas
   { code: '3100', name: 'Modal Awal Keuangan', category: 'Equity', normalBalance: 'Kredit', description: 'Setoran modal saldo awal akun' },
@@ -42,7 +46,11 @@ export const DEFAULT_COA_LIST: AccountCOA[] = [
   { code: '5600', name: 'Beban Kesehatan & Medis', category: 'Expense', normalBalance: 'Debet', description: 'Obat, dokter, asuransi, dan perawatan' },
   { code: '5700', name: 'Beban Pendidikan & Pengembangan Diri', category: 'Expense', normalBalance: 'Debet', description: 'Buku, kursus, seminar, dan spp' },
   { code: '5800', name: 'Beban Angsuran Utang & Bunga', category: 'Expense', normalBalance: 'Debet', description: 'Pembayaran pokok & bunga utang' },
+  { code: '5810', name: 'Beban Bunga KPR & Pinjaman Akrual', category: 'Expense', normalBalance: 'Debet', description: 'Porsi beban bunga KPR bulanan dan jurnal penyesuaian akrual bunga' },
+  { code: '5820', name: 'Beban Provisi, Admin & Legal KPR', category: 'Expense', normalBalance: 'Debet', description: 'Biaya akad KPR: provisi bank, appraisal, notaris, dan AJB' },
+  { code: '5830', name: 'Beban Pajak & Asuransi Properti (BPHTB/PBB)', category: 'Expense', normalBalance: 'Debet', description: 'Bea perolehan hak atas tanah/bangunan, PBB, dan premi asuransi KPR' },
   { code: '5900', name: 'Beban Operasional Lainnya', category: 'Expense', normalBalance: 'Debet', description: 'Pengeluaran tak terduga lainnya' },
+  { code: '5950', name: 'Beban Depresiasi & Penurunan Nilai Investasi', category: 'Expense', normalBalance: 'Debet', description: 'Beban non-kas atas koreksi/depresiasi nilai aset investasi berdasarkan durasi kepemilikan' },
 ];
 
 export const getStoredCoaList = (): AccountCOA[] => {
@@ -51,6 +59,12 @@ export const getStoredCoaList = (): AccountCOA[] => {
     if (saved) {
       const parsed = JSON.parse(saved);
       if (Array.isArray(parsed) && parsed.length > 0) {
+        const existingCodes = new Set(parsed.map((c: AccountCOA) => c.code));
+        const missingDefaults = DEFAULT_COA_LIST.filter((d) => !existingCodes.has(d.code));
+        if (missingDefaults.length > 0) {
+          const merged = [...parsed, ...missingDefaults].sort((a, b) => a.code.localeCompare(b.code));
+          return merged;
+        }
         return parsed;
       }
     }
@@ -146,7 +160,7 @@ export const getAccountCoaMapping = (acc: Account, customCoaList?: AccountCOA[])
 export interface MasterChangeLog {
   id: string;
   timestamp: string;
-  targetType: 'COA' | 'Account' | 'Category';
+  targetType: 'COA' | 'Account' | 'Category' | 'KPR';
   targetName: string;
   action: 'CREATE' | 'UPDATE' | 'DELETE' | 'RECONCILE' | 'SYNC';
   details: string;
@@ -167,7 +181,7 @@ export const getMasterChangeLogs = (): MasterChangeLog[] => {
 };
 
 export const addMasterChangeLog = (
-  targetType: 'COA' | 'Account' | 'Category',
+  targetType: 'COA' | 'Account' | 'Category' | 'KPR',
   targetName: string,
   action: 'CREATE' | 'UPDATE' | 'DELETE' | 'RECONCILE' | 'SYNC',
   details: string,

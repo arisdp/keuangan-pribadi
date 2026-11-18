@@ -1,22 +1,31 @@
 import React, { useState, useMemo } from 'react';
-import { Account, CategoryBudget, AccountType, Transaction } from '../types';
+import { Account, CategoryBudget, Transaction } from '../types';
 import { CategoryNode, flattenCategoryHierarchy } from '../categoryHierarchy';
+import {
+  calculateTotalLiquidCash,
+  calculateCreditPaylaterBills,
+  getLiquidAccounts,
+  getCreditAccounts,
+  getAccountCreditBill,
+  isInternalTransfer,
+  classifyTransaction,
+} from '../utils/accountingEngine';
+import { formatterIDR } from '../utils/formatters';
+import { showToast } from '../utils/toast';
 import { FormattedNumberInput } from './FormattedNumberInput';
 import { BudgetRebalancingCard } from './BudgetRebalancingCard';
-import { Wallet, Settings, Pencil, Plus, Trash2, ShieldAlert, BarChart3, TrendingUp, TrendingDown, AlertTriangle, CheckCircle2, Info, Filter, ArrowUpRight, Flame, ShieldCheck } from 'lucide-react';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, Cell, ReferenceLine } from 'recharts';
+import { Wallet, Settings, Plus, Trash2, ShieldAlert, BarChart3, AlertTriangle, CheckCircle2, Info, ShieldCheck, ArrowRight } from 'lucide-react';
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, Cell } from 'recharts';
 
 interface BudgetTabProps {
   accounts: Account[];
   budgets: CategoryBudget[];
   transactions: Transaction[];
   masterCategories?: CategoryNode[];
-  onUpdateAccountBalance: (accountId: string, newStartingBalance: number) => void;
-  onAddAccount: (name: string, type: AccountType, startingBalance: number) => void;
-  onDeleteAccount: (accountId: string) => void;
   onUpdateBudgetLimit: (category: string, newLimit: number) => void;
   onAddBudgetCategory: (category: string, type: 'expense' | 'saving' | 'investment', limit: number) => void;
   onDeleteBudgetCategory: (category: string) => void;
+  onNavigateToAccounts?: () => void;
 }
 
 export const BudgetTab: React.FC<BudgetTabProps> = ({
@@ -24,18 +33,11 @@ export const BudgetTab: React.FC<BudgetTabProps> = ({
   budgets,
   transactions,
   masterCategories = [],
-  onUpdateAccountBalance,
-  onAddAccount,
-  onDeleteAccount,
   onUpdateBudgetLimit,
   onAddBudgetCategory,
   onDeleteBudgetCategory,
+  onNavigateToAccounts,
 }) => {
-  // Add Account states
-  const [newAccName, setNewAccName] = useState('');
-  const [newAccType, setNewAccType] = useState<AccountType>('bank');
-  const [newAccBalance, setNewAccBalance] = useState('');
-
   // Add Budget states
   const [newBudCat, setNewBudCat] = useState('');
   const [newBudType, setNewBudType] = useState<'expense' | 'saving' | 'investment'>('expense');
@@ -52,33 +54,30 @@ export const BudgetTab: React.FC<BudgetTabProps> = ({
   const [isFocusModalOpen, setIsFocusModalOpen] = useState<boolean>(true);
   const [dismissedFocusAlerts, setDismissedFocusAlerts] = useState<string[]>([]);
 
-  const formatterIDR = new Intl.NumberFormat('id-ID', {
-    style: 'currency',
-    currency: 'IDR',
-    minimumFractionDigits: 0,
-  });
-
-  const handleAddAccountSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newAccName || !newAccBalance || parseFloat(newAccBalance) < 0) {
-      alert('Mohon isi nama akun dan saldo awal dengan benar.');
-      return;
-    }
-    onAddAccount(newAccName, newAccType, parseFloat(newAccBalance));
-    setNewAccName('');
-    setNewAccBalance('');
-  };
-
   const handleAddBudgetSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newBudCat || !newBudLimit || parseFloat(newBudLimit) < 0) {
-      alert('Mohon isi nama kategori dan batas limit anggaran dengan benar.');
+      showToast({
+        type: 'warning',
+        title: 'Input Belum Lengkap',
+        message: 'Mohon isi nama kategori dan batas limit anggaran dengan benar.',
+      });
       return;
     }
     onAddBudgetCategory(newBudCat, newBudType, parseFloat(newBudLimit));
     setNewBudCat('');
     setNewBudLimit('');
   };
+
+  // Account Liquidity Summary (Single Source of Truth from AccountsTab)
+  const accountLiquiditySummary = useMemo(() => {
+    return {
+      totalLiquidCash: calculateTotalLiquidCash(accounts),
+      totalCreditBills: calculateCreditPaylaterBills(accounts),
+      liquidAccounts: getLiquidAccounts(accounts),
+      creditAccounts: getCreditAccounts(accounts),
+    };
+  }, [accounts]);
 
   // Compute actual vs budget comparison list
   const budgetComparisonList = useMemo(() => {
@@ -89,6 +88,7 @@ export const BudgetTab: React.FC<BudgetTabProps> = ({
     return filteredBudgets.map((b) => {
       const actualSpent = transactions
         .filter((t) => {
+          if (isInternalTransfer(t) || classifyTransaction(t) === 'debt_proceeds') return false;
           const isCategoryMatch = t.category.toLowerCase() === b.category.toLowerCase();
           const isTypeMatch = t.type === b.type;
           const isMonthMatch = selectedMonth ? t.date.startsWith(selectedMonth) : true;
@@ -521,93 +521,94 @@ export const BudgetTab: React.FC<BudgetTabProps> = ({
       />
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-        {/* 1. SEKTOR PENGATURAN REKENING & SALDO AWAL */}
-      <div className="space-y-6">
-        <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
-          <div className="flex items-center gap-2 mb-4">
-            <Wallet className="h-5 w-5 text-blue-600" />
-            <h3 className="font-semibold text-slate-800 text-sm uppercase tracking-wider">Atur Rekening & Saldo Awal</h3>
-          </div>
+        {/* 1. RINGKASAN LIKUIDITAS & KEWAJIBAN AKUN (TERHUBUNG KE MENU MASTER REKENING) */}
+        <div className="space-y-6">
+          <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-5">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <Wallet className="h-5 w-5 text-blue-600" />
+                <div>
+                  <h3 className="font-semibold text-slate-800 text-sm uppercase tracking-wider">
+                    Ringkasan Likuiditas & Kewajiban Akun
+                  </h3>
+                  <p className="text-[11px] text-slate-500">
+                    Saldo dikelola terpusat di menu Akun &amp; Rekening agar bebas duplikasi.
+                  </p>
+                </div>
+              </div>
+              {onNavigateToAccounts && (
+                <button
+                  type="button"
+                  onClick={onNavigateToAccounts}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-50 hover:bg-blue-100 text-blue-700 font-bold text-xs rounded-lg border border-blue-200 transition cursor-pointer shrink-0"
+                >
+                  <span>Kelola di Master Akun &amp; Rekening</span>
+                  <ArrowRight className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
 
-          <div className="space-y-4">
-            {accounts.map((acc) => (
-              <div key={acc.id} className="flex flex-col sm:flex-row sm:items-center justify-between p-4 bg-slate-50 border border-slate-100 rounded-lg gap-4">
-                <div className="flex items-center space-x-3">
-                  <div className="p-2 bg-white rounded-lg border border-slate-100 text-slate-500 shadow-xxs">
-                    <Wallet className="h-4 w-4" />
-                  </div>
+            {/* Totals KPI */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="p-3.5 bg-emerald-50/70 border border-emerald-200 rounded-xl">
+                <span className="text-[10px] font-extrabold uppercase text-emerald-700 block">
+                  Total Kas Likuid ({accountLiquiditySummary.liquidAccounts.length} Akun)
+                </span>
+                <p className="text-base font-black text-emerald-900 mt-1 font-mono">
+                  {formatterIDR.format(accountLiquiditySummary.totalLiquidCash)}
+                </p>
+              </div>
+              <div className="p-3.5 bg-rose-50/70 border border-rose-200 rounded-xl">
+                <span className="text-[10px] font-extrabold uppercase text-rose-700 block">
+                  Tagihan Kartu Kredit &amp; Paylater ({accountLiquiditySummary.creditAccounts.length} Akun)
+                </span>
+                <p className="text-base font-black text-rose-900 mt-1 font-mono">
+                  {formatterIDR.format(accountLiquiditySummary.totalCreditBills)}
+                </p>
+              </div>
+            </div>
+
+            {/* Compact Read-Only Account List */}
+            <div className="space-y-2.5 max-h-72 overflow-y-auto pr-1">
+              {accountLiquiditySummary.liquidAccounts.map((acc) => (
+                <div
+                  key={acc.id}
+                  className="flex items-center justify-between p-3 bg-slate-50 border border-slate-100 rounded-lg"
+                >
                   <div>
-                    <h4 className="font-bold text-slate-700 text-sm">{acc.name}</h4>
-                    <span className="text-[10px] uppercase font-bold text-slate-400 px-1.5 py-0.5 bg-slate-200 rounded">
+                    <h4 className="font-bold text-slate-700 text-xs">{acc.name}</h4>
+                    <span className="text-[10px] uppercase font-bold text-slate-500 px-1.5 py-0.5 bg-slate-200/80 rounded">
                       {acc.type}
                     </span>
                   </div>
+                  <span className="font-mono font-bold text-xs text-slate-800">
+                    {formatterIDR.format(acc.currentBalance)}
+                  </span>
                 </div>
+              ))}
 
-                <div className="flex items-center space-x-2">
-                  <div className="relative">
-                    <span className="absolute left-3 top-2 text-xs font-bold text-slate-400">Rp</span>
-                    <FormattedNumberInput
-                      value={acc.startingBalance}
-                      onChange={(_, numVal) => onUpdateAccountBalance(acc.id, numVal)}
-                      className="bg-white border border-slate-200 rounded-md pl-8 pr-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-700 font-semibold w-32"
-                      title="Ubah Saldo Awal"
-                    />
+              {accountLiquiditySummary.creditAccounts.map((acc) => (
+                <div
+                  key={acc.id}
+                  className="flex items-center justify-between p-3 bg-amber-50/50 border border-amber-100 rounded-lg"
+                >
+                  <div>
+                    <h4 className="font-bold text-slate-700 text-xs">{acc.name}</h4>
+                    <span className="text-[10px] uppercase font-bold text-amber-700 px-1.5 py-0.5 bg-amber-100 rounded">
+                      {acc.type} • Sisa Limit: {formatterIDR.format(acc.currentBalance)}
+                    </span>
                   </div>
-                  {accounts.length > 1 && (
-                    <button
-                      onClick={() => onDeleteAccount(acc.id)}
-                      className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded transition cursor-pointer"
-                      title="Hapus Rekening"
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </button>
-                  )}
+                  <div className="text-right">
+                    <span className="text-[10px] text-rose-600 font-bold block">Tagihan Terpakai</span>
+                    <span className="font-mono font-bold text-xs text-rose-700">
+                      {formatterIDR.format(getAccountCreditBill(acc))}
+                    </span>
+                  </div>
                 </div>
-              </div>
-            ))}
-          </div>
-
-          {/* Form Tambah Rekening */}
-          <form onSubmit={handleAddAccountSubmit} className="mt-6 pt-6 border-t border-slate-100 space-y-3">
-            <h4 className="text-xs font-bold text-slate-600 uppercase tracking-wider">Tambah Rekening Baru</h4>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-              <input
-                type="text"
-                placeholder="Nama Akun (e.g. Bank BCA)"
-                value={newAccName}
-                onChange={(e) => setNewAccName(e.target.value)}
-                className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-700"
-                required
-              />
-              <select
-                value={newAccType}
-                onChange={(e) => setNewAccType(e.target.value as AccountType)}
-                className="bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-700"
-              >
-                <option value="bank">Bank</option>
-                <option value="cash">Tunai (Cash)</option>
-                <option value="e-wallet">E-Wallet</option>
-                <option value="credit-card">Kartu Kredit</option>
-                <option value="paylater">PayLater / SPayLater</option>
-              </select>
-              <FormattedNumberInput
-                placeholder="Saldo Awal (Rp)"
-                value={newAccBalance}
-                onChange={(val) => setNewAccBalance(val)}
-                className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-700 font-semibold"
-                required
-              />
+              ))}
             </div>
-            <button
-              type="submit"
-              className="flex items-center gap-1.5 bg-blue-50 hover:bg-blue-100 text-blue-600 font-bold py-1.5 px-3 rounded-lg text-xs transition cursor-pointer"
-            >
-              <Plus className="h-4 w-4" /> Tambah Rekening
-            </button>
-          </form>
+          </div>
         </div>
-      </div>
 
       {/* 2. SEKTOR PENGATURAN ANGGARAN & KATEGORI */}
       <div className="space-y-6">

@@ -1,7 +1,9 @@
 import React, { useEffect, useRef, useState, useMemo } from 'react';
 import * as d3 from 'd3';
 import { Transaction } from '../types';
-import { TrendingUp, TrendingDown, Calendar, Filter, Sparkles, AlertCircle, ArrowUpRight, ArrowDownRight, Layers } from 'lucide-react';
+import { isOperatingExpense } from '../utils/accountingEngine';
+import { formatterIDR } from '../utils/formatters';
+import { TrendingUp, Filter, ArrowUpRight, ArrowDownRight } from 'lucide-react';
 
 interface MonthlyExpenseD3TrendChartProps {
   transactions: Transaction[];
@@ -28,30 +30,21 @@ export const MonthlyExpenseD3TrendChart: React.FC<MonthlyExpenseD3TrendChartProp
     y: number;
   } | null>(null);
 
-  const formatterIDR = new Intl.NumberFormat('id-ID', {
-    style: 'currency',
-    currency: 'IDR',
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 0,
-  });
-
-  // Unique expense categories
+  // Unique operating expense categories
   const categoriesList = useMemo(() => {
     const cats = new Set<string>();
     transactions
-      .filter((t) => t.type === 'expense' && !t.category.toLowerCase().includes('mutasi'))
+      .filter((t) => isOperatingExpense(t))
       .forEach((t) => {
         if (t.category) cats.add(t.category);
       });
     return Array.from(cats).sort();
   }, [transactions]);
 
-  // Aggregate monthly expense data
+  // Aggregate monthly operating expense data
   const monthlyDataList = useMemo(() => {
-    const isInternal = (cat: string) => cat.toLowerCase().includes('mutasi');
     const filteredTxs = transactions.filter((t) => {
-      const isExpense = t.type === 'expense' && !isInternal(t.category);
-      if (!isExpense) return false;
+      if (!isOperatingExpense(t)) return false;
       if (selectedCategory !== 'all' && t.category !== selectedCategory) return false;
       return true;
     });

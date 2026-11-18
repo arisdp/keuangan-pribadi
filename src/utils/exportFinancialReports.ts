@@ -1,6 +1,8 @@
 import jsPDF from 'jspdf';
 import html2canvas from 'html2canvas';
 import { Transaction, Account, Debt, InvestmentAsset } from '../types';
+import { isOperatingIncome, isOperatingExpense } from './accountingEngine';
+import { showToast } from './toast';
 
 interface BalanceSheetExportData {
   liquidAssets: number;
@@ -18,9 +20,13 @@ interface CashFlowExportData {
   operatingInflows: number;
   operatingOutflows: number;
   netOperating: number;
+  investmentInflows?: number;
   investmentOutflows: number;
   netInvesting: number;
+  savingInflows?: number;
   savingOutflows: number;
+  debtPaymentOutflows?: number;
+  debtProceedsInflows?: number;
   netFinancing: number;
   netCashChange: number;
 }
@@ -34,23 +40,13 @@ interface BudgetRealizationExportData {
   status: string;
 }
 
-const formatCurrencyIDR = (val: number) => {
-  return new Intl.NumberFormat('id-ID', {
-    style: 'currency',
-    currency: 'IDR',
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 0,
-  }).format(val);
-};
-
 // 1. Export Laba Rugi (Income Statement) to CSV
 export const exportIncomeStatementToCSV = (
   transactions: Transaction[],
   periodTitle: string = 'Periode Berjalan'
 ) => {
-  const isInternal = (cat: string) => cat.toLowerCase().includes('mutasi');
-  const incomeTxs = transactions.filter((t) => t.type === 'income' && !isInternal(t.category));
-  const expenseTxs = transactions.filter((t) => t.type === 'expense' && !isInternal(t.category));
+  const incomeTxs = transactions.filter((t) => isOperatingIncome(t));
+  const expenseTxs = transactions.filter((t) => isOperatingExpense(t));
 
   // Category aggregates
   const incomeCategorySums: Record<string, number> = {};
@@ -71,19 +67,19 @@ export const exportIncomeStatementToCSV = (
   csv += `Periode Laporan,${periodTitle}\n`;
   csv += `Tanggal Diterbitkan,${new Date().toLocaleDateString('id-ID')}\n\n`;
 
-  csv += `KATEGORI PENDAPATAN,JUMLAH (IDR)\n`;
+  csv += `KATEGORI PENDAPATAN OPERASIONAL,JUMLAH (IDR)\n`;
   Object.entries(incomeCategorySums).forEach(([cat, val]) => {
     csv += `"${cat}",${val}\n`;
   });
-  csv += `TOTAL PENDAPATAN,${totalIncome}\n\n`;
+  csv += `TOTAL PENDAPATAN OPERASIONAL,${totalIncome}\n\n`;
 
-  csv += `KATEGORI BEBAN & PENGELUARAN,JUMLAH (IDR)\n`;
+  csv += `KATEGORI BEBAN & PENGELUARAN OPERASIONAL,JUMLAH (IDR)\n`;
   Object.entries(expenseCategorySums).forEach(([cat, val]) => {
     csv += `"${cat}",${val}\n`;
   });
-  csv += `TOTAL BEBAN & PENGELUARAN,${totalExpense}\n\n`;
+  csv += `TOTAL BEBAN OPERASIONAL,${totalExpense}\n\n`;
 
-  csv += `SURPLUS / DEFISIT BERSIH (NET INCOME),${netSurplus}\n`;
+  csv += `SURPLUS / DEFISIT OPERASIONAL BERSIH (NET OPERATING INCOME),${netSurplus}\n`;
 
   downloadBlob(csv, `Laporan_Laba_Rugi_${new Date().toISOString().split('T')[0]}.csv`, 'text/csv;charset=utf-8;');
 };
@@ -134,12 +130,20 @@ export const exportCashFlowToCSV = (data: CashFlowExportData) => {
   csv += `Pengeluaran Kas Operasional (Beban Harian),-${data.operatingOutflows}\n`;
   csv += `ARUS KAS BERSIH OPERASIONAL,${data.netOperating}\n\n`;
 
-  csv += `AKTIVITAS INVESTASI,JUMLAH (IDR)\n`;
-  csv += `Pengeluaran Investasi (Beli Aset),-${data.investmentOutflows}\n`;
-  csv += `ARUS KAS BERSIH INVESTASI,${data.netInvesting}\n\n`;
-
-  csv += `AKTIVITAS pendanaan / TABUNGAN,JUMLAH (IDR)\n`;
+  csv += `AKTIVITAS INVESTASI & CADANGAN ASET,JUMLAH (IDR)\n`;
+  if (data.investmentInflows) {
+    csv += `Pencairan / Penjualan Investasi,${data.investmentInflows}\n`;
+  }
+  csv += `Pembelian / Setoran Investasi,-${data.investmentOutflows}\n`;
+  if (data.savingInflows) {
+    csv += `Pencairan Dana Darurat,${data.savingInflows}\n`;
+  }
   csv += `Alokasi Tabungan & Dana Darurat,-${data.savingOutflows}\n`;
+  csv += `ARUS KAS BERSIH INVESTASI & CADANGAN,${data.netInvesting}\n\n`;
+
+  csv += `AKTIVITAS PENDANAAN (PEMBIAYAAN & UTANG),JUMLAH (IDR)\n`;
+  csv += `Penerimaan Pencairan Pinjaman / Utang Baru,${data.debtProceedsInflows || 0}\n`;
+  csv += `Pembayaran Cicilan Pokok Utang & KPR,-${data.debtPaymentOutflows || 0}\n`;
   csv += `ARUS KAS BERSIH PENDANAAN,${data.netFinancing}\n\n`;
 
   csv += `PERUBAHAN BERSIH KAS (NET CASH CHANGE),${data.netCashChange}\n`;
@@ -167,7 +171,11 @@ export const exportReportSectionToPDF = async (
 ) => {
   const element = document.getElementById(elementId);
   if (!element) {
-    alert('Elemen laporan tidak ditemukan.');
+    showToast({
+      type: 'error',
+      title: 'Gagal Ekspor PDF',
+      message: 'Elemen laporan tidak ditemukan di halaman.',
+    });
     return;
   }
 
@@ -201,7 +209,11 @@ export const exportReportSectionToPDF = async (
     pdf.save(`${reportTitle.replace(/\s+/g, '_')}_${new Date().toISOString().split('T')[0]}.pdf`);
   } catch (err) {
     console.error('Failed to export PDF:', err);
-    alert('Gagal mengekspor laporan ke PDF.');
+    showToast({
+      type: 'error',
+      title: 'Gagal Ekspor PDF',
+      message: 'Terjadi kendala saat membuat berkas PDF laporan.',
+    });
   }
 };
 

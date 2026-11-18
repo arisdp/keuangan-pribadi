@@ -41,6 +41,10 @@ import {
   BarChart3,
 } from 'lucide-react';
 
+import { calculateAccountGLBalance } from '../utils/accountingEngine';
+import { formatterIDR } from '../utils/formatters';
+import { showToast } from '../utils/toast';
+
 interface AccountingIntegrityModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -52,12 +56,6 @@ interface AccountingIntegrityModalProps {
   onUpdateAccounts?: (updatedAccounts: Account[]) => void;
   defaultTab?: 'audit' | 'auto-reconcile' | 'manual-reconcile' | 'change-log';
 }
-
-const formatterIDR = new Intl.NumberFormat('id-ID', {
-  style: 'currency',
-  currency: 'IDR',
-  maximumFractionDigits: 0,
-});
 
 export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> = ({
   isOpen,
@@ -85,6 +83,7 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
   const [changeLogs, setChangeLogs] = useState<MasterChangeLog[]>([]);
   const [logFilterAction, setLogFilterAction] = useState<string>('ALL');
   const [logSearchQuery, setLogSearchQuery] = useState<string>('');
+  const [showClearLogsConfirm, setShowClearLogsConfirm] = useState<boolean>(false);
 
   // Sync state on modal open
   useEffect(() => {
@@ -121,44 +120,29 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
     return names;
   }, [masterCategories]);
 
-  // 1. ACCOUNT BALANCES INTEGRITY AUDIT
+  // 1. ACCOUNT BALANCES INTEGRITY AUDIT (Menggunakan Mesin GL Terpusat termasuk initialDebt)
   const accountAudit = useMemo(() => {
     return accounts.map((acc) => {
-      let calculatedDelta = 0;
-
-      transactions.forEach((tx) => {
-        if (tx.accountId === acc.id) {
-          if (tx.type === 'income') {
-            calculatedDelta += tx.amount;
-          } else if (tx.type === 'expense' || tx.type === 'saving' || tx.type === 'investment') {
-            calculatedDelta -= tx.amount;
-          }
-        }
-      });
-
-      const startingBal = acc.startingBalance || 0;
-      const glCalculatedBalance = startingBal + calculatedDelta;
-      const recordedBalance = acc.currentBalance;
+      const gl = calculateAccountGLBalance(acc, transactions);
 
       // Actual cash balance (user input override or recorded current balance)
       const actualCashBalance = customActualBalances[acc.id] !== undefined
         ? customActualBalances[acc.id]
-        : recordedBalance;
+        : gl.recordedBalance;
 
-      const difference = actualCashBalance - glCalculatedBalance;
-      const txCount = transactions.filter((t) => t.accountId === acc.id).length;
+      const difference = actualCashBalance - gl.glCalculatedBalance;
 
       return {
         id: acc.id,
         name: acc.name,
         type: acc.type,
-        startingBal,
-        recordedBalance,
-        calculatedDelta,
-        glCalculatedBalance,
+        startingBal: gl.startingBal,
+        recordedBalance: gl.recordedBalance,
+        calculatedDelta: gl.calculatedDelta,
+        glCalculatedBalance: gl.glCalculatedBalance,
         actualCashBalance,
         difference,
-        txCount,
+        txCount: gl.txCount,
       };
     });
   }, [accounts, transactions, customActualBalances]);
@@ -475,7 +459,11 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
   // Export change logs to CSV
   const handleExportLogsCSV = () => {
     if (filteredChangeLogs.length === 0) {
-      alert('Tidak ada log riwayat perubahan yang sesuai untuk diekspor.');
+      showToast({
+        type: 'warning',
+        title: 'Tidak Ada Log',
+        message: 'Tidak ada log riwayat perubahan yang sesuai untuk diekspor.',
+      });
       return;
     }
     const headers = ['Waktu', 'Tipe Target', 'Nama Target', 'Aksi', 'Rincian Perubahan', 'Diubah Oleh'];
@@ -507,7 +495,11 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
 
   const handleExecuteAutoReconciliation = () => {
     if (proposedAdjustmentEntries.length === 0) {
-      alert('Tidak ditemukan selisih antara saldo GL dan saldo kas sebenarnya. Rekonsiliasi 100% seimbang!');
+      showToast({
+        type: 'info',
+        title: 'Rekonsiliasi Seimbang',
+        message: 'Tidak ditemukan selisih antara saldo GL dan saldo kas sebenarnya. Rekonsiliasi 100% seimbang!',
+      });
       return;
     }
 
@@ -595,10 +587,18 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
   };
 
   const handleClearLogs = () => {
-    if (confirm('Apakah Anda yakin ingin membersihkan seluruh riwayat log perubahan master data?')) {
-      clearMasterChangeLogs();
-      setChangeLogs([]);
-    }
+    setShowClearLogsConfirm(true);
+  };
+
+  const confirmClearLogs = () => {
+    clearMasterChangeLogs();
+    setChangeLogs([]);
+    setShowClearLogsConfirm(false);
+    showToast({
+      type: 'success',
+      title: 'Riwayat Log Dibersihkan',
+      message: 'Seluruh log perubahan master data berhasil dihapus.',
+    });
   };
 
   return (
@@ -1544,6 +1544,43 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
           </div>
         </div>
       </div>
+
+      {/* In-App Confirmation Modal for Clearing Logs */}
+      {showClearLogsConfirm && (
+        <div className="fixed inset-0 z-[70] bg-slate-950/60 backdrop-blur-xs flex items-center justify-center p-4 animate-fadeIn">
+          <div className="bg-white dark:bg-slate-900 rounded-2xl max-w-sm w-full p-5 border border-slate-200 dark:border-slate-700 shadow-2xl space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="p-2.5 bg-rose-100 text-rose-600 rounded-xl shrink-0">
+                <AlertTriangle className="h-5 w-5" />
+              </div>
+              <div className="space-y-1">
+                <h4 className="font-extrabold text-sm text-slate-800 dark:text-white">
+                  Bersihkan Riwayat Log?
+                </h4>
+                <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+                  Apakah Anda yakin ingin membersihkan seluruh riwayat log perubahan master data? Tindakan ini tidak dapat dibatalkan.
+                </p>
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 pt-2 border-t border-slate-100 dark:border-slate-800">
+              <button
+                type="button"
+                onClick={() => setShowClearLogsConfirm(false)}
+                className="px-3.5 py-2 rounded-xl text-xs font-bold text-slate-600 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 transition cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={confirmClearLogs}
+                className="px-4 py-2 rounded-xl text-xs font-extrabold text-white bg-rose-600 hover:bg-rose-700 transition cursor-pointer shadow-xs"
+              >
+                Ya, Bersihkan
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

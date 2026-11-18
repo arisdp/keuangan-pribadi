@@ -138,9 +138,9 @@ export const AiLedgerReconciliation: React.FC<AiLedgerReconciliationProps> = ({
       });
     }
 
-    // 4. Audit Missing Account Links
+    // 4. Audit Missing Account Links (skip non-cash adjusting entries)
     const validAccIds = new Set(accounts.map((a) => a.id));
-    const orphanAccTxs = filteredTxs.filter((tx) => !tx.accountId || !validAccIds.has(tx.accountId));
+    const orphanAccTxs = filteredTxs.filter((tx) => !tx.isAdjustment && (!tx.accountId || !validAccIds.has(tx.accountId)));
     if (orphanAccTxs.length > 0) {
       anomalies.push({
         id: 'orphan-account',

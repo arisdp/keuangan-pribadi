@@ -1,17 +1,22 @@
 import React, { useState, useMemo } from 'react';
 import { Transaction, Account, Debt } from '../types';
 import {
+  calculateTotalLiquidCash,
+  calculateCreditPaylaterBills,
+  calculateMonthlyDebtService,
+  classifyTransaction,
+} from '../utils/accountingEngine';
+import { formatterIDR } from '../utils/formatters';
+import {
   TrendingUp,
   TrendingDown,
   ShieldCheck,
   AlertTriangle,
   Scale,
-  Sparkles,
   Info,
   Calendar,
   Sliders,
   CheckCircle2,
-  HelpCircle,
   BarChart3,
 } from 'lucide-react';
 import {
@@ -33,12 +38,6 @@ interface LiquidityProjectionCardProps {
   debts: Debt[];
 }
 
-const formatterIDR = new Intl.NumberFormat('id-ID', {
-  style: 'currency',
-  currency: 'IDR',
-  maximumFractionDigits: 0,
-});
-
 export const LiquidityProjectionCard: React.FC<LiquidityProjectionCardProps> = ({
   transactions,
   accounts,
@@ -48,23 +47,31 @@ export const LiquidityProjectionCard: React.FC<LiquidityProjectionCardProps> = (
   const [inflowAdjustmentPct, setInflowAdjustmentPct] = useState<number>(0);
   const [outflowAdjustmentPct, setOutflowAdjustmentPct] = useState<number>(0);
 
-  // 1. Calculate Historical Monthly Averages (Inflows & Outflows)
+  // 1. Calculate Historical Monthly Averages (Cash Inflows & Outflows excluding internal transfers & loan proceeds)
   const historicalAverages = useMemo(() => {
     const monthlyData: Record<string, { income: number; expense: number }> = {};
 
     transactions.forEach((tx) => {
       if (!tx.date) return;
-      if (tx.category === 'Mutasi Masuk' || tx.category === 'Mutasi Keluar') return;
+      const nature = classifyTransaction(tx);
+      if (nature === 'internal_transfer' || nature === 'debt_proceeds') return;
 
       const ym = tx.date.substring(0, 7);
       if (!monthlyData[ym]) {
         monthlyData[ym] = { income: 0, expense: 0 };
       }
 
-      if (tx.type === 'income') {
-        monthlyData[ym].income += tx.amount;
-      } else if (tx.type === 'expense' || tx.type === 'saving' || tx.type === 'investment') {
-        monthlyData[ym].expense += tx.amount;
+      if (nature === 'operating_income') {
+        monthlyData[ym].income += Math.abs(tx.amount);
+      } else if (
+        nature === 'operating_expense' ||
+        nature === 'debt_principal_pay' ||
+        nature === 'emergency_fund_transfer' ||
+        nature === 'investment_buy'
+      ) {
+        if (tx.type !== 'income') {
+          monthlyData[ym].expense += Math.abs(tx.amount);
+        }
       }
     });
 
@@ -85,17 +92,9 @@ export const LiquidityProjectionCard: React.FC<LiquidityProjectionCardProps> = (
 
   // 2. Current Liquid Assets & Current Short-Term Liabilities
   const currentBaseline = useMemo(() => {
-    // Liquid cash & bank accounts (exclude credit cards & paylater)
-    const liquidAssets = accounts
-      .filter((a) => a.type !== 'credit-card' && a.type !== 'paylater')
-      .reduce((sum, a) => sum + Math.max(0, a.currentBalance), 0);
-
-    // Short-term liabilities (Credit Card balances + Paylater + Debts due)
-    const creditPaylaterLiabilities = accounts
-      .filter((a) => a.type === 'credit-card' || a.type === 'paylater')
-      .reduce((sum, a) => sum + Math.abs(Math.min(0, a.currentBalance)), 0);
-
-    const debtLiabilities = debts.reduce((sum, d) => sum + d.balance, 0);
+    const liquidAssets = Math.max(0, calculateTotalLiquidCash(accounts));
+    const creditPaylaterLiabilities = calculateCreditPaylaterBills(accounts);
+    const debtLiabilities = debts.reduce((sum, d) => sum + Math.max(0, d.balance || 0), 0);
 
     const currentLiabilities = creditPaylaterLiabilities + debtLiabilities;
 
@@ -136,8 +135,8 @@ export const LiquidityProjectionCard: React.FC<LiquidityProjectionCardProps> = (
 
       if (m > 0) {
         accumLiquidAssets = Math.max(0, accumLiquidAssets + netMonthlyCashflow);
-        // Gradually payoff liabilities based on debt min payments
-        const minDebtPay = debts.reduce((sum, d) => sum + d.minPayment, 0);
+        // Gradually payoff liabilities based on debt & credit card min payments
+        const minDebtPay = calculateMonthlyDebtService(accounts, debts);
         accumLiabilities = Math.max(0, accumLiabilities - minDebtPay * 0.5);
       }
 
@@ -173,7 +172,7 @@ export const LiquidityProjectionCard: React.FC<LiquidityProjectionCardProps> = (
       netMonthlyCashflow,
       data,
     };
-  }, [historicalAverages, currentBaseline, inflowAdjustmentPct, outflowAdjustmentPct, debts]);
+  }, [historicalAverages, currentBaseline, inflowAdjustmentPct, outflowAdjustmentPct, accounts, debts]);
 
   // Solvency Advisory Message
   const solvencyAdvisory = useMemo(() => {

@@ -225,7 +225,7 @@ export function OnboardingModal({ isOpen, onClose, username, isCloudSyncActive }
               <div className="w-5 h-5 rounded-full bg-blue-100 text-blue-600 font-extrabold flex items-center justify-center shrink-0">4</div>
               <div>
                 <strong className="text-slate-800 font-bold">Konfigurasikan Fitur Lanjutan:</strong>
-                <p className="text-slate-500 mt-0.5">Isi target Dana Darurat sesuai tanggungan di tab <strong className="font-semibold text-slate-700">"Dana Darurat"</strong>, dan daftarkan utang Anda di tab <strong className="font-semibold text-slate-700">"Utang & Pelunasan"</strong>.</p>
+                <p className="text-slate-500 mt-0.5">Isi target Dana Darurat sesuai tanggungan di tab <strong className="font-semibold text-slate-700">"Dana Darurat"</strong>, dan hitung atau daftarkan utang maupun KPR baru di tab <strong className="font-semibold text-slate-700">"Perhitungan Utang & KPR"</strong>. Seluruh pembayaran cicilan & pelunasan cukup dicatat satu kali di tab <strong className="font-semibold text-slate-700">"Jurnal Transaksi"</strong>.</p>
               </div>
             </div>
           </div>

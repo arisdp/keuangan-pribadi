@@ -3,14 +3,29 @@ import { motion } from 'motion/react';
 import { Transaction, Account, CategoryBudget, Debt, EmergencyFundTransaction, InvestmentAsset, SavingsGoal } from '../types';
 import { FormattedNumberInput } from './FormattedNumberInput';
 import { TaxCalculatorCard } from './TaxCalculatorCard';
+import { DashboardFinancialHealthPanel } from './DashboardFinancialHealthPanel';
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 import { TrendingUp, TrendingDown, Wallet, ShieldAlert, CreditCard, PiggyBank, ArrowRight, CheckCircle2, AlertTriangle, Calendar, ChevronLeft, ChevronRight, ArrowUpRight, ArrowDownRight, Info, Eye, EyeOff, Percent, ArrowDown, Sparkles, Lightbulb, Target, Plus, Trash2, Edit2, Clock, Bell, DollarSign, X, RefreshCw, Activity, BarChart3, Table, GitCommit, Scale, FileCheck, ShieldCheck } from 'lucide-react';
-
-const globalFormatterIDR = new Intl.NumberFormat('id-ID', {
-  style: 'currency',
-  currency: 'IDR',
-  minimumFractionDigits: 0,
-});
+import {
+  calculateTotalLiquidCash,
+  calculateCreditPaylaterBills,
+  calculateTotalEmergencyFund,
+  calculateTotalInvestments,
+  calculateTotalDebts,
+  calculateMonthlyDebtService,
+  calculateIncomeStatementSummary,
+  calculateNetWorthHistory30Days,
+  getAccountCreditBill,
+  getCreditAccounts,
+  getLiquidAccounts,
+  isCreditAccount,
+  isOperatingIncome,
+  isOperatingExpense,
+  isInternalTransfer,
+  classifyTransaction,
+  getTransactionAccountDelta,
+} from '../utils/accountingEngine';
+import { formatterIDR } from '../utils/formatters';
 
 const containerVariants = {
   hidden: { opacity: 0 },
@@ -64,20 +79,18 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
   onQuickAction,
 }) => {
   // 1. Calculate Net Worth (Liquid Accounts + Emergency Funds + Investments - Debts)
-  const liquidAccounts = accounts.filter(a => a.type !== 'credit-card' && a.type !== 'paylater');
-  const creditCardAndPaylaterAccounts = accounts.filter(a => a.type === 'credit-card' || a.type === 'paylater');
+  const liquidAccounts = getLiquidAccounts(accounts);
+  const creditCardAndPaylaterAccounts = getCreditAccounts(accounts);
 
-  const totalLiquidAssets = liquidAccounts.reduce((sum, acc) => sum + acc.currentBalance, 0);
-  const totalCreditCardBills = creditCardAndPaylaterAccounts.reduce((sum, acc) => sum + (acc.usedLimit || 0), 0);
-  const totalDebts = debts.reduce((sum, d) => sum + d.balance, 0) + totalCreditCardBills;
+  const totalLiquidAssets = calculateTotalLiquidCash(accounts);
+  const totalCreditCardBills = calculateCreditPaylaterBills(accounts);
+  const totalDebts = calculateTotalDebts(accounts, debts);
   
   // Total emergency fund
-  const totalEmergency = emergencyTransactions.reduce((sum, tx) => {
-    return tx.type === 'addition' ? sum + tx.amount : sum - tx.amount;
-  }, 0);
+  const totalEmergency = calculateTotalEmergencyFund(emergencyTransactions);
 
   // Total active investments
-  const totalInvestments = (investments || []).reduce((sum, inv) => sum + inv.balance, 0);
+  const totalInvestments = calculateTotalInvestments(investments);
 
   // Unified interconnected Net Worth
   const netWorth = totalLiquidAssets + totalEmergency + totalInvestments - totalDebts;
@@ -127,94 +140,48 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
   const activeMonthStr = `${actualYear}-${String(actualMonth).padStart(2, '0')}`;
   const monthlyTxs = transactions.filter(tx => tx.date.startsWith(activeMonthStr));
 
-  const monthlyIncome = monthlyTxs
-    .filter(tx => tx.type === 'income' && tx.category !== 'Mutasi Masuk' && tx.category !== 'Mutasi Keluar')
-    .reduce((sum, tx) => sum + tx.amount, 0);
+  const monthlySummary = React.useMemo(
+    () => calculateIncomeStatementSummary(monthlyTxs),
+    [monthlyTxs]
+  );
 
-  const monthlyExpense = monthlyTxs
-    .filter(tx => tx.type === 'expense' && tx.category !== 'Mutasi Keluar' && tx.category !== 'Mutasi Masuk')
-    .reduce((sum, tx) => sum + tx.amount, 0);
+  const monthlyIncome = monthlySummary.operatingIncome;
+  const monthlyExpense = monthlySummary.operatingExpense;
+  const monthlySaving = monthlySummary.emergencyAdditions;
+  const monthlyInvestment = monthlySummary.investmentPurchases;
 
-  const monthlySaving = monthlyTxs
-    .filter(tx => tx.type === 'saving')
-    .reduce((sum, tx) => sum + tx.amount, 0);
-
-  const monthlyInvestment = monthlyTxs
-    .filter(tx => tx.type === 'investment')
-    .reduce((sum, tx) => sum + tx.amount, 0);
-
-  // Generate 30-day daily Net Worth trend for the Sparkline next to the Net Worth card
+  // Generate 30-day daily Net Worth trend using centralized accounting engine
   const sparklineData = React.useMemo(() => {
-    const dataPoints = [];
-    const today = new Date(systemTodayStr); // Dynamic today
-    
-    // Construct the last 30 days
-    for (let i = 29; i >= 0; i--) {
-      const d = new Date(today);
-      d.setDate(today.getDate() - i);
-      const dateStr = d.toISOString().split('T')[0];
-      
-      // Rollback any income/expense transactions that happened AFTER dateStr
-      const txsAfter = transactions.filter(tx => tx.date > dateStr && tx.date <= systemTodayStr);
-      
-      let rolledNetWorth = netWorth;
-      txsAfter.forEach(tx => {
-        if (tx.type === 'income') {
-          rolledNetWorth -= tx.amount;
-        } else if (tx.type === 'expense') {
-          rolledNetWorth += tx.amount;
-        }
-      });
-      
-      let rolledAssets = totalCurrentAssets;
-      let rolledDebts = totalDebts;
-      
-      txsAfter.forEach(tx => {
-        if (tx.type === 'income') {
-          rolledAssets -= tx.amount;
-        } else if (tx.type === 'expense') {
-          rolledAssets += tx.amount;
-        }
-      });
+    return calculateNetWorthHistory30Days(
+      transactions,
+      accounts,
+      totalCurrentAssets,
+      totalDebts,
+      systemTodayStr
+    );
+  }, [transactions, accounts, totalCurrentAssets, totalDebts, systemTodayStr]);
 
-      const ratio = rolledAssets > 0 ? (rolledDebts / rolledAssets) * 100 : 100;
-      let status: 'Sehat' | 'Waspada' | 'Kritis' = 'Sehat';
-      if (rolledDebts > 0) {
-        if (ratio <= 35) status = 'Sehat';
-        else if (ratio <= 75) status = 'Waspada';
-        else status = 'Kritis';
-      }
-
-      dataPoints.push({
-        date: d.toLocaleDateString('id-ID', { day: 'numeric', month: 'short' }),
-        netWorth: rolledNetWorth,
-        assets: rolledAssets,
-        debts: rolledDebts,
-        ratio: ratio,
-        status: status,
-      });
-    }
-    return dataPoints;
-  }, [transactions, netWorth, totalCurrentAssets, totalDebts]);
-
-  // Generate 30-day daily cash flow (inflow & outflow) trend
+  // Generate 30-day daily cash flow (inflow & outflow, excluding internal transfers & debt proceeds) trend
   const cashFlowTrend30Days = React.useMemo(() => {
     const dataPoints = [];
-    const today = new Date(systemTodayStr);
+    const today = new Date(`${systemTodayStr}T00:00:00`);
     
     for (let i = 29; i >= 0; i--) {
       const d = new Date(today);
       d.setDate(today.getDate() - i);
-      const dateStr = d.toISOString().split('T')[0];
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      const dateStr = `${y}-${m}-${day}`;
       
       const dayTxs = transactions.filter(tx => tx.date === dateStr);
       
       const inflow = dayTxs
-        .filter(tx => tx.type === 'income')
+        .filter(isOperatingIncome)
         .reduce((sum, tx) => sum + tx.amount, 0);
         
       const outflow = dayTxs
-        .filter(tx => tx.type !== 'income')
+        .filter(tx => !isInternalTransfer(tx) && tx.type !== 'income' && classifyTransaction(tx) !== 'debt_proceeds')
         .reduce((sum, tx) => sum + tx.amount, 0);
         
       let formattedDate = dateStr;
@@ -306,9 +273,9 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
     },
   ];
 
-  // 4. Expense Breakdown by Category for Pie Chart
+  // 4. Expense Breakdown by Category for Pie Chart (Operating Expense Only)
   const expenseByCategory = monthlyTxs
-    .filter(tx => tx.type === 'expense')
+    .filter(isOperatingExpense)
     .reduce((acc: { [key: string]: number }, tx) => {
       acc[tx.category] = (acc[tx.category] || 0) + tx.amount;
       return acc;
@@ -324,7 +291,13 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
   // 5. Budget Status progress
   const budgetProgress = budgets.map(b => {
     const actual = monthlyTxs
-      .filter(tx => tx.category.toLowerCase() === b.category.toLowerCase())
+      .filter(
+        tx =>
+          !isInternalTransfer(tx) &&
+          classifyTransaction(tx) !== 'debt_proceeds' &&
+          tx.type === b.type &&
+          tx.category.toLowerCase() === b.category.toLowerCase()
+      )
       .reduce((sum, tx) => sum + tx.amount, 0);
     const percentage = b.limit > 0 ? (actual / b.limit) * 100 : 0;
     return {
@@ -371,10 +344,10 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
     return transactions;
   }, [transactions, dashboardPeriod, monthlyTxs]);
 
-  // Category Expense Breakdown for Donut Chart
+  // Category Expense Breakdown for Donut Chart (Operating Expense Only)
   const periodExpenseByCategory = React.useMemo(() => {
     return periodFilteredTxs
-      .filter(tx => tx.type === 'expense')
+      .filter(isOperatingExpense)
       .reduce((acc: { [key: string]: number }, tx) => {
         acc[tx.category] = (acc[tx.category] || 0) + tx.amount;
         return acc;
@@ -469,7 +442,7 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
           title: `Pengeluaran ${t.category}`,
           category: t.category,
           amount: t.amount,
-          reason: `Transaksi ${t.description} sebesar ${globalFormatterIDR.format(t.amount)} merupakan alokasi yang cukup signifikan minggu ini.`,
+          reason: `Transaksi ${t.description} sebesar ${formatterIDR.format(t.amount)} merupakan alokasi yang cukup signifikan minggu ini.`,
           severity: t.amount >= 1000000 ? 'high' : 'medium',
         })),
         savingsOpportunities: [
@@ -583,13 +556,13 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
     fourteenDaysAgo.setHours(0, 0, 0, 0);
 
     const thisWeekTxs = transactions.filter(tx => {
-      if (tx.type !== 'expense' || !tx.date) return false;
+      if (!isOperatingExpense(tx) || !tx.date) return false;
       const d = new Date(tx.date);
       return d >= sevenDaysAgo && d <= now;
     });
 
     const lastWeekTxs = transactions.filter(tx => {
-      if (tx.type !== 'expense' || !tx.date) return false;
+      if (!isOperatingExpense(tx) || !tx.date) return false;
       const d = new Date(tx.date);
       return d >= fourteenDaysAgo && d < sevenDaysAgo;
     });
@@ -655,12 +628,7 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
     }
 
     // 2. DEBT BURDEN SCORE / DTI (Weight: 35%)
-    const totalMonthlyDebtPayments = debts
-      .filter(d => d.balance > 0)
-      .reduce((sum, d) => sum + (d.minPayment || d.balance * 0.05), 0) +
-      accounts
-        .filter(a => (a.type === 'credit-card' || a.type === 'paylater') && (a.usedLimit || 0) > 0)
-        .reduce((sum, a) => sum + ((a.usedLimit || 0) * 0.1), 0);
+    const totalMonthlyDebtPayments = calculateMonthlyDebtService(accounts, debts);
 
     const dtiRatioPct = monthlyIncome > 0 ? (totalMonthlyDebtPayments / monthlyIncome) * 100 : (totalDebts > 0 ? 80 : 0);
 
@@ -693,7 +661,7 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
       let totalUsageRatioSum = 0;
       budgets.forEach(b => {
         const spent = monthlyTxs
-          .filter(tx => tx.type === 'expense' && tx.category.toLowerCase() === b.category.toLowerCase())
+          .filter(tx => isOperatingExpense(tx) && tx.category.toLowerCase() === b.category.toLowerCase())
           .reduce((sum, tx) => sum + tx.amount, 0);
         
         const ratio = b.limit > 0 ? spent / b.limit : 0;
@@ -793,26 +761,20 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
     'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'
   ];
 
-  const formatterIDR = new Intl.NumberFormat('id-ID', {
-    style: 'currency',
-    currency: 'IDR',
-    minimumFractionDigits: 0,
-  });
-
   // Sistem pengingat jatuh tempo (visual notification) dalam 3 hari ke depan (atau overdue)
   const todayDay = actualDay; // Hari ini dinamis mengikuti sistem tanggal actualDay
   
   const upcomingPayments = [
     // 1. Dari Kartu Kredit dan PayLater
-    ...accounts
-      .filter(acc => (acc.type === 'credit-card' || acc.type === 'paylater') && (acc.usedLimit || 0) > 0 && acc.dueDay !== undefined)
+    ...creditCardAndPaylaterAccounts
+      .filter(acc => getAccountCreditBill(acc) > 0 && acc.dueDay !== undefined)
       .map(acc => {
         const diff = (acc.dueDay || 0) - todayDay;
         return {
           id: acc.id,
           name: acc.name,
           type: acc.type === 'credit-card' ? 'Kartu Kredit' : 'PayLater',
-          amount: acc.usedLimit || 0,
+          amount: getAccountCreditBill(acc),
           dueDay: acc.dueDay || 0,
           daysLeft: diff,
         };
@@ -834,20 +796,24 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
   ].filter(p => p.daysLeft >= -5 && p.daysLeft <= 3) // Sesuai permintaan 3 hari ke depan, plus overdue maks 5 hari lalu agar tidak terlewat
    .sort((a, b) => a.daysLeft - b.daysLeft);
 
-  // Reconstruct chronological total balance trend from transaction history
+  // Reconstruct chronological liquid cash balance trend from transaction history
   const getLineChartData = () => {
-    // Sort transactions by date ascending
-    const sortedTxs = [...transactions].sort((a, b) => a.date.localeCompare(b.date));
+    const accountMap = new Map<string, Account>();
+    accounts.forEach(a => accountMap.set(a.id, a));
+
+    // Only track cash transactions on liquid accounts (Cash / Bank / E-Wallet), excluding non-cash adjusting entries
+    const sortedTxs = [...transactions]
+      .filter(t => !t.isAdjustment && !isCreditAccount(accountMap.get(t.accountId)))
+      .sort((a, b) => a.date.localeCompare(b.date));
     
     // Find all unique dates
     const uniqueDates = Array.from(new Set(sortedTxs.map(t => t.date))).sort();
     
     if (uniqueDates.length === 0) {
-      const total = accounts.filter(a => a.type !== 'credit-card' && a.type !== 'paylater').reduce((sum, a) => sum + a.currentBalance, 0);
-      return [{ date: 'Hari Ini', 'Saldo Total': total }];
+      return [{ date: 'Hari Ini', 'Saldo Total': totalLiquidAssets }];
     }
 
-    const startingTotalBalance = accounts.filter(a => a.type !== 'credit-card' && a.type !== 'paylater').reduce((sum, a) => sum + a.startingBalance, 0);
+    const startingTotalBalance = liquidAccounts.reduce((sum, a) => sum + (a.startingBalance || 0), 0);
     
     // Map transactions per date
     const txsByDate = uniqueDates.reduce((acc, date) => {
@@ -879,11 +845,7 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
       const dayTxs = txsByDate[date] || [];
       let dayNetChange = 0;
       dayTxs.forEach((tx) => {
-        if (tx.type === 'income') {
-          dayNetChange += tx.amount;
-        } else {
-          dayNetChange -= tx.amount;
-        }
+        dayNetChange += getTransactionAccountDelta(tx);
       });
       runningBalance += dayNetChange;
       
@@ -909,7 +871,7 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
 
   const lineChartData = getLineChartData();
 
-  // 6-Month Monthly Spending Trend Data
+  // 6-Month Monthly Spending Trend Data (Operating Income & Expense)
   const monthlySpendingTrend6Months = React.useMemo(() => {
     const monthsData: { monthKey: string; monthLabel: string; Pengeluaran: number; Pemasukan: number }[] = [];
     
@@ -933,9 +895,9 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
       const txMonthKey = tx.date.substring(0, 7);
       const target = monthsData.find((m) => m.monthKey === txMonthKey);
       if (target) {
-        if (tx.type === 'expense') {
+        if (isOperatingExpense(tx)) {
           target.Pengeluaran += tx.amount || 0;
-        } else if (tx.type === 'income') {
+        } else if (isOperatingIncome(tx)) {
           target.Pemasukan += tx.amount || 0;
         }
       }
@@ -953,23 +915,17 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
     return tx.date.startsWith(`${calYear}-${String(calMonth).padStart(2, '0')}`);
   });
   
-  const calMonthlyIncome = calMonthlyTxs
-    .filter(tx => tx.type === 'income')
-    .reduce((sum, tx) => sum + tx.amount, 0);
-    
-  const calMonthlyExpense = calMonthlyTxs
-    .filter(tx => tx.type === 'expense')
-    .reduce((sum, tx) => sum + tx.amount, 0);
+  const calMonthlySummary = calculateIncomeStatementSummary(calMonthlyTxs);
+  const calMonthlyIncome = calMonthlySummary.operatingIncome;
+  const calMonthlyExpense = calMonthlySummary.operatingExpense;
+  const calMonthlySaving = calMonthlySummary.emergencyAdditions;
+  const calMonthlyInvestment = calMonthlySummary.investmentPurchases;
 
-  const calMonthlySaving = calMonthlyTxs
-    .filter(tx => tx.type === 'saving')
-    .reduce((sum, tx) => sum + tx.amount, 0);
-
-  const calMonthlyInvestment = calMonthlyTxs
-    .filter(tx => tx.type === 'investment')
-    .reduce((sum, tx) => sum + tx.amount, 0);
-
-  const calMonthlyOutflow = calMonthlyExpense + calMonthlySaving + calMonthlyInvestment;
+  const calMonthlyOutflow =
+    calMonthlyExpense +
+    calMonthlySummary.debtPrincipalPayments +
+    calMonthlySaving +
+    calMonthlyInvestment;
   const calMonthlyNetFlow = calMonthlyIncome - calMonthlyOutflow;
 
   const calendarCells: (number | null)[] = [];
@@ -1042,7 +998,7 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
     const targetTxs = transactions.filter(tx => tx.date.startsWith(currentMonthPrefix));
     
     const largeExpenses = targetTxs
-      .filter(tx => tx.type === 'expense' && tx.amount >= 750000)
+      .filter(tx => isOperatingExpense(tx) && tx.amount >= 750000)
       .sort((a, b) => b.amount - a.amount);
 
     if (largeExpenses.length > 0) {
@@ -1088,12 +1044,12 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
       });
     }
 
-    // 5. Cash Flow deficit
+    // 5. Cash Flow deficit (Operating + Debt Service + Asset Reserve, excluding internal transfers & debt proceeds)
     const currentMonthOutflow = targetTxs
-      .filter(tx => tx.type === 'expense' || tx.type === 'saving' || tx.type === 'investment')
+      .filter(tx => !isInternalTransfer(tx) && tx.type !== 'income' && classifyTransaction(tx) !== 'debt_proceeds')
       .reduce((sum, tx) => sum + tx.amount, 0);
     const currentMonthIncome = targetTxs
-      .filter(tx => tx.type === 'income')
+      .filter(isOperatingIncome)
       .reduce((sum, tx) => sum + tx.amount, 0);
 
     if (currentMonthOutflow > currentMonthIncome && currentMonthIncome > 0) {
@@ -1137,7 +1093,7 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
   const weeklyCategorySummary = React.useMemo(() => {
     const targetMonthPrefix = `${calYear}-${String(calMonth).padStart(2, '0')}`;
     const monthlyExpenses = transactions.filter(tx => 
-      tx.type === 'expense' && tx.date.startsWith(targetMonthPrefix)
+      isOperatingExpense(tx) && tx.date.startsWith(targetMonthPrefix)
     );
 
     const categoriesSet = new Set(monthlyExpenses.map(tx => tx.category));
@@ -1204,11 +1160,11 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
     const historyMonthsCount = Math.max(1, monthSet.size);
 
     const totalHistIncome = transactions
-      .filter(tx => tx.type === 'income')
+      .filter(isOperatingIncome)
       .reduce((sum, tx) => sum + tx.amount, 0);
 
     const totalHistExpense = transactions
-      .filter(tx => tx.type === 'expense' || tx.type === 'saving' || tx.type === 'investment')
+      .filter(tx => !isInternalTransfer(tx) && tx.type !== 'income' && classifyTransaction(tx) !== 'debt_proceeds')
       .reduce((sum, tx) => sum + tx.amount, 0);
 
     const avgMonthlyIncomeHist = totalHistIncome > 0 ? (totalHistIncome / historyMonthsCount) : (monthlyIncome || 0);
@@ -1296,9 +1252,9 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
         if (!monthlyMap[monthKey]) {
           monthlyMap[monthKey] = { income: 0, expense: 0 };
         }
-        if (tx.type === 'income') {
+        if (isOperatingIncome(tx)) {
           monthlyMap[monthKey].income += tx.amount;
-        } else if (tx.type === 'expense' || tx.type === 'saving' || tx.type === 'investment') {
+        } else if (!isInternalTransfer(tx) && tx.type !== 'income' && classifyTransaction(tx) !== 'debt_proceeds') {
           monthlyMap[monthKey].expense += tx.amount;
         }
       }
@@ -1406,15 +1362,18 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
 
     const combinedDebts = [
       ...debts.map(d => ({ ...d, isAccount: false })),
-      ...creditCardAndPaylaterAccounts.map(a => ({
-        id: a.id,
-        name: a.name,
-        balance: a.usedLimit || 0,
-        minPayment: a.minPayment || (a.usedLimit || 0) * 0.1,
-        dueDay: a.dueDay,
-        dueDate: undefined,
-        isAccount: true,
-      }))
+      ...creditCardAndPaylaterAccounts.map(a => {
+        const bill = getAccountCreditBill(a);
+        return {
+          id: a.id,
+          name: a.name,
+          balance: bill,
+          minPayment: a.minPayment || bill * 0.1,
+          dueDay: a.dueDay,
+          dueDate: undefined,
+          isAccount: true,
+        };
+      })
     ];
 
     combinedDebts.forEach(d => {
@@ -1687,6 +1646,20 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
             </div>
           </div>
         </div>
+      </motion.div>
+
+      {/* PANEL RASIO KESEHATAN KEUANGAN REAL-TIME (CFP BENCHMARK & GRAFIK PERBANDINGAN) */}
+      <motion.div variants={cardVariants}>
+        <DashboardFinancialHealthPanel
+          transactions={transactions}
+          accounts={accounts}
+          debts={debts}
+          investments={investments}
+          emergencyTransactions={emergencyTransactions}
+          isFocusMode={isFocusMode}
+          onOpenReports={() => onQuickAction('reports')}
+          onAddTransaction={() => onQuickAction('transactions')}
+        />
       </motion.div>
 
       {/* AI WEEKLY FINANCIAL INSIGHTS CARD */}
@@ -2996,7 +2969,7 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
                     </div>
                     <div className="text-right shrink-0">
                       <span className="text-xs font-black text-rose-600 font-mono block">
-                        {isFocusMode ? 'Rp ••••••' : formatterIDR.format(acc.usedLimit || 0)}
+                        {isFocusMode ? 'Rp ••••••' : formatterIDR.format(getAccountCreditBill(acc))}
                       </span>
                       {acc.dueDay && (
                         <span className="text-[9px] text-slate-400 font-bold">Tgl {acc.dueDay} / bln</span>
@@ -3590,7 +3563,9 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
             return (
               <div className="space-y-2 max-h-[250px] overflow-y-auto pr-1">
                 {dayTxs.map(tx => {
-                  const accountName = accounts.find(a => a.id === tx.accountId)?.name || 'Akun Tidak Dikenal';
+                  const accountName = tx.isAdjustment
+                    ? 'Jurnal Penyesuaian (Non-Kas)'
+                    : (accounts.find(a => a.id === tx.accountId)?.name || 'Akun Tidak Dikenal');
                   
                   let typeBadgeColor = 'bg-rose-50 text-rose-600 border-rose-100';
                   let icon = <ArrowDownRight className="h-3.5 w-3.5 text-rose-500" />;

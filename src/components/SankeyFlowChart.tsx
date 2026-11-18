@@ -1,17 +1,13 @@
 import React, { useMemo, useState } from 'react';
 import { Transaction } from '../types';
+import { classifyTransaction } from '../utils/accountingEngine';
+import { formatterIDR } from '../utils/formatters';
 import { sankey as d3Sankey, sankeyLinkHorizontal, SankeyNode, SankeyLink } from 'd3-sankey';
 import { 
   GitCommit, 
   AlertTriangle, 
   CheckCircle2, 
-  TrendingUp, 
-  TrendingDown, 
-  Sparkles, 
-  HelpCircle,
-  ShieldAlert,
   Zap,
-  ArrowRight
 } from 'lucide-react';
 
 interface SankeyFlowChartProps {
@@ -34,55 +30,58 @@ interface CustomSankeyLinkExtra {
 type CustomSankeyNode = SankeyNode<CustomSankeyNodeExtra, CustomSankeyLinkExtra>;
 type CustomSankeyLink = SankeyLink<CustomSankeyNodeExtra, CustomSankeyLinkExtra>;
 
-const formatterIDR = new Intl.NumberFormat('id-ID', {
-  style: 'currency',
-  currency: 'IDR',
-  maximumFractionDigits: 0,
-});
-
 export const SankeyFlowChart: React.FC<SankeyFlowChartProps> = ({ transactions }) => {
   const [hoveredNode, setHoveredNode] = useState<CustomSankeyNode | null>(null);
   const [hoveredLink, setHoveredLink] = useState<CustomSankeyLink | null>(null);
 
-  // 1. CONSTRUCT SANKEY GRAPH DATA FROM TRANSACTIONS
+  // 1. CONSTRUCT SANKEY GRAPH DATA FROM TRANSACTIONS (Accounting-accurate classification)
   const sankeyData = useMemo(() => {
-    // Exclude internal transfers
-    const validTxs = transactions.filter(
-      (tx) => tx.category !== 'Mutasi Masuk' && tx.category !== 'Mutasi Keluar'
-    );
-
-    // Group Incomes by category
     const incomeCategoryMap: Record<string, number> = {};
-    validTxs
-      .filter((tx) => tx.type === 'income')
-      .forEach((tx) => {
-        const cat = tx.category || 'Pendapatan Lain-lain';
-        incomeCategoryMap[cat] = (incomeCategoryMap[cat] || 0) + tx.amount;
-      });
+    const expenseCategoryMap: Record<string, number> = {};
+    let totalSaving = 0;
+    let totalInvestment = 0;
+    let totalDebtPayment = 0;
+
+    transactions.forEach((tx) => {
+      const amt = Math.abs(tx.amount || 0);
+      if (amt <= 0) return;
+
+      const nature = classifyTransaction(tx);
+      switch (nature) {
+        case 'operating_income': {
+          const cat = tx.category || 'Pendapatan Lain-lain';
+          incomeCategoryMap[cat] = (incomeCategoryMap[cat] || 0) + amt;
+          break;
+        }
+        case 'operating_expense': {
+          const cat = tx.category || 'Beban Lainnya';
+          expenseCategoryMap[cat] = (expenseCategoryMap[cat] || 0) + amt;
+          break;
+        }
+        case 'emergency_fund_transfer': {
+          if (tx.type !== 'income') totalSaving += amt;
+          break;
+        }
+        case 'investment_buy': {
+          totalInvestment += amt;
+          break;
+        }
+        case 'debt_principal_pay': {
+          if (tx.type !== 'income') totalDebtPayment += amt;
+          break;
+        }
+        default:
+          // Exclude internal_transfer, debt_proceeds, equity_injection, investment_sell from consumption Sankey
+          break;
+      }
+    });
 
     const totalIncome = Object.values(incomeCategoryMap).reduce((a, b) => a + b, 0);
-
-    // Group Expenses by category
-    const expenseCategoryMap: Record<string, number> = {};
-    validTxs
-      .filter((tx) => tx.type === 'expense')
-      .forEach((tx) => {
-        const cat = tx.category || 'Beban Lainnya';
-        expenseCategoryMap[cat] = (expenseCategoryMap[cat] || 0) + tx.amount;
-      });
-
     const totalExpense = Object.values(expenseCategoryMap).reduce((a, b) => a + b, 0);
-
-    // Group Savings/Investments/Debt
-    const totalSaving = validTxs
-      .filter((tx) => tx.type === 'saving')
-      .reduce((sum, tx) => sum + tx.amount, 0);
-
-    const totalInvestment = validTxs
-      .filter((tx) => tx.type === 'investment')
-      .reduce((sum, tx) => sum + tx.amount, 0);
-
-    const netSurplus = Math.max(0, totalIncome - (totalExpense + totalSaving + totalInvestment));
+    const netSurplus = Math.max(
+      0,
+      totalIncome - (totalExpense + totalSaving + totalInvestment + totalDebtPayment)
+    );
 
     // Nodes List
     const nodesExtra: CustomSankeyNodeExtra[] = [];
@@ -102,7 +101,7 @@ export const SankeyFlowChart: React.FC<SankeyFlowChartProps> = ({ transactions }
     // --- LEFT COLUMN: INCOME SOURCES ---
     const incomeNodeIds: { id: string; amount: number }[] = [];
     if (Object.keys(incomeCategoryMap).length === 0) {
-      const idx = addNode('inc-default', 'Pendapatan Default', 'income', '#10b981');
+      addNode('inc-default', 'Pendapatan Default', 'income', '#10b981');
       incomeNodeIds.push({ id: 'inc-default', amount: 1000000 });
     } else {
       Object.entries(incomeCategoryMap).forEach(([cat, amount]) => {
@@ -125,11 +124,15 @@ export const SankeyFlowChart: React.FC<SankeyFlowChartProps> = ({ transactions }
 
     // --- MIDDLE-RIGHT COLUMN: ALLOCATION HUB NODES ---
     const opPoolIdx = addNode('pool-op', 'Pengeluaran Operasional', 'pool', '#f43f5e');
+    const debtPoolIdx = addNode('pool-debt', 'Cicilan & Pelunasan Utang', 'debt', '#f59e0b');
     const savPoolIdx = addNode('pool-sav', 'Alokasi Tabungan & Darurat', 'savings', '#0284c7');
     const invPoolIdx = addNode('pool-inv', 'Alokasi Portofolio Investasi', 'investment', '#8b5cf6');
 
     if (totalExpense > 0) {
       linksExtra.push({ source: poolIdx, target: opPoolIdx, value: totalExpense });
+    }
+    if (totalDebtPayment > 0) {
+      linksExtra.push({ source: poolIdx, target: debtPoolIdx, value: totalDebtPayment });
     }
     if (totalSaving > 0) {
       linksExtra.push({ source: poolIdx, target: savPoolIdx, value: totalSaving });
@@ -164,6 +167,7 @@ export const SankeyFlowChart: React.FC<SankeyFlowChartProps> = ({ transactions }
       linksExtra,
       totalIncome,
       totalExpense,
+      totalDebtPayment,
       totalSaving,
       totalInvestment,
       netSurplus,
@@ -271,6 +275,9 @@ export const SankeyFlowChart: React.FC<SankeyFlowChartProps> = ({ transactions }
           </span>
           <span className="px-2.5 py-1 bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300 rounded-lg flex items-center gap-1">
             <span className="w-2 h-2 rounded-full bg-rose-500" /> Expense
+          </span>
+          <span className="px-2.5 py-1 bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300 rounded-lg flex items-center gap-1">
+            <span className="w-2 h-2 rounded-full bg-amber-500" /> Cicilan Utang
           </span>
           <span className="px-2.5 py-1 bg-sky-100 text-sky-800 dark:bg-sky-950 dark:text-sky-300 rounded-lg flex items-center gap-1">
             <span className="w-2 h-2 rounded-full bg-sky-500" /> Savings

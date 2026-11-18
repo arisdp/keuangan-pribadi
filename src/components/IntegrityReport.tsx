@@ -29,6 +29,9 @@ import {
   FileCheck2,
 } from 'lucide-react';
 
+import { calculateAccountGLBalance, isCreditAccount } from '../utils/accountingEngine';
+import { formatterIDR } from '../utils/formatters';
+
 export type DiscrepancySeverity = 'critical' | 'warning' | 'info';
 export type DiscrepancyCategory = 'accounts' | 'transactions' | 'investments' | 'categories' | 'debts';
 
@@ -64,12 +67,6 @@ interface IntegrityReportProps {
   onUpdateInvestments?: (updatedInvestments: InvestmentAsset[]) => void;
   className?: string;
 }
-
-const formatterIDR = new Intl.NumberFormat('id-ID', {
-  style: 'currency',
-  currency: 'IDR',
-  maximumFractionDigits: 0,
-});
 
 export const IntegrityReport: React.FC<IntegrityReportProps> = ({
   accounts = [],
@@ -129,24 +126,13 @@ export const IntegrityReport: React.FC<IntegrityReportProps> = ({
       if (acc?.id) accountMap.set(acc.id, acc);
     });
 
-    // 1. ACCOUNT BALANCES & COA CHECKS
+    // 1. ACCOUNT BALANCES & COA CHECKS (Menggunakan mesin GL terpusat termasuk initialDebt)
     safeAccounts.forEach((acc) => {
       if (!acc) return;
-      let calculatedDelta = 0;
-      safeTransactions.forEach((tx) => {
-        if (tx && tx.accountId === acc.id) {
-          if (tx.type === 'income') {
-            calculatedDelta += tx.amount || 0;
-          } else if (tx.type === 'expense' || tx.type === 'saving' || tx.type === 'investment') {
-            calculatedDelta -= tx.amount || 0;
-          }
-        }
-      });
-
-      const startingBal = acc.startingBalance || 0;
-      const glBalance = startingBal + calculatedDelta;
-      const recordedBal = acc.currentBalance || 0;
-      const variance = recordedBal - glBalance;
+      const gl = calculateAccountGLBalance(acc, safeTransactions);
+      const glBalance = gl.glCalculatedBalance;
+      const recordedBal = gl.recordedBalance;
+      const variance = gl.difference;
 
       if (Math.abs(variance) > 0) {
         list.push({
@@ -206,8 +192,8 @@ export const IntegrityReport: React.FC<IntegrityReportProps> = ({
     safeTransactions.forEach((tx) => {
       if (!tx) return;
 
-      // Check Orphan Transaction
-      if (tx.accountId && !accountMap.has(tx.accountId)) {
+      // Check Orphan Transaction (skip non-cash adjusting entries)
+      if (!tx.isAdjustment && tx.accountId && !accountMap.has(tx.accountId)) {
         list.push({
           id: `disc-tx-orphan-${tx.id}`,
           category: 'transactions',
@@ -421,9 +407,18 @@ export const IntegrityReport: React.FC<IntegrityReportProps> = ({
 
     if (item.fixType === 'reconcile-account' && item.payload?.accountId && onUpdateAccounts) {
       const { accountId, targetBalance } = item.payload;
-      const updated = accounts.map((acc) =>
-        acc.id === accountId ? { ...acc, currentBalance: targetBalance } : acc
-      );
+      const updated = accounts.map((acc) => {
+        if (acc.id !== accountId) return acc;
+        if (isCreditAccount(acc)) {
+          const limit = acc.creditLimit ?? acc.startingBalance ?? 0;
+          return {
+            ...acc,
+            currentBalance: targetBalance,
+            usedLimit: Math.max(0, limit - targetBalance),
+          };
+        }
+        return { ...acc, currentBalance: targetBalance };
+      });
       onUpdateAccounts(updated);
       showToast(`Berhasil merekonsiliasi saldo akun "${item.affectedRecordName}" ke ${formatterIDR.format(targetBalance)}!`);
     } else if (item.fixType === 'remove-orphan-tx' && item.payload?.transactionId && onUpdateTransactions) {
@@ -475,9 +470,18 @@ export const IntegrityReport: React.FC<IntegrityReportProps> = ({
 
     fixableItems.forEach((item) => {
       if (item.fixType === 'reconcile-account' && item.payload?.accountId) {
-        updatedAccounts = updatedAccounts.map((acc) =>
-          acc.id === item.payload.accountId ? { ...acc, currentBalance: item.payload.targetBalance } : acc
-        );
+        updatedAccounts = updatedAccounts.map((acc) => {
+          if (acc.id !== item.payload.accountId) return acc;
+          if (isCreditAccount(acc)) {
+            const limit = acc.creditLimit ?? acc.startingBalance ?? 0;
+            return {
+              ...acc,
+              currentBalance: item.payload.targetBalance,
+              usedLimit: Math.max(0, limit - item.payload.targetBalance),
+            };
+          }
+          return { ...acc, currentBalance: item.payload.targetBalance };
+        });
       } else if (item.fixType === 'remove-orphan-tx' && item.payload?.transactionId) {
         updatedTransactions = updatedTransactions.filter((t) => t.id !== item.payload.transactionId);
       } else if (item.fixType === 'add-missing-cat' && item.payload?.categoryName) {
@@ -513,7 +517,7 @@ export const IntegrityReport: React.FC<IntegrityReportProps> = ({
   // Export Audit Summary CSV
   const handleExportCSV = () => {
     if (filteredDiscrepancies.length === 0) {
-      alert('Tidak ada anomali untuk diekspor.');
+      showToast('Tidak ada anomali untuk diekspor.');
       return;
     }
 

@@ -4,6 +4,15 @@ import { GlobalUserMenu } from './components/GlobalUserMenu';
 import { SyncConflictModal } from './components/SyncConflictModal';
 import { SyncDataPackage, detectDataConflict } from './utils/syncConflictDetector';
 import { showToast } from './utils/toast';
+import { formatCurrencyIDR } from './utils/formatters';
+import {
+  applyAccountBalanceChange,
+  calculateTotalEmergencyFund,
+  calculateTotalLiquidCash,
+  getAccountCreditBill,
+  getLiquidAccounts,
+  getTransactionAccountDelta,
+} from './utils/accountingEngine';
 import { secureStorage } from './utils/secureStorage';
 import { useState, useEffect, useRef } from 'react';
 import { 
@@ -17,8 +26,21 @@ import {
   InvestmentAsset,
   User,
   RecurringTransaction,
-  SavingsGoal
+  SavingsGoal,
+  KprPreset,
+  KprCoaMappingConfig
 } from './types';
+import {
+  DEFAULT_KPR_COA_MAPPING,
+  DEFAULT_KPR_PRESETS,
+  getStoredKprPresets,
+  saveStoredKprPresets,
+  resetStoredKprPresets,
+  getStoredKprCoaMapping,
+  saveStoredKprCoaMapping,
+  resetStoredKprCoaMapping,
+  resolveEffectiveKprCoaMapping
+} from './utils/kprPresets';
 import { 
   INITIAL_ACCOUNTS, 
   INITIAL_BUDGETS, 
@@ -47,6 +69,7 @@ import { InvestmentTab } from './components/InvestmentTab';
 import { LoginScreen } from './components/LoginScreen';
 import { OnboardingModal } from './components/OnboardingModal';
 import { ReportsTab } from './components/ReportsTab';
+import { AdjustingEntryDraft } from './components/AdjustingEntriesPanel';
 import { MasterCategoryManager } from './components/MasterCategoryManager';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { BackupDataModal } from './components/BackupDataModal';
@@ -54,6 +77,7 @@ import { AccountingIntegrityModal } from './components/AccountingIntegrityModal'
 import {
   validateMasterIntegrityOnLoad,
   getStoredCoaList,
+  getAccountCoaMapping,
   factoryResetMasterData,
   DEFAULT_COA_LIST,
   saveStoredCoaList,
@@ -191,6 +215,27 @@ export default function App() {
     saveStoredCategories(masterCategories, currentUser?.username);
   }, [masterCategories, currentUser]);
 
+  // --- KPR PRESETS & COA MAPPING STATE ---
+  const [kprPresets, setKprPresets] = useState<KprPreset[]>(() => {
+    const user = secureStorage.getItem('fin_current_user');
+    const u = user ? JSON.parse(user) : null;
+    return getStoredKprPresets(u?.username);
+  });
+
+  useEffect(() => {
+    saveStoredKprPresets(kprPresets, currentUser?.username);
+  }, [kprPresets, currentUser]);
+
+  const [kprCoaMapping, setKprCoaMapping] = useState<KprCoaMappingConfig>(() => {
+    const user = secureStorage.getItem('fin_current_user');
+    const u = user ? JSON.parse(user) : null;
+    return getStoredKprCoaMapping(u?.username);
+  });
+
+  useEffect(() => {
+    saveStoredKprCoaMapping(kprCoaMapping, currentUser?.username);
+  }, [kprCoaMapping, currentUser]);
+
   // --- RECURRING TRANSACTIONS STATE ---
   const [recurringTransactions, setRecurringTransactions] = useState<RecurringTransaction[]>(() => {
     const user = secureStorage.getItem('fin_current_user');
@@ -315,17 +360,10 @@ export default function App() {
 
         newTxsToAdd.push(newTx);
 
-        // Adjust target account balance
+        // Adjust target account balance using centralized accounting engine
         updatedAccounts = updatedAccounts.map((acc) => {
           if (acc.id === rec.accountId) {
-            const balanceDiff = rec.type === 'income' ? rec.amount : -rec.amount;
-            const nextBal = Math.max(0, acc.currentBalance + balanceDiff);
-            const isCreditOrPaylater = acc.type === 'credit-card' || acc.type === 'paylater';
-            return {
-              ...acc,
-              currentBalance: nextBal,
-              usedLimit: isCreditOrPaylater ? (acc.creditLimit || 0) - nextBal : acc.usedLimit,
-            };
+            return applyAccountBalanceChange(acc, getTransactionAccountDelta(newTx));
           }
           return acc;
         });
@@ -374,7 +412,7 @@ export default function App() {
       groupName: 'Portofolio & Utang',
       items: [
         { id: 'investments', label: 'Investasi & Portofolio', icon: TrendingUp },
-        { id: 'debts', label: 'Utang & Pelunasan', icon: CreditCard },
+        { id: 'debts', label: 'Perhitungan Utang & KPR', icon: CreditCard },
       ],
     },
     {
@@ -387,6 +425,7 @@ export default function App() {
   ];
 
   const [activeTab, setActiveTab] = useState<string>('dashboard');
+  const [pendingPayDebtId, setPendingPayDebtId] = useState<string | null>(null);
   const [mobileMenuOpen, setMobileMenuOpen] = useState<boolean>(false);
   const [openNavGroups, setOpenNavGroups] = useState<Record<string, boolean>>({
     'Ringkasan & Analisis': true,
@@ -712,23 +751,170 @@ export default function App() {
       units?: number;
       unitName?: string;
     };
-  }) => {
+  }): boolean => {
+    // Protection & validation for unified Debt / KPR installment payment or payoff
+    let payTargetLabel = '';
+    let isFullDebtPayoff = false;
+    if (newTx.linkedDebtAction === 'pay') {
+      if (!newTx.linkedDebtId) {
+        showToast({
+          type: 'warning',
+          title: 'Pilih Target Hutang / KPR',
+          message: 'Silakan pilih hutang atau cicilan KPR yang ingin dibayar terlebih dahulu.',
+          duration: 4500,
+        });
+        return false;
+      }
+
+      if (!Number.isFinite(newTx.amount) || newTx.amount <= 0) {
+        showToast({
+          type: 'warning',
+          title: 'Nominal Tidak Valid',
+          message: 'Masukkan nominal pembayaran cicilan yang lebih besar dari Rp 0.',
+          duration: 4500,
+        });
+        return false;
+      }
+
+      const paymentSource = accounts.find((a) => a.id === newTx.accountId);
+      if (!paymentSource) {
+        showToast({
+          type: 'error',
+          title: 'Akun Sumber Tidak Valid',
+          message: 'Silakan pilih rekening sumber dana yang valid untuk membayar cicilan.',
+          duration: 5000,
+        });
+        return false;
+      }
+
+      if (paymentSource.currentBalance < newTx.amount) {
+        showToast({
+          type: 'error',
+          title: 'Dana Tidak Mencukupi',
+          message: `Saldo ${paymentSource.name} (${formatCurrencyIDR(paymentSource.currentBalance)}) tidak cukup untuk membayar cicilan sebesar ${formatCurrencyIDR(newTx.amount)}.`,
+          duration: 6000,
+        });
+        return false;
+      }
+
+      if (newTx.linkedDebtId.startsWith('acc-debt-')) {
+        const targetAccId = newTx.linkedDebtId.replace('acc-debt-', '');
+        if (targetAccId === paymentSource.id) {
+          showToast({
+            type: 'warning',
+            title: 'Rekening Pembayar Sama',
+            message: 'Pilih rekening kas/bank lain sebagai sumber dana pembayaran tagihan ini.',
+            duration: 5000,
+          });
+          return false;
+        }
+        const targetDebtAcc = accounts.find((a) => a.id === targetAccId);
+        if (!targetDebtAcc) {
+          showToast({
+            type: 'error',
+            title: 'Tagihan Tidak Ditemukan',
+            message: 'Data tagihan kartu kredit/paylater tidak ditemukan.',
+            duration: 5000,
+          });
+          return false;
+        }
+        const currentDebtBal = targetDebtAcc.usedLimit || 0;
+        if (newTx.amount > currentDebtBal) {
+          showToast({
+            type: 'warning',
+            title: 'Nominal Melebihi Sisa Tagihan',
+            message: `Nominal bayar (${formatCurrencyIDR(newTx.amount)}) melebihi sisa tagihan "${targetDebtAcc.name}" (${formatCurrencyIDR(currentDebtBal)}).`,
+            duration: 5000,
+          });
+          return false;
+        }
+        payTargetLabel = targetDebtAcc.name;
+        isFullDebtPayoff = currentDebtBal - newTx.amount <= 0;
+      } else {
+        const matchedDebt = debts.find((d) => d.id === newTx.linkedDebtId);
+        if (!matchedDebt) {
+          showToast({
+            type: 'error',
+            title: 'Hutang Tidak Ditemukan',
+            message: 'Data hutang atau KPR yang dipilih tidak tersedia atau sudah dihapus.',
+            duration: 5000,
+          });
+          return false;
+        }
+        if (newTx.amount > matchedDebt.balance) {
+          showToast({
+            type: 'warning',
+            title: 'Nominal Melebihi Sisa Hutang',
+            message: `Nominal bayar (${formatCurrencyIDR(newTx.amount)}) melebihi sisa pokok "${matchedDebt.name}" (${formatCurrencyIDR(matchedDebt.balance)}).`,
+            duration: 5000,
+          });
+          return false;
+        }
+        payTargetLabel = matchedDebt.name;
+        isFullDebtPayoff = matchedDebt.balance - newTx.amount <= 0;
+      }
+    }
+
     const txUnitPrice = newTx.unitPrice || newTx.newInvestmentDetails?.unitPrice;
     const txUnits = newTx.units || newTx.newInvestmentDetails?.units;
     const txUnitName = newTx.unitName || newTx.newInvestmentDetails?.unitName;
 
+    const txId = `tx-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+
+    // Pre-generate linked entity IDs so tx carries exact two-way references
+    let resolvedDebtId = newTx.linkedDebtId;
+    if (newTx.linkedDebtAction === 'create' && newTx.newDebtDetails && !resolvedDebtId) {
+      resolvedDebtId = `debt-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    }
+
+    let resolvedInvestmentId = newTx.linkedInvestmentId;
+    if (newTx.linkedInvestmentAction === 'buy' && newTx.newInvestmentDetails && !resolvedInvestmentId) {
+      const nameLower = newTx.newInvestmentDetails.name.toLowerCase().trim();
+      const existingInv = investments.find((inv) => inv.name.toLowerCase().trim() === nameLower);
+      resolvedInvestmentId = existingInv
+        ? existingInv.id
+        : `inv-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    }
+
+    const isEmergencyAddition =
+      newTx.category === 'Tabungan Darurat' && (newTx.type === 'saving' || newTx.type === 'income');
+    const isEmergencyReduction = newTx.category === 'Pencairan Dana Darurat';
+    const resolvedEmergencyTxId =
+      isEmergencyAddition || isEmergencyReduction
+        ? `etx-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+        : undefined;
+
+    let resolvedCoaDebitCode = newTx.coaDebitCode;
+    let resolvedCoaCreditCode = newTx.coaCreditCode;
+    if ((!resolvedCoaDebitCode || !resolvedCoaCreditCode) && newTx.linkedDebtAction === 'pay' && resolvedDebtId && !resolvedDebtId.startsWith('acc-debt-')) {
+      const targetDebt = debts.find((d) => d.id === resolvedDebtId);
+      const isKprDebt = Boolean(targetDebt && (targetDebt.category === 'KPR / Properti' || Boolean(targetDebt.kprScheme)));
+      if (isKprDebt && targetDebt) {
+        const payAcc = accounts.find((a) => a.id === newTx.accountId);
+        const coaList = getStoredCoaList();
+        const bankCoa = payAcc ? getAccountCoaMapping(payAcc, coaList) : { code: '1200', name: 'Bank' };
+        const effKpr = resolveEffectiveKprCoaMapping(kprCoaMapping, targetDebt.kprCoaSnapshot);
+        resolvedCoaDebitCode = effKpr.principalLiabilityCode;
+        resolvedCoaCreditCode = bankCoa.code;
+      }
+    }
+
     const tx: Transaction = {
-      id: `tx-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+      id: txId,
       date: newTx.date,
       accountId: newTx.accountId,
       type: newTx.type,
       category: newTx.category,
       description: newTx.description,
       amount: newTx.amount,
-      linkedDebtId: newTx.linkedDebtId,
+      ...(resolvedCoaDebitCode ? { coaDebitCode: resolvedCoaDebitCode } : {}),
+      ...(resolvedCoaCreditCode ? { coaCreditCode: resolvedCoaCreditCode } : {}),
+      ...(newTx.linkedKprBreakdown ? { linkedKprBreakdown: newTx.linkedKprBreakdown } : {}),
+      linkedDebtId: resolvedDebtId,
       linkedDebtAction: newTx.linkedDebtAction,
-      linkedInvestmentId: newTx.linkedInvestmentId,
+      linkedInvestmentId: resolvedInvestmentId,
       linkedInvestmentAction: newTx.linkedInvestmentAction,
+      linkedEmergencyTxId: resolvedEmergencyTxId,
       unitPrice: txUnitPrice,
       units: txUnits,
       unitName: txUnitName,
@@ -736,21 +922,11 @@ export default function App() {
 
     setTransactions((prev) => [tx, ...prev]);
 
-    // Update the associated account balance
+    // Update the associated account balance via unified engine
     setAccounts((prevAccounts) =>
       prevAccounts.map((acc) => {
         if (acc.id === tx.accountId) {
-          let balanceDiff = tx.amount;
-          if (tx.type === 'expense' || tx.type === 'saving' || tx.type === 'investment') {
-            balanceDiff = -tx.amount;
-          }
-          const nextBalance = acc.currentBalance + balanceDiff;
-          const isCreditOrPaylater = acc.type === 'credit-card' || acc.type === 'paylater';
-          return {
-            ...acc,
-            currentBalance: nextBalance,
-            usedLimit: isCreditOrPaylater ? (acc.creditLimit || 0) - nextBalance : acc.usedLimit,
-          };
+          return applyAccountBalanceChange(acc, getTransactionAccountDelta(tx));
         }
         return acc;
       })
@@ -758,43 +934,31 @@ export default function App() {
 
     // --- INTERCONNECTED LOGIC ---
 
-    // 1. DANA DARURAT Integration
-    if (tx.category === 'Tabungan Darurat' && (tx.type === 'saving' || tx.type === 'income')) {
-      const sourceAcc = accounts.find(a => a.id === tx.accountId);
+    // 1. DANA DARURAT Integration (Single entry with bidirectional link)
+    if (resolvedEmergencyTxId && (isEmergencyAddition || isEmergencyReduction)) {
+      const sourceAcc = accounts.find((a) => a.id === tx.accountId);
       const etx: EmergencyFundTransaction = {
-        id: `etx-${Date.now()}-auto`,
+        id: resolvedEmergencyTxId,
         date: tx.date,
-        type: 'addition',
+        type: isEmergencyAddition ? 'addition' : 'reduction',
         amount: tx.amount,
         location: sourceAcc ? sourceAcc.name : 'Rekening Utama',
-        description: tx.description || 'Penyisihan Dana Darurat Bulanan',
-      };
-      setEmergencyTransactions((prev) => [...prev, etx]);
-    } else if (tx.category === 'Pencairan Dana Darurat') {
-      const sourceAcc = accounts.find(a => a.id === tx.accountId);
-      const etx: EmergencyFundTransaction = {
-        id: `etx-${Date.now()}-auto`,
-        date: tx.date,
-        type: 'reduction',
-        amount: tx.amount,
-        location: sourceAcc ? sourceAcc.name : 'Rekening Utama',
-        description: tx.description || 'Pencairan Dana Darurat',
+        description:
+          tx.description ||
+          (isEmergencyAddition ? 'Penyisihan Dana Darurat Bulanan' : 'Pencairan Dana Darurat'),
+        linkedTransactionId: tx.id,
       };
       setEmergencyTransactions((prev) => [...prev, etx]);
     }
 
     // 2. HUTANG Integration
-    if (newTx.linkedDebtAction === 'pay' && newTx.linkedDebtId) {
-      if (newTx.linkedDebtId.startsWith('acc-debt-')) {
-        const targetAccId = newTx.linkedDebtId.replace('acc-debt-', '');
+    if (newTx.linkedDebtAction === 'pay' && resolvedDebtId) {
+      if (resolvedDebtId.startsWith('acc-debt-')) {
+        const targetAccId = resolvedDebtId.replace('acc-debt-', '');
         setAccounts((prevAccounts) =>
           prevAccounts.map((acc) => {
             if (acc.id === targetAccId) {
-              return {
-                ...acc,
-                currentBalance: acc.currentBalance + tx.amount,
-                usedLimit: Math.max(0, (acc.usedLimit || 0) - tx.amount),
-              };
+              return applyAccountBalanceChange(acc, tx.amount);
             }
             return acc;
           })
@@ -802,7 +966,7 @@ export default function App() {
       } else {
         setDebts((prevDebts) =>
           prevDebts.map((d) => {
-            if (d.id === newTx.linkedDebtId) {
+            if (d.id === resolvedDebtId) {
               return {
                 ...d,
                 balance: Math.max(0, d.balance - tx.amount),
@@ -812,9 +976,20 @@ export default function App() {
           })
         );
       }
-    } else if (newTx.linkedDebtAction === 'create' && newTx.newDebtDetails) {
+
+      if (payTargetLabel) {
+        showToast({
+          type: 'success',
+          title: isFullDebtPayoff ? 'Pelunasan Hutang / KPR Berhasil' : 'Pembayaran Cicilan Berhasil',
+          message: isFullDebtPayoff
+            ? `"${payTargetLabel}" sebesar ${formatCurrencyIDR(tx.amount)} telah lunas dan tercatat di Jurnal Transaksi.`
+            : `Cicilan ${formatCurrencyIDR(tx.amount)} untuk "${payTargetLabel}" berhasil dicatat dan saldo hutang diperbarui.`,
+          duration: 4500,
+        });
+      }
+    } else if (newTx.linkedDebtAction === 'create' && newTx.newDebtDetails && resolvedDebtId) {
       const d: Debt = {
-        id: `debt-${Date.now()}`,
+        id: resolvedDebtId,
         name: newTx.newDebtDetails.name,
         balance: tx.amount,
         interestRate: newTx.newDebtDetails.interestRate,
@@ -830,9 +1005,12 @@ export default function App() {
     if (newTx.linkedInvestmentAction === 'buy' && newTx.newInvestmentDetails) {
       setInvestments((prevInv) => {
         const nameLower = newTx.newInvestmentDetails!.name.toLowerCase().trim();
-        const existingIndex = prevInv.findIndex(inv => inv.name.toLowerCase().trim() === nameLower);
+        const existingIndex = prevInv.findIndex(
+          (inv) =>
+            (resolvedInvestmentId && inv.id === resolvedInvestmentId) ||
+            inv.name.toLowerCase().trim() === nameLower
+        );
 
-        // Determine added quantity and unit purchase price from transaction details
         let addedQty = 1;
         let buyUnitPrice = tx.amount;
 
@@ -852,12 +1030,14 @@ export default function App() {
             if (idx === existingIndex) {
               const currentCap = inv.initialCapital !== undefined ? inv.initialCapital : inv.balance;
               const currentQty = inv.quantity ?? inv.units ?? 0;
-              const oldAvgBuy = inv.purchaseUnitPrice ?? (currentQty > 0 ? currentCap / currentQty : buyUnitPrice);
+              const oldAvgBuy =
+                inv.purchaseUnitPrice ?? (currentQty > 0 ? currentCap / currentQty : buyUnitPrice);
 
               const newQty = currentQty + addedQty;
               const newCap = currentCap + tx.amount;
               const newAvgBuyPrice = newQty > 0 ? newCap / newQty : oldAvgBuy;
-              const effectivePricePerUnit = buyUnitPrice || inv.unitPrice || inv.currentUnitPrice || oldAvgBuy;
+              const effectivePricePerUnit =
+                buyUnitPrice || inv.unitPrice || inv.currentUnitPrice || oldAvgBuy;
               const newBalance = newQty * effectivePricePerUnit;
 
               return {
@@ -876,7 +1056,7 @@ export default function App() {
           });
         } else {
           const invAsset: InvestmentAsset = {
-            id: `inv-${Date.now()}`,
+            id: resolvedInvestmentId || `inv-${Date.now()}`,
             name: newTx.newInvestmentDetails!.name,
             category: newTx.newInvestmentDetails!.category,
             balance: tx.amount,
@@ -898,12 +1078,14 @@ export default function App() {
           if (inv.id === newTx.linkedInvestmentId) {
             const currentCap = inv.initialCapital !== undefined ? inv.initialCapital : inv.balance;
             const currentQty = inv.quantity ?? inv.units ?? 1;
-            const effectivePrice = txUnitPrice || inv.unitPrice || inv.currentUnitPrice || (inv.balance / currentQty);
-            const avgBuy = inv.purchaseUnitPrice ?? (currentCap / currentQty);
+            const effectivePrice =
+              txUnitPrice || inv.unitPrice || inv.currentUnitPrice || inv.balance / currentQty;
+            const avgBuy = inv.purchaseUnitPrice ?? currentCap / currentQty;
 
-            const soldQty = txUnits && txUnits > 0 ? txUnits : (effectivePrice > 0 ? tx.amount / effectivePrice : 0);
+            const soldQty =
+              txUnits && txUnits > 0 ? txUnits : effectivePrice > 0 ? tx.amount / effectivePrice : 0;
             const newQty = Math.max(0, currentQty - soldQty);
-            const newCap = Math.max(0, currentCap - (soldQty * avgBuy));
+            const newCap = Math.max(0, currentCap - soldQty * avgBuy);
             const newBalance = Math.max(0, newQty * effectivePrice);
 
             return {
@@ -920,41 +1102,87 @@ export default function App() {
         })
       );
     }
+
+    return true;
   };
 
-  // Delete transaction and reverse balance modification
+  // Delete transaction and reverse balance & interconnected entities atomically
   const handleDeleteTransaction = (id: string) => {
     const targetTx = transactions.find((t) => t.id === id);
     if (!targetTx) return;
 
     setTransactions((prev) => prev.filter((t) => t.id !== id));
 
+    // If Non-Cash Adjusting Entry, reverse asset depreciation or debt interest accrual without touching cash accounts
+    if (targetTx.isAdjustment) {
+      if (targetTx.adjustmentType === 'investment_depreciation' && targetTx.linkedInvestmentId) {
+        setInvestments((prevInv) =>
+          prevInv.map((inv) => {
+            if (inv.id === targetTx.linkedInvestmentId) {
+              const restoredBal = inv.balance + targetTx.amount;
+              const qty = inv.quantity ?? inv.units ?? 0;
+              const nextUnitPrice = qty > 0 ? restoredBal / qty : inv.currentUnitPrice ?? inv.unitPrice;
+              return {
+                ...inv,
+                balance: restoredBal,
+                ...(qty > 0 ? { unitPrice: nextUnitPrice, currentUnitPrice: nextUnitPrice } : {}),
+              };
+            }
+            return inv;
+          })
+        );
+      } else if (targetTx.adjustmentType === 'debt_interest_accrual' && targetTx.linkedDebtId) {
+        setDebts((prevDebts) =>
+          prevDebts.map((d) => {
+            if (d.id === targetTx.linkedDebtId) {
+              return {
+                ...d,
+                balance: Math.max(0, d.balance - targetTx.amount),
+              };
+            }
+            return d;
+          })
+        );
+      }
+      return;
+    }
+
     setAccounts((prevAccounts) =>
       prevAccounts.map((acc) => {
         if (acc.id === targetTx.accountId) {
-          // Reverse balance modification
-          let balanceDiff = -targetTx.amount;
-          if (targetTx.type === 'expense' || targetTx.type === 'saving' || targetTx.type === 'investment') {
-            balanceDiff = targetTx.amount;
-          }
-          const nextBalance = acc.currentBalance + balanceDiff;
-          const isCreditOrPaylater = acc.type === 'credit-card' || acc.type === 'paylater';
-          return {
-            ...acc,
-            currentBalance: nextBalance,
-            usedLimit: isCreditOrPaylater ? (acc.creditLimit || 0) - nextBalance : acc.usedLimit,
-          };
+          return applyAccountBalanceChange(acc, -getTransactionAccountDelta(targetTx));
         }
         return acc;
       })
     );
 
-    // Revert interconnected logic
-    // 1. Dana Darurat Revert
-    if (targetTx.category === 'Tabungan Darurat' || targetTx.category === 'Pencairan Dana Darurat') {
-      setEmergencyTransactions((prev) => 
-        prev.filter((etx) => !(etx.amount === targetTx.amount && etx.date === targetTx.date))
-      );
+    // 1. Dana Darurat Revert (exact linked ID first, single-match fallback for legacy rows)
+    if (
+      targetTx.linkedEmergencyTxId ||
+      targetTx.category === 'Tabungan Darurat' ||
+      targetTx.category === 'Pencairan Dana Darurat'
+    ) {
+      setEmergencyTransactions((prev) => {
+        if (targetTx.linkedEmergencyTxId) {
+          return prev.filter(
+            (etx) =>
+              etx.id !== targetTx.linkedEmergencyTxId &&
+              etx.linkedTransactionId !== targetTx.id
+          );
+        }
+        const byLinkedTx = prev.some((etx) => etx.linkedTransactionId === targetTx.id);
+        if (byLinkedTx) {
+          return prev.filter((etx) => etx.linkedTransactionId !== targetTx.id);
+        }
+        let removedOne = false;
+        return prev.filter((etx) => {
+          if (!removedOne && etx.amount === targetTx.amount && etx.date === targetTx.date) {
+            removedOne = true;
+            return false;
+          }
+          return true;
+        });
+      });
     }
 
     // 2. Debt Revert
@@ -964,11 +1192,7 @@ export default function App() {
         setAccounts((prevAccounts) =>
           prevAccounts.map((acc) => {
             if (acc.id === targetAccId) {
-              return {
-                ...acc,
-                currentBalance: acc.currentBalance - targetTx.amount,
-                usedLimit: (acc.usedLimit || 0) + targetTx.amount,
-              };
+              return applyAccountBalanceChange(acc, -targetTx.amount);
             }
             return acc;
           })
@@ -996,31 +1220,72 @@ export default function App() {
       );
     }
 
-    // 3. Investment Revert
+    // 3. Investment Revert (by linkedInvestmentId first, preserving unit quantities)
     if (targetTx.linkedInvestmentAction === 'buy') {
       setInvestments((prevInv) =>
-        prevInv.map((inv) => {
-          const descMatch = inv.name.toLowerCase().trim();
-          if (targetTx.description.toLowerCase().includes(descMatch)) {
-            const currentCap = inv.initialCapital !== undefined ? inv.initialCapital : inv.balance;
-            return {
-              ...inv,
-              balance: Math.max(0, inv.balance - targetTx.amount),
-              initialCapital: Math.max(0, currentCap - targetTx.amount),
-            };
-          }
-          return inv;
-        }).filter(inv => inv.balance > 0)
+        prevInv
+          .map((inv) => {
+            const isMatched = targetTx.linkedInvestmentId
+              ? inv.id === targetTx.linkedInvestmentId
+              : targetTx.description.toLowerCase().includes(inv.name.toLowerCase().trim());
+
+            if (isMatched) {
+              const currentCap = inv.initialCapital !== undefined ? inv.initialCapital : inv.balance;
+              const currentQty = inv.quantity ?? inv.units ?? 0;
+              const unitPx = targetTx.unitPrice || inv.unitPrice || inv.currentUnitPrice || 0;
+              const qtyToRemove =
+                targetTx.units && targetTx.units > 0
+                  ? targetTx.units
+                  : unitPx > 0
+                  ? targetTx.amount / unitPx
+                  : inv.balance > 0 && currentQty > 0
+                  ? (currentQty * targetTx.amount) / inv.balance
+                  : 0;
+
+              const newQty = Math.max(0, currentQty - qtyToRemove);
+              const newCap = Math.max(0, currentCap - targetTx.amount);
+              const newBal = Math.max(0, inv.balance - targetTx.amount);
+
+              return {
+                ...inv,
+                quantity: newQty,
+                units: newQty,
+                balance: newBal,
+                initialCapital: newCap,
+              };
+            }
+            return inv;
+          })
+          .filter((inv) => inv.balance > 0 || (inv.quantity ?? inv.units ?? 0) > 0)
       );
-    } else if (targetTx.linkedInvestmentId && targetTx.linkedInvestmentAction === 'sell') {
+    } else if (targetTx.linkedInvestmentAction === 'sell') {
       setInvestments((prevInv) =>
         prevInv.map((inv) => {
-          if (inv.id === targetTx.linkedInvestmentId) {
+          const isMatched = targetTx.linkedInvestmentId
+            ? inv.id === targetTx.linkedInvestmentId
+            : targetTx.description.toLowerCase().includes(inv.name.toLowerCase().trim());
+
+          if (isMatched) {
             const currentCap = inv.initialCapital !== undefined ? inv.initialCapital : inv.balance;
+            const currentQty = inv.quantity ?? inv.units ?? 0;
+            const unitPx = targetTx.unitPrice || inv.unitPrice || inv.currentUnitPrice || 0;
+            const qtyToRestore =
+              targetTx.units && targetTx.units > 0
+                ? targetTx.units
+                : unitPx > 0
+                ? targetTx.amount / unitPx
+                : inv.balance > 0 && currentQty > 0
+                ? (currentQty * targetTx.amount) / inv.balance
+                : 0;
+            const avgBuy = inv.purchaseUnitPrice ?? (currentQty > 0 ? currentCap / currentQty : unitPx);
+            const capToRestore = qtyToRestore > 0 && avgBuy > 0 ? qtyToRestore * avgBuy : targetTx.amount;
+
             return {
               ...inv,
+              quantity: currentQty + qtyToRestore,
+              units: currentQty + qtyToRestore,
               balance: inv.balance + targetTx.amount,
-              initialCapital: currentCap + targetTx.amount,
+              initialCapital: currentCap + capToRestore,
             };
           }
           return inv;
@@ -1029,7 +1294,7 @@ export default function App() {
     }
   };
 
-  // Perform transfer (Mutasi Dana) between two liquid accounts
+  // Perform transfer (Mutasi Dana) between two accounts
   const handleTransferFunds = (
     amount: number,
     fromAccountId: string,
@@ -1038,7 +1303,6 @@ export default function App() {
   ) => {
     const dateStr = new Date().toISOString().split('T')[0];
 
-    // Log the transaction as a combined event
     const outTxId = `tx-${Date.now()}-out`;
     const inTxId = `tx-${Date.now()}-in`;
 
@@ -1072,22 +1336,10 @@ export default function App() {
     setAccounts((prevAccounts) =>
       prevAccounts.map((acc) => {
         if (acc.id === fromAccountId) {
-          const nextBalance = acc.currentBalance - amount;
-          const isCreditOrPaylater = acc.type === 'credit-card' || acc.type === 'paylater';
-          return { 
-            ...acc, 
-            currentBalance: nextBalance,
-            usedLimit: isCreditOrPaylater ? (acc.creditLimit || 0) - nextBalance : acc.usedLimit,
-          };
+          return applyAccountBalanceChange(acc, -amount);
         }
         if (acc.id === toAccountId) {
-          const nextBalance = acc.currentBalance + amount;
-          const isCreditOrPaylater = acc.type === 'credit-card' || acc.type === 'paylater';
-          return { 
-            ...acc, 
-            currentBalance: nextBalance,
-            usedLimit: isCreditOrPaylater ? (acc.creditLimit || 0) - nextBalance : acc.usedLimit,
-          };
+          return applyAccountBalanceChange(acc, amount);
         }
         return acc;
       })
@@ -1141,14 +1393,7 @@ export default function App() {
     setAccounts((prevAccounts) =>
       prevAccounts.map((acc) => {
         if (acc.id === target.accountId) {
-          const balanceDiff = target.type === 'income' ? target.amount : -target.amount;
-          const nextBal = Math.max(0, acc.currentBalance + balanceDiff);
-          const isCreditOrPaylater = acc.type === 'credit-card' || acc.type === 'paylater';
-          return {
-            ...acc,
-            currentBalance: nextBal,
-            usedLimit: isCreditOrPaylater ? (acc.creditLimit || 0) - nextBal : acc.usedLimit,
-          };
+          return applyAccountBalanceChange(acc, getTransactionAccountDelta(newTx));
         }
         return acc;
       })
@@ -1247,7 +1492,11 @@ export default function App() {
   ) => {
     const isExist = budgets.some((b) => b.category.toLowerCase() === category.toLowerCase());
     if (isExist) {
-      alert('Kategori tersebut sudah terdaftar.');
+      showToast({
+        type: 'warning',
+        title: 'Kategori Sudah Terdaftar',
+        message: `Kategori anggaran "${category}" sudah ada dalam daftar Anda.`,
+      });
       return;
     }
     setBudgets((prev) => [...prev, { category, type, limit }]);
@@ -1260,33 +1509,59 @@ export default function App() {
   // Emergency Fund configs
   const handleUpdateEmergencyConfig = (config: EmergencyFundConfig) => {
     setEmergencyConfig(config);
-    alert('Kalkulasi dana darurat berhasil diperbarui!');
+    showToast({
+      type: 'success',
+      title: 'Target Dana Darurat Diperbarui',
+      message: 'Kalkulasi target dana darurat Anda berhasil disimpan.',
+    });
   };
 
   const handleAddEmergencyTx = (newEtx: Omit<EmergencyFundTransaction, 'id'>) => {
-    const etx: EmergencyFundTransaction = {
-      ...newEtx,
-      id: `etx-${Date.now()}`,
-    };
-    setEmergencyTransactions((prev) => [...prev, etx]);
-
-    // Create corresponding transaction log
-    // Match first bank account as transaction placeholder
-    const matchedAccount = accounts[0];
+    const matchedAccount = getLiquidAccounts(accounts)[0] || accounts[0];
     if (matchedAccount) {
+      // Single-source entry through handleAddTransaction so no duplicate emergency row is created
       handleAddTransaction({
-        date: etx.date,
+        date: newEtx.date,
         accountId: matchedAccount.id,
-        type: etx.type === 'addition' ? 'saving' : 'income',
-        category: 'Tabungan Darurat',
-        description: etx.description,
-        amount: etx.amount,
+        type: newEtx.type === 'addition' ? 'saving' : 'income',
+        category: newEtx.type === 'addition' ? 'Tabungan Darurat' : 'Pencairan Dana Darurat',
+        description: newEtx.description,
+        amount: newEtx.amount,
       });
+    } else {
+      const etx: EmergencyFundTransaction = {
+        ...newEtx,
+        id: `etx-${Date.now()}`,
+      };
+      setEmergencyTransactions((prev) => [...prev, etx]);
     }
   };
 
   const handleDeleteEmergencyTx = (id: string) => {
-    setEmergencyTransactions((prev) => prev.filter((et) => et.id !== id));
+    const targetEtx = emergencyTransactions.find((et) => et.id === id);
+    if (!targetEtx) return;
+
+    const linkedTx = transactions.find(
+      (t) =>
+        (targetEtx.linkedTransactionId && t.id === targetEtx.linkedTransactionId) ||
+        t.linkedEmergencyTxId === id ||
+        (!targetEtx.linkedTransactionId &&
+          (t.category === 'Tabungan Darurat' || t.category === 'Pencairan Dana Darurat') &&
+          t.amount === targetEtx.amount &&
+          t.date === targetEtx.date)
+    );
+
+    if (linkedTx) {
+      handleDeleteTransaction(linkedTx.id);
+    } else {
+      setEmergencyTransactions((prev) => prev.filter((et) => et.id !== id));
+    }
+
+    showToast({
+      type: 'info',
+      title: 'Mutasi Dana Darurat Dihapus',
+      message: 'Catatan dana darurat dan jurnal rekening terkait telah dibatalkan.',
+    });
   };
 
   // Investment handlers
@@ -1313,12 +1588,6 @@ export default function App() {
   };
 
   // Debt tracker handlers
-  const formatCurrencyIDR = (value: number) =>
-    new Intl.NumberFormat('id-ID', {
-      style: 'currency',
-      currency: 'IDR',
-      maximumFractionDigits: 0,
-    }).format(value);
 
   const handleAddDebt = (
     newDebt: Omit<Debt, 'id'>,
@@ -1328,6 +1597,7 @@ export default function App() {
           accountId: string;
           linkAccount?: boolean;
           transactionType?: 'income' | 'expense';
+          postKprInitialCostsToJournal?: boolean;
         }
   ) => {
     const uniqueSuffix = Math.random().toString(36).slice(2, 6);
@@ -1354,32 +1624,120 @@ export default function App() {
         ? bankLink.transactionType
         : 'expense';
 
+    const shouldPostKprInitialCosts =
+      typeof bankLink === 'object' && Boolean(bankLink?.postKprInitialCostsToJournal);
+
     if (resolvedAccountId) {
       const targetAcc = accounts.find((a) => a.id === resolvedAccountId);
       if (targetAcc) {
-        const tx: Transaction = {
+        const todayStr = new Date().toISOString().split('T')[0];
+        const isKprDebt = newDebt.category === 'KPR / Properti' || Boolean(newDebt.kprScheme);
+        const coaList = getStoredCoaList();
+        const bankCoa = getAccountCoaMapping(targetAcc, coaList);
+        const effKprCoa = resolveEffectiveKprCoaMapping(kprCoaMapping, newDebt.kprCoaSnapshot);
+
+        const primaryTx: Transaction = {
           id: `tx-debt-${Date.now()}-${uniqueSuffix}`,
-          date: new Date().toISOString().split('T')[0],
+          date: todayStr,
           accountId: targetAcc.id,
           type: resolvedTxType,
-          category:
-            resolvedTxType === 'expense'
+          category: isKprDebt
+            ? resolvedTxType === 'income'
+              ? effKprCoa.disbursementIncomeCategory || 'Pencairan KPR'
+              : 'Pengeluaran Pencairan Pinjaman'
+            : resolvedTxType === 'expense'
               ? 'Pengeluaran Pencairan Pinjaman'
               : 'Penerimaan Utang Baru',
           description:
             resolvedTxType === 'expense'
               ? `Pengeluaran Pencairan Pinjaman: ${newDebt.name}`
-              : `Pencairan Hutang: ${newDebt.name}`,
+              : isKprDebt
+                ? `Pencairan KPR: ${newDebt.name}`
+                : `Pencairan Hutang: ${newDebt.name}`,
           amount: newDebt.balance,
           linkedDebtId: debtId,
           linkedDebtAction: 'create',
+          ...(isKprDebt
+            ? {
+                coaDebitCode: resolvedTxType === 'income' ? bankCoa.code : effKprCoa.propertyAssetCode,
+                coaCreditCode: resolvedTxType === 'income' ? effKprCoa.principalLiabilityCode : bankCoa.code,
+              }
+            : {}),
         };
-        setTransactions((prev) => [tx, ...prev]);
+
+        const generatedTxs: Transaction[] = [primaryTx];
+        let totalInitialCashOutflow = 0;
+
+        if (isKprDebt && shouldPostKprInitialCosts) {
+          const dpAmount = Math.round(newDebt.downPayment || 0);
+          if (dpAmount > 0) {
+            generatedTxs.push({
+              id: `tx-kpr-dp-${Date.now()}-${uniqueSuffix}`,
+              date: todayStr,
+              accountId: targetAcc.id,
+              type: 'expense',
+              category: 'Uang Muka (DP) KPR',
+              description: `Uang Muka (DP) Properti KPR: ${newDebt.name}`,
+              amount: dpAmount,
+              linkedDebtId: debtId,
+              coaDebitCode: effKprCoa.propertyAssetCode,
+              coaCreditCode: bankCoa.code,
+            });
+            totalInitialCashOutflow += dpAmount;
+          }
+
+          if (newDebt.kprFeesSummary) {
+            const provisiLegalFee = Math.round(
+              (newDebt.kprFeesSummary.provisiFee || 0) +
+                (newDebt.kprFeesSummary.adminFee || 0) +
+                (newDebt.kprFeesSummary.appraisalFee || 0) +
+                (newDebt.kprFeesSummary.notaryAjbFee || 0)
+            );
+            if (provisiLegalFee > 0) {
+              generatedTxs.push({
+                id: `tx-kpr-admin-${Date.now()}-${uniqueSuffix}`,
+                date: todayStr,
+                accountId: targetAcc.id,
+                type: 'expense',
+                category: 'Biaya Provisi & Admin KPR',
+                description: `Biaya Provisi, Admin, Appraisal & Notaris KPR: ${newDebt.name}`,
+                amount: provisiLegalFee,
+                linkedDebtId: debtId,
+                coaDebitCode: effKprCoa.provisiAdminLegalCode,
+                coaCreditCode: bankCoa.code,
+              });
+              totalInitialCashOutflow += provisiLegalFee;
+            }
+
+            const taxInsuranceFee = Math.round(
+              (newDebt.kprFeesSummary.bphtbTax || 0) + (newDebt.kprFeesSummary.insuranceFee || 0)
+            );
+            if (taxInsuranceFee > 0) {
+              generatedTxs.push({
+                id: `tx-kpr-tax-${Date.now()}-${uniqueSuffix}`,
+                date: todayStr,
+                accountId: targetAcc.id,
+                type: 'expense',
+                category: 'Pajak Properti (BPHTB & PBB)',
+                description: `BPHTB & Asuransi Akad KPR: ${newDebt.name}`,
+                amount: taxInsuranceFee,
+                linkedDebtId: debtId,
+                coaDebitCode: effKprCoa.taxInsuranceCode,
+                coaCreditCode: bankCoa.code,
+              });
+              totalInitialCashOutflow += taxInsuranceFee;
+            }
+          }
+        }
+
+        setTransactions((prev) => [...generatedTxs, ...prev]);
+        const primaryBalanceDiff = resolvedTxType === 'expense' ? -newDebt.balance : newDebt.balance;
+        const netBalanceDiff = primaryBalanceDiff - totalInitialCashOutflow;
+
         setAccounts((prevAccounts) =>
           prevAccounts.map((acc) => {
             if (acc.id === targetAcc.id) {
-              const balanceDiff = resolvedTxType === 'expense' ? -newDebt.balance : newDebt.balance;
-              const nextBalance = acc.currentBalance + balanceDiff;
+              const nextBalance = acc.currentBalance + netBalanceDiff;
               const isCreditOrPaylater = acc.type === 'credit-card' || acc.type === 'paylater';
               return {
                 ...acc,
@@ -1391,13 +1749,18 @@ export default function App() {
           })
         );
 
+        const initialFeeNote =
+          totalInitialCashOutflow > 0
+            ? ` + ${generatedTxs.length - 1} jurnal COA DP & biaya akad (${formatCurrencyIDR(totalInitialCashOutflow)})`
+            : '';
+
         showToast({
           type: 'success',
           title: 'Hutang & Rekening Tersinkronisasi',
           message:
             resolvedTxType === 'expense'
-              ? `Hutang "${newDebt.name}" dicatat dan saldo ${targetAcc.name} berkurang ${formatCurrencyIDR(newDebt.balance)}.`
-              : `Hutang "${newDebt.name}" dicatat dan saldo ${targetAcc.name} bertambah ${formatCurrencyIDR(newDebt.balance)}.`,
+              ? `Hutang "${newDebt.name}" dicatat dan saldo ${targetAcc.name} berkurang ${formatCurrencyIDR(newDebt.balance)}${initialFeeNote}.`
+              : `Hutang "${newDebt.name}" dicatat dan saldo ${targetAcc.name} bertambah ${formatCurrencyIDR(newDebt.balance)}${initialFeeNote}.`,
           duration: 4500,
         });
       } else {
@@ -1415,77 +1778,99 @@ export default function App() {
     setDebts((prev) => prev.filter((d) => d.id !== id));
   };
 
-  const handlePayDebt = (debtId: string, amount: number, sourceAccountId: string): boolean => {
-    if (!Number.isFinite(amount) || amount <= 0) {
-      showToast({
-        type: 'warning',
-        title: 'Nominal Tidak Valid',
-        message: 'Masukkan nominal pembayaran cicilan yang lebih besar dari Rp 0.',
-        duration: 4500,
-      });
-      return false;
-    }
+  // --- ADJUSTING ENTRIES HANDLERS (NON-CASH JOURNAL + BALANCE SYNC) ---
+  const handleApplyAdjustingEntries = (entries: AdjustingEntryDraft[]) => {
+    if (!entries || entries.length === 0) return;
 
-    const matchedDebt = debts.find((d) => d.id === debtId);
-    if (!matchedDebt) {
-      showToast({
-        type: 'error',
-        title: 'Hutang Tidak Ditemukan',
-        message: 'Data hutang yang dipilih tidak tersedia atau sudah dihapus.',
-        duration: 5000,
-      });
-      return false;
-    }
+    const newTxs: Transaction[] = [];
+    const invDepTotals = new Map<string, number>();
+    const debtInterestTotals = new Map<string, number>();
 
-    const paymentSource = accounts.find((a) => a.id === sourceAccountId);
-    if (!paymentSource) {
-      showToast({
-        type: 'error',
-        title: 'Akun Sumber Tidak Valid',
-        message: 'Silakan pilih rekening sumber dana yang valid untuk membayar cicilan.',
-        duration: 5000,
-      });
-      return false;
-    }
+    entries.forEach((entry, idx) => {
+      if (entry.adjustmentAmount <= 0) return;
+      const isDep = entry.type === 'investment_depreciation';
 
-    if (paymentSource.currentBalance < amount) {
-      showToast({
-        type: 'error',
-        title: 'Dana Tidak Mencukupi',
-        message: `Saldo ${paymentSource.name} (${formatCurrencyIDR(paymentSource.currentBalance)}) tidak cukup untuk melunasi cicilan "${matchedDebt.name}" sebesar ${formatCurrencyIDR(amount)}.`,
-        duration: 6000,
+      newTxs.push({
+        id: `tx-adj-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 6)}`,
+        date: entry.cutoffDate,
+        accountId: '',
+        type: 'expense',
+        category: isDep ? 'Depresiasi Aset Investasi' : 'Akrual Bunga Utang',
+        description: isDep
+          ? `[Penyesuaian Non-Kas] Depresiasi ${entry.targetName} (${entry.durationDays} hr @ ${entry.annualRatePct}%/thn)`
+          : `[Penyesuaian Non-Kas] Akrual Bunga ${entry.targetName} (${entry.durationDays} hr @ ${entry.annualRatePct}% APR)`,
+        amount: entry.adjustmentAmount,
+        isAdjustment: true,
+        adjustmentType: entry.type,
+        adjustmentPeriodKey: entry.periodKey,
+        adjustmentRatePct: entry.annualRatePct,
+        adjustmentDurationDays: entry.durationDays,
+        coaDebitCode: entry.coaDebitCode,
+        coaCreditCode: entry.coaCreditCode,
+        ...(isDep
+          ? { linkedInvestmentId: entry.targetId }
+          : { linkedDebtId: entry.targetId }),
       });
-      return false;
-    }
 
-    if (amount > matchedDebt.balance) {
-      showToast({
-        type: 'warning',
-        title: 'Nominal Melebihi Sisa Hutang',
-        message: `Nominal bayar (${formatCurrencyIDR(amount)}) melebihi sisa pokok hutang "${matchedDebt.name}" (${formatCurrencyIDR(matchedDebt.balance)}).`,
-        duration: 5000,
-      });
-      return false;
-    }
-
-    handleAddTransaction({
-      date: new Date().toISOString().split('T')[0],
-      accountId: paymentSource.id,
-      type: 'expense',
-      category: 'Cicilan / Pelunasan Utang',
-      description: `Cicilan Pelunasan Hutang: ${matchedDebt.name}`,
-      amount,
-      linkedDebtId: debtId,
-      linkedDebtAction: 'pay',
+      if (isDep) {
+        invDepTotals.set(entry.targetId, (invDepTotals.get(entry.targetId) || 0) + entry.adjustmentAmount);
+      } else {
+        debtInterestTotals.set(entry.targetId, (debtInterestTotals.get(entry.targetId) || 0) + entry.adjustmentAmount);
+      }
     });
+
+    if (newTxs.length === 0) return;
+
+    setTransactions((prev) => [...newTxs, ...prev]);
+
+    if (invDepTotals.size > 0) {
+      setInvestments((prevInv) =>
+        prevInv.map((inv) => {
+          const depAmt = invDepTotals.get(inv.id);
+          if (!depAmt) return inv;
+          const nextBal = Math.max(0, inv.balance - depAmt);
+          const qty = inv.quantity ?? inv.units ?? 0;
+          const nextUnitPrice = qty > 0 ? nextBal / qty : inv.currentUnitPrice ?? inv.unitPrice;
+          return {
+            ...inv,
+            balance: nextBal,
+            ...(qty > 0 ? { unitPrice: nextUnitPrice, currentUnitPrice: nextUnitPrice } : {}),
+          };
+        })
+      );
+    }
+
+    if (debtInterestTotals.size > 0) {
+      setDebts((prevDebts) =>
+        prevDebts.map((debt) => {
+          const accAmt = debtInterestTotals.get(debt.id);
+          if (!accAmt) return debt;
+          return {
+            ...debt,
+            balance: debt.balance + accAmt,
+          };
+        })
+      );
+    }
 
     showToast({
       type: 'success',
-      title: 'Pembayaran Cicilan Berhasil',
-      message: `Pembayaran ${formatCurrencyIDR(amount)} untuk "${matchedDebt.name}" dari ${paymentSource.name} telah dicatat.`,
+      title: 'Jurnal Penyesuaian Diterapkan',
+      message: `${newTxs.length} jurnal non-kas berhasil diposting dan nilai aset investasi / utang pada Neraca telah disinkronkan.`,
+      duration: 4500,
+    });
+  };
+
+  const handleReverseAdjustingEntry = (txId: string) => {
+    const target = transactions.find((t) => t.id === txId && t.isAdjustment);
+    if (!target) return;
+    handleDeleteTransaction(txId);
+    showToast({
+      type: 'info',
+      title: 'Jurnal Penyesuaian Dibalikkan',
+      message: `Entri "${target.description}" dihapus dan saldo aset/utang terkait dikembalikan.`,
       duration: 4000,
     });
-    return true;
   };
 
   // AI suggestion application handler
@@ -1742,6 +2127,9 @@ export default function App() {
       setEmergencyConfig(JSON.parse(secureStorage.getItem(`fin_${username}_emergency_config`) || '{"jobStability":"medium","dependents":0,"monthlyExpense":0}'));
       setEmergencyTransactions(JSON.parse(secureStorage.getItem(`fin_${username}_emergency_transactions`) || '[]'));
     }
+    setMasterCategories(getStoredCategories(username));
+    setKprPresets(getStoredKprPresets(username));
+    setKprCoaMapping(getStoredKprCoaMapping(username));
     setActiveTab('dashboard');
   };
 
@@ -1767,6 +2155,8 @@ export default function App() {
     setEmergencyConfig({ jobStability: 'medium', dependents: 0, monthlyExpense: 0 });
     setEmergencyTransactions([]);
     setMasterCategories(DEFAULT_CATEGORY_HIERARCHY);
+    setKprPresets(DEFAULT_KPR_PRESETS);
+    setKprCoaMapping(DEFAULT_KPR_COA_MAPPING);
     setShowLogoutModal(false);
     setMobileMenuOpen(false);
   };
@@ -1779,9 +2169,7 @@ export default function App() {
   };
 
   // Helper calculation for total Emergency balance
-  const totalEmergencyBalance = emergencyTransactions.reduce((sum, tx) => {
-    return tx.type === 'addition' ? sum + tx.amount : sum - tx.amount;
-  }, 0);
+  const totalEmergencyBalance = calculateTotalEmergencyFund(emergencyTransactions);
 
   // Extract credit cards and paylaters into virtual debts for AI analysis
   const accountDebtsForAi = accounts
@@ -1789,12 +2177,13 @@ export default function App() {
     .map(acc => {
       const defaultAPR = acc.type === 'credit-card' ? 21 : 24;
       const rate = acc.interestRate !== undefined ? acc.interestRate : defaultAPR;
-      const calculatedMin = Math.max((acc.usedLimit || 0) * 0.1, (acc.usedLimit && acc.usedLimit > 0) ? 50000 : 0);
+      const bill = getAccountCreditBill(acc);
+      const calculatedMin = Math.max(bill * 0.1, bill > 0 ? 50000 : 0);
       const min = acc.minPayment !== undefined ? acc.minPayment : calculatedMin;
       return {
         id: `acc-debt-${acc.id}`,
         name: acc.name,
-        balance: acc.usedLimit || 0,
+        balance: bill,
         interestRate: rate,
         minPayment: min,
         purpose: 'consumptive' as const,
@@ -1949,7 +2338,7 @@ export default function App() {
               {activeTab === 'accounts' && 'Master Akun & Rekening Keuangan'}
               {activeTab === 'budget' && 'Rencana Anggaran & Batas Kategori'}
               {activeTab === 'emergency-fund' && 'Kalkulator & Dana Darurat'}
-              {activeTab === 'debts' && 'Strategi Pelunasan Utang'}
+              {activeTab === 'debts' && 'Perhitungan Utang & Simulasi KPR'}
               {activeTab === 'investments' && 'Investasi & Manajemen Portofolio'}
               {activeTab === 'reports' && 'Laporan Keuangan Standar (PSAR / GAAP)'}
               {activeTab === 'ai-analysis' && 'Saran & Analisis Cerdas AI'}
@@ -1984,9 +2373,7 @@ export default function App() {
             <div className="hidden md:block text-right">
               <p className="text-[9px] text-slate-400 dark:text-slate-500 uppercase font-extrabold tracking-wider">Total Kas & Bank</p>
               <p className="text-xs sm:text-sm font-black text-blue-600 dark:text-blue-400 font-mono">
-                {new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', minimumFractionDigits: 0 }).format(
-                  accounts.reduce((sum, a) => sum + a.currentBalance, 0)
-                )}
+                {formatCurrencyIDR(calculateTotalLiquidCash(accounts))}
               </p>
             </div>
             
@@ -2116,6 +2503,9 @@ export default function App() {
                     investments={investments}
                     recurringTransactions={recurringTransactions}
                     masterCategories={masterCategories}
+                    kprCoaMapping={kprCoaMapping}
+                    preselectedPayDebtId={pendingPayDebtId}
+                    onClearPreselectedPayDebt={() => setPendingPayDebtId(null)}
                     onAddTransaction={handleAddTransaction}
                     onDeleteTransaction={handleDeleteTransaction}
                     onTransferFunds={handleTransferFunds}
@@ -2145,12 +2535,13 @@ export default function App() {
                     budgets={budgets}
                     transactions={transactions}
                     masterCategories={masterCategories}
-                    onUpdateAccountBalance={handleUpdateAccountBalance}
-                    onAddAccount={handleAddAccount}
-                    onDeleteAccount={handleDeleteAccount}
                     onUpdateBudgetLimit={handleUpdateBudgetLimit}
                     onAddBudgetCategory={handleAddBudgetCategory}
                     onDeleteBudgetCategory={handleDeleteBudgetCategory}
+                    onNavigateToAccounts={() => {
+                      setActiveTab('accounts');
+                      scrollWorkspaceToTop();
+                    }}
                   />
                 )}
 
@@ -2169,10 +2560,15 @@ export default function App() {
                     debts={debts}
                     accounts={accounts}
                     transactions={transactions}
+                    kprPresets={kprPresets}
+                    kprCoaMapping={kprCoaMapping}
                     onAddDebt={handleAddDebt}
                     onDeleteDebt={handleDeleteDebt}
-                    onPayDebt={handlePayDebt}
-                    onTransferFunds={handleTransferFunds}
+                    onNavigateToPayDebt={(debtId) => {
+                      setPendingPayDebtId(debtId || '__choose__');
+                      setActiveTab('transactions');
+                      scrollWorkspaceToTop();
+                    }}
                   />
                 )}
 
@@ -2190,6 +2586,12 @@ export default function App() {
                       categories={masterCategories}
                       accounts={accounts}
                       transactions={transactions}
+                      kprPresets={kprPresets}
+                      kprCoaMapping={kprCoaMapping}
+                      onUpdateKprPresets={(updated) => setKprPresets(updated)}
+                      onResetKprPresets={() => setKprPresets(resetStoredKprPresets(currentUser?.username))}
+                      onUpdateKprCoaMapping={(updated) => setKprCoaMapping(updated)}
+                      onResetKprCoaMapping={() => setKprCoaMapping(resetStoredKprCoaMapping(currentUser?.username))}
                       onUpdateCategories={(newCats) => setMasterCategories(newCats)}
                       onResetToDefault={() => setMasterCategories(DEFAULT_CATEGORY_HIERARCHY)}
                       onOpenBackupModal={() => setShowBackupModal(true)}
@@ -2203,6 +2605,8 @@ export default function App() {
                         const { resetAccounts } = factoryResetMasterData();
                         setAccounts(resetAccounts);
                         setMasterCategories(DEFAULT_CATEGORY_HIERARCHY);
+                        setKprPresets(resetStoredKprPresets(currentUser?.username));
+                        setKprCoaMapping(resetStoredKprCoaMapping(currentUser?.username));
                         if (currentUser) {
                           secureStorage.setItem(`fin_${currentUser.username}_accounts`, JSON.stringify(resetAccounts));
                         }
@@ -2234,6 +2638,7 @@ export default function App() {
                     investments={investments}
                     emergencyTransactions={emergencyTransactions}
                     masterCategories={masterCategories}
+                    kprCoaMapping={kprCoaMapping}
                     onUpdateMasterCategories={(newCats) => setMasterCategories(newCats)}
                     onResetMasterCategories={() => setMasterCategories(DEFAULT_CATEGORY_HIERARCHY)}
                     onUpdateAccounts={(updated) => {
@@ -2254,6 +2659,8 @@ export default function App() {
                         secureStorage.setItem(`fin_${currentUser.username}_investments`, JSON.stringify(updated));
                       }
                     }}
+                    onApplyAdjustments={handleApplyAdjustingEntries}
+                    onReverseAdjustment={handleReverseAdjustingEntry}
                     onOpenIntegrityModal={() => setShowIntegrityModal(true)}
                   />
                 )}
@@ -2445,7 +2852,11 @@ export default function App() {
               }
             }
             setShowIntegrityModal(false);
-            alert('Sistem Akuntansi & Chart of Accounts (COA) Berhasil Diharmoniskan!');
+            showToast({
+              type: 'success',
+              title: 'Sistem Akuntansi Diharmoniskan',
+              message: 'Chart of Accounts (COA) dan relasi akun berhasil diharmoniskan.',
+            });
           }}
           onApplyAdjustmentEntries={(adjEntries) => {
             const newTransactions: Transaction[] = adjEntries.map((e, idx) => ({
@@ -2457,21 +2868,17 @@ export default function App() {
             const updatedTxList = [...transactions, ...newTransactions];
             setTransactions(updatedTxList);
 
-            // Update account current balances
+            // Update account current balances & credit card usedLimit consistently
             const updatedAccs = accounts.map((acc) => {
               const matchedEntries = newTransactions.filter((t) => t.accountId === acc.id);
               if (matchedEntries.length === 0) return acc;
 
-              let delta = 0;
-              matchedEntries.forEach((t) => {
-                if (t.type === 'income') delta += t.amount;
-                else if (t.type === 'expense') delta -= t.amount;
-              });
+              const delta = matchedEntries.reduce(
+                (sum, t) => sum + getTransactionAccountDelta(t),
+                0
+              );
 
-              return {
-                ...acc,
-                currentBalance: acc.currentBalance + delta,
-              };
+              return applyAccountBalanceChange(acc, delta);
             });
 
             setAccounts(updatedAccs);

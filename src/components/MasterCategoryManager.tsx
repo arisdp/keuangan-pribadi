@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { secureStorage } from '../utils/secureStorage';
 import { logger } from '../utils/logger';
+import { showToast } from '../utils/toast';
 import {
   ResponsiveContainer,
   BarChart,
@@ -18,13 +19,16 @@ import {
   deleteCategoryNode,
   renameCategoryNode,
   findCategoryNode,
+  mergeMissingDefaultCategories,
 } from '../categoryHierarchy';
-import { Account, Transaction } from '../types';
+import { Account, Transaction, KprPreset, KprCoaMappingConfig } from '../types';
+import { DEFAULT_KPR_PRESETS, DEFAULT_KPR_COA_MAPPING } from '../utils/kprPresets';
 import { D3CoaInteractiveTree } from './D3CoaInteractiveTree';
 import { ErrorBoundary } from './ErrorBoundary';
 import { SchemaDebugModal } from './SchemaDebugModal';
 import { DatabaseDiagnostics } from './DatabaseDiagnostics';
 import { DatabaseSchemaFixer } from './DatabaseSchemaFixer';
+import { MasterKprPresetsPanel } from './MasterKprPresetsPanel';
 import {
   AccountCOA,
   DEFAULT_COA_LIST,
@@ -82,12 +86,19 @@ import {
   CheckSquare,
   Square,
   ListFilter,
+  Home,
 } from 'lucide-react';
 
 interface MasterCategoryManagerProps {
   categories: CategoryNode[];
   accounts?: Account[];
   transactions?: Transaction[];
+  kprPresets?: KprPreset[];
+  kprCoaMapping?: KprCoaMappingConfig;
+  onUpdateKprPresets?: (updatedPresets: KprPreset[]) => void;
+  onResetKprPresets?: () => void;
+  onUpdateKprCoaMapping?: (updatedMapping: KprCoaMappingConfig) => void;
+  onResetKprCoaMapping?: () => void;
   onUpdateCategories: (newCategories: CategoryNode[]) => void;
   onResetToDefault: () => void;
   onBulkMoveTransactions?: (sourceCategories: string[], targetCategory: string) => void;
@@ -379,6 +390,12 @@ export const MasterCategoryManager: React.FC<MasterCategoryManagerProps> = ({
   categories,
   accounts = [],
   transactions = [],
+  kprPresets = DEFAULT_KPR_PRESETS,
+  kprCoaMapping = DEFAULT_KPR_COA_MAPPING,
+  onUpdateKprPresets,
+  onResetKprPresets,
+  onUpdateKprCoaMapping,
+  onResetKprCoaMapping,
   onUpdateCategories,
   onResetToDefault,
   onBulkMoveTransactions,
@@ -387,8 +404,8 @@ export const MasterCategoryManager: React.FC<MasterCategoryManagerProps> = ({
   onUpdateAccounts,
   onFactoryReset,
 }) => {
-  // Main Tab State: 'hierarchy' | 'coa' | 'tree-view' | 'd3-tree' | 'logs' | 'db-diagnostics'
-  const [activeSubTab, setActiveSubTab] = useState<'hierarchy' | 'coa' | 'tree-view' | 'd3-tree' | 'logs' | 'db-diagnostics'>('hierarchy');
+  // Main Tab State: 'hierarchy' | 'coa' | 'tree-view' | 'd3-tree' | 'logs' | 'db-diagnostics' | 'kpr-master'
+  const [activeSubTab, setActiveSubTab] = useState<'hierarchy' | 'coa' | 'tree-view' | 'd3-tree' | 'logs' | 'db-diagnostics' | 'kpr-master'>('hierarchy');
   const [showSchemaDebugModal, setShowSchemaDebugModal] = useState<boolean>(false);
 
   // Bulk Accounts Selection state
@@ -476,7 +493,11 @@ export const MasterCategoryManager: React.FC<MasterCategoryManagerProps> = ({
       editCoaCode.trim() !== editingCoa.code &&
       coaList.some((c) => c.code === editCoaCode.trim())
     ) {
-      alert(`Kode perkiraan akun "${editCoaCode}" sudah digunakan oleh akun lain.`);
+      showToast({
+        type: 'warning',
+        title: 'Kode COA Sudah Digunakan',
+        message: `Kode perkiraan akun "${editCoaCode}" sudah digunakan oleh akun lain.`,
+      });
       return;
     }
 
@@ -506,30 +527,56 @@ export const MasterCategoryManager: React.FC<MasterCategoryManagerProps> = ({
   };
 
   const handleDeleteCoa = (code: string, name: string) => {
-    if (confirm(`Apakah Anda yakin ingin menghapus Kode COA "${code} - ${name}"?`)) {
-      setCoaList((prev) => prev.filter((c) => c.code !== code));
-      addMasterChangeLog(
-        'COA',
-        name,
-        'DELETE',
-        `Master COA [${code} - ${name}] dihapus dari hirarki COA.`,
-        'User Admin'
-      );
-    }
+    setConfirmModal({
+      isOpen: true,
+      title: 'Hapus Kode COA?',
+      message: `Apakah Anda yakin ingin menghapus Kode COA "${code} - ${name}"?`,
+      confirmLabel: 'Ya, Hapus COA',
+      isDanger: true,
+      onConfirm: () => {
+        setCoaList((prev) => prev.filter((c) => c.code !== code));
+        addMasterChangeLog(
+          'COA',
+          name,
+          'DELETE',
+          `Master COA [${code} - ${name}] dihapus dari hirarki COA.`,
+          'User Admin'
+        );
+        setConfirmModal(null);
+        showToast({
+          type: 'success',
+          title: 'Kode COA Dihapus',
+          message: `COA "${code} - ${name}" berhasil dihapus.`,
+        });
+      },
+    });
   };
 
   const handleResetCoaToDefault = () => {
-    if (confirm('Apakah Anda yakin ingin mengembalikan seluruh daftar COA ke susunan standar awal bawaan?')) {
-      setCoaList(DEFAULT_COA_LIST);
-      secureStorage.removeItem('app_coa_list');
-      addMasterChangeLog(
-        'COA',
-        'System Default COA',
-        'SYNC',
-        'Seluruh susunan COA dikembalikan ke standar awal sistem.',
-        'User Admin'
-      );
-    }
+    setConfirmModal({
+      isOpen: true,
+      title: 'Reset Daftar COA ke Standar?',
+      message: 'Apakah Anda yakin ingin mengembalikan seluruh daftar COA ke susunan standar awal bawaan?',
+      confirmLabel: 'Ya, Reset COA',
+      isDanger: true,
+      onConfirm: () => {
+        setCoaList(DEFAULT_COA_LIST);
+        secureStorage.removeItem('app_coa_list');
+        addMasterChangeLog(
+          'COA',
+          'System Default COA',
+          'SYNC',
+          'Seluruh susunan COA dikembalikan ke standar awal sistem.',
+          'User Admin'
+        );
+        setConfirmModal(null);
+        showToast({
+          type: 'success',
+          title: 'COA Direset',
+          message: 'Seluruh daftar COA berhasil dikembalikan ke susunan standar awal.',
+        });
+      },
+    });
   };
 
   // Status filter state: 'all' | 'active' | 'inactive'
@@ -540,6 +587,16 @@ export const MasterCategoryManager: React.FC<MasterCategoryManagerProps> = ({
 
   // Bar chart metric toggle: 'count' (Jumlah Transaksi) vs 'amount' (Nominal Rp)
   const [chartMetric, setChartMetric] = useState<'count' | 'amount'>('count');
+
+  // In-app Confirmation Modal State
+  const [confirmModal, setConfirmModal] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    confirmLabel?: string;
+    isDanger?: boolean;
+    onConfirm: () => void;
+  } | null>(null);
 
   // Bulk Move Modal State
   const [bulkMoveModalState, setBulkMoveModalState] = useState<{
@@ -654,7 +711,11 @@ export const MasterCategoryManager: React.FC<MasterCategoryManagerProps> = ({
   // Delete category validation check with Bulk Move capability
   const handleDelete = (id: string, name: string) => {
     if (id.startsWith('type-')) {
-      alert('Kelompok Utama (Ekuitas, Pendapatan, Pengeluaran) tidak dapat dihapus.');
+      showToast({
+        type: 'warning',
+        title: 'Tidak Dapat Dihapus',
+        message: 'Kelompok Utama (Ekuitas, Pendapatan, Pengeluaran) tidak dapat dihapus.',
+      });
       return;
     }
 
@@ -678,16 +739,33 @@ export const MasterCategoryManager: React.FC<MasterCategoryManagerProps> = ({
       }
     }
 
-    if (confirm(`Apakah Anda yakin ingin menghapus kategori "${name}"?`)) {
-      const updated = deleteCategoryNode(categories, id);
-      onUpdateCategories(updated);
-    }
+    setConfirmModal({
+      isOpen: true,
+      title: 'Hapus Kategori?',
+      message: `Apakah Anda yakin ingin menghapus kategori "${name}"?`,
+      confirmLabel: 'Ya, Hapus Kategori',
+      isDanger: true,
+      onConfirm: () => {
+        const updated = deleteCategoryNode(categories, id);
+        onUpdateCategories(updated);
+        setConfirmModal(null);
+        showToast({
+          type: 'success',
+          title: 'Kategori Dihapus',
+          message: `Kategori "${name}" berhasil dihapus.`,
+        });
+      },
+    });
   };
 
   // Rename category validation check with Bulk Move capability
   const startRename = (node: CategoryNode) => {
     if (node.type === 'type') {
-      alert('Kelompok Utama (Ekuitas, Pendapatan, Pengeluaran) tidak dapat diubah namanya.');
+      showToast({
+        type: 'warning',
+        title: 'Tidak Dapat Diubah',
+        message: 'Kelompok Utama (Ekuitas, Pendapatan, Pengeluaran) tidak dapat diubah namanya.',
+      });
       return;
     }
 
@@ -715,7 +793,11 @@ export const MasterCategoryManager: React.FC<MasterCategoryManagerProps> = ({
   // Execute Bulk Move & Category Action
   const executeBulkMoveAndAction = () => {
     if (!bulkMoveModalState.targetCategory) {
-      alert('Silakan pilih kategori tujuan pemindahan.');
+      showToast({
+        type: 'warning',
+        title: 'Pilih Tujuan Pemindahan',
+        message: 'Silakan pilih kategori tujuan pemindahan terlebih dahulu.',
+      });
       return;
     }
 
@@ -758,7 +840,11 @@ export const MasterCategoryManager: React.FC<MasterCategoryManagerProps> = ({
     if (!newCoaCode.trim() || !newCoaName.trim()) return;
 
     if (coaList.some((c) => c.code === newCoaCode.trim())) {
-      alert(`Kode perkiraan akun "${newCoaCode}" sudah digunakan.`);
+      showToast({
+        type: 'warning',
+        title: 'Kode COA Sudah Digunakan',
+        message: `Kode perkiraan akun "${newCoaCode}" sudah terdaftar.`,
+      });
       return;
     }
 
@@ -864,22 +950,31 @@ export const MasterCategoryManager: React.FC<MasterCategoryManagerProps> = ({
   };
 
   const handleFactoryResetAll = () => {
-    if (
-      confirm(
-        'APAKAH ANDA YAKIN INGIN MERESET SELURUH MASTER DATA KE STANDAR DEFAULT PABRIK?\n\nTindakan ini akan mengembalikan Master COA dan Master Akun Rekening ke struktur awal teratur yang 100% bebas dari kesalahan atau duplikasi.'
-      )
-    ) {
-      if (onFactoryReset) {
-        onFactoryReset();
-      } else {
-        const { resetCoaList } = factoryResetMasterData();
-        setCoaList(resetCoaList);
-        onResetToDefault();
-      }
-      setCoaList(DEFAULT_COA_LIST);
-      setChangeLogs(getMasterChangeLogs());
-      alert('Master Data berhasil di-reset ke standar default awal pabrik!');
-    }
+    setConfirmModal({
+      isOpen: true,
+      title: 'Reset Master Data ke Default Pabrik?',
+      message:
+        'Tindakan ini akan mengembalikan Master COA dan Master Akun Rekening ke struktur awal teratur yang bebas dari kesalahan atau duplikasi.',
+      confirmLabel: 'Ya, Reset Factory',
+      isDanger: true,
+      onConfirm: () => {
+        if (onFactoryReset) {
+          onFactoryReset();
+        } else {
+          const { resetCoaList } = factoryResetMasterData();
+          setCoaList(resetCoaList);
+          onResetToDefault();
+        }
+        setCoaList(DEFAULT_COA_LIST);
+        setChangeLogs(getMasterChangeLogs());
+        setConfirmModal(null);
+        showToast({
+          type: 'success',
+          title: 'Master Data Direset',
+          message: 'Master Data berhasil di-reset ke standar default awal pabrik.',
+        });
+      },
+    });
   };
 
   // Render Category Tree recursively
@@ -1118,7 +1213,7 @@ export const MasterCategoryManager: React.FC<MasterCategoryManagerProps> = ({
       </div>
 
       {/* FULL-WIDTH SEGMENTED SUB-TAB BAR */}
-      <div className="bg-slate-100 dark:bg-slate-800/80 p-1.5 rounded-2xl border border-slate-200 dark:border-slate-700/80 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-1.5 w-full">
+      <div className="bg-slate-100 dark:bg-slate-800/80 p-1.5 rounded-2xl border border-slate-200 dark:border-slate-700/80 grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-1.5 w-full">
         <button
           onClick={() => setActiveSubTab('hierarchy')}
           className={`flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl text-xs font-extrabold transition cursor-pointer ${
@@ -1189,6 +1284,18 @@ export const MasterCategoryManager: React.FC<MasterCategoryManagerProps> = ({
         >
           <Database className="h-4 w-4 shrink-0" />
           <span className="truncate">6. Diagnostik & Skema DB</span>
+        </button>
+
+        <button
+          onClick={() => setActiveSubTab('kpr-master')}
+          className={`flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl text-xs font-extrabold transition cursor-pointer ${
+            activeSubTab === 'kpr-master'
+              ? 'bg-blue-600 text-white shadow-md'
+              : 'text-slate-600 dark:text-slate-300 hover:bg-white dark:hover:bg-slate-700/60'
+          }`}
+        >
+          <Home className="h-4 w-4 shrink-0" />
+          <span className="truncate">7. Master Data KPR</span>
         </button>
       </div>
 
@@ -2446,12 +2553,116 @@ export const MasterCategoryManager: React.FC<MasterCategoryManagerProps> = ({
         </div>
       )}
 
+      {/* SUB TAB 7: MASTER DATA KPR */}
+      {activeSubTab === 'kpr-master' && (
+        <MasterKprPresetsPanel
+          presets={kprPresets}
+          coaList={coaList}
+          categories={categories}
+          kprCoaMapping={kprCoaMapping}
+          onUpdatePresets={(updated, logDetail) => {
+            onUpdateKprPresets?.(updated);
+            if (logDetail) {
+              addMasterChangeLog('KPR', 'Preset Skema & Biaya KPR', 'UPDATE', logDetail, 'User Admin');
+              setChangeLogs(getMasterChangeLogs());
+            }
+          }}
+          onResetPresets={() => {
+            onResetKprPresets?.();
+            addMasterChangeLog(
+              'KPR',
+              'Preset Skema & Biaya KPR',
+              'SYNC',
+              'Reset daftar preset KPR ke 4 paket standar default.',
+              'User Admin'
+            );
+            setChangeLogs(getMasterChangeLogs());
+          }}
+          onUpdateKprCoaMapping={(updated) => {
+            onUpdateKprCoaMapping?.(updated);
+            addMasterChangeLog(
+              'KPR',
+              'Pemetaan COA KPR',
+              'UPDATE',
+              `Pemetaan COA KPR diperbarui (Aset ${updated.propertyAssetCode}, Utang ${updated.principalLiabilityCode}, Bunga ${updated.interestExpenseCode}, Akrual ${updated.accruedInterestCode}, Provisi/Legal ${updated.provisiAdminLegalCode}, Pajak/Asuransi ${updated.taxInsuranceCode}).`,
+              'User Admin'
+            );
+            setChangeLogs(getMasterChangeLogs());
+          }}
+          onResetKprCoaMapping={() => {
+            onResetKprCoaMapping?.();
+            addMasterChangeLog(
+              'KPR',
+              'Pemetaan COA KPR',
+              'SYNC',
+              'Reset pemetaan kode COA KPR kembali ke standar (1600, 2310, 2390, 5810, 5820, 5830).',
+              'User Admin'
+            );
+            setChangeLogs(getMasterChangeLogs());
+          }}
+          onSyncKprMasterData={() => {
+            // Merge missing default COAs (including KPR COAs) into coaList
+            const existingCodes = new Set(coaList.map((c) => c.code));
+            const missingCoas = DEFAULT_COA_LIST.filter((d) => !existingCodes.has(d.code));
+            if (missingCoas.length > 0) {
+              setCoaList((prev) => [...prev, ...missingCoas].sort((a, b) => a.code.localeCompare(b.code)));
+            }
+            // Merge missing default categories (including KPR categories) into categories
+            const mergedCats = mergeMissingDefaultCategories(categories);
+            onUpdateCategories(mergedCats);
+            addMasterChangeLog(
+              'KPR',
+              'Master Data KPR',
+              'SYNC',
+              'Sinkronisasi kode COA KPR (1600, 2310, 2390, 5810-5830) dan kategori KPR berhasil.',
+              'User Admin'
+            );
+            setChangeLogs(getMasterChangeLogs());
+          }}
+        />
+      )}
+
       {/* SCHEMA DEBUG MODAL */}
       <SchemaDebugModal
         isOpen={showSchemaDebugModal}
         onClose={() => setShowSchemaDebugModal(false)}
         initialTableName="users"
       />
+
+      {/* IN-APP CONFIRMATION MODAL */}
+      {confirmModal?.isOpen && (
+        <div className="fixed inset-0 z-[999] bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 animate-fadeIn">
+          <div className="bg-white rounded-2xl max-w-sm w-full p-5 shadow-2xl border border-slate-200 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className={`p-2.5 rounded-xl shrink-0 ${confirmModal.isDanger ? 'bg-rose-100 text-rose-600' : 'bg-blue-100 text-blue-600'}`}>
+                <AlertTriangle className="h-5 w-5" />
+              </div>
+              <div className="space-y-1">
+                <h4 className="font-extrabold text-sm text-slate-800">{confirmModal.title}</h4>
+                <p className="text-xs text-slate-600 leading-relaxed">{confirmModal.message}</p>
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setConfirmModal(null)}
+                className="px-3.5 py-2 rounded-xl text-xs font-bold text-slate-600 bg-slate-100 hover:bg-slate-200 transition cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={confirmModal.onConfirm}
+                className={`px-4 py-2 rounded-xl text-xs font-extrabold text-white transition cursor-pointer shadow-xs ${
+                  confirmModal.isDanger ? 'bg-rose-600 hover:bg-rose-700' : 'bg-blue-600 hover:bg-blue-700'
+                }`}
+              >
+                {confirmModal.confirmLabel || 'Konfirmasi'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

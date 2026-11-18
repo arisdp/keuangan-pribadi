@@ -1,21 +1,13 @@
 import React, { useState, useMemo } from 'react';
-import { Debt, Account, Transaction } from '../types';
+import { Debt, Account, Transaction, KprPreset, KprCoaMappingConfig } from '../types';
 import { FormattedNumberInput } from './FormattedNumberInput';
+import { KprAmortizationChart, computeKprSchedule } from './KprAmortizationChart';
 import {
-  ResponsiveContainer,
-  BarChart,
-  Bar,
-  AreaChart,
-  Area,
-  PieChart,
-  Pie,
-  Cell,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  Legend,
-} from 'recharts';
+  DEFAULT_KPR_PRESETS,
+  DEFAULT_KPR_COA_MAPPING,
+  calculateKprClosingCosts,
+  resolveEffectiveKprCoaMapping,
+} from '../utils/kprPresets';
 import {
   Calculator,
   ListOrdered,
@@ -39,7 +31,6 @@ import {
   AlertTriangle,
   TrendingUp,
   BarChart3,
-  PieChart as PieChartIcon,
   Percent,
   Edit3,
   RotateCcw,
@@ -100,6 +91,8 @@ interface DebtTabProps {
   debts: Debt[];
   accounts: Account[];
   transactions?: Transaction[];
+  kprPresets?: KprPreset[];
+  kprCoaMapping?: KprCoaMappingConfig;
   onAddDebt: (
     debt: Omit<Debt, 'id'>,
     bankLink?:
@@ -108,29 +101,22 @@ interface DebtTabProps {
           accountId: string;
           linkAccount?: boolean;
           transactionType?: 'income' | 'expense';
+          postKprInitialCostsToJournal?: boolean;
         }
   ) => void;
   onDeleteDebt: (id: string) => void;
-  onPayDebt: (debtId: string, amount: number, sourceAccountId: string) => boolean | void;
-  onTransferFunds?: (amount: number, fromAccountId: string, toAccountId: string, description: string) => void;
+  onNavigateToPayDebt?: (debtId?: string) => void;
 }
-
-const calcAnnuityPayment = (principal: number, annualRatePct: number, months: number) => {
-  if (principal <= 0 || months <= 0) return 0;
-  if (annualRatePct <= 0) return principal / months;
-  const r = annualRatePct / 100 / 12;
-  const factor = Math.pow(1 + r, months);
-  return (principal * (r * factor)) / (factor - 1);
-};
 
 export const DebtTab: React.FC<DebtTabProps> = ({
   debts,
   accounts,
   transactions = [],
+  kprPresets = DEFAULT_KPR_PRESETS,
+  kprCoaMapping = DEFAULT_KPR_COA_MAPPING,
   onAddDebt,
   onDeleteDebt,
-  onPayDebt,
-  onTransferFunds,
+  onNavigateToPayDebt,
 }) => {
   // Custom Modal/Dialog States to replace window.confirm and window.alert
   const [confirmModal, setConfirmModal] = useState<{
@@ -157,9 +143,6 @@ export const DebtTab: React.FC<DebtTabProps> = ({
   // Strategy toggle
   const [strategy, setStrategy] = useState<'snowball' | 'avalanche'>('avalanche');
 
-  // Column 1 action mode: add new debt vs pay installment
-  const [debtActionTab, setDebtActionTab] = useState<'add' | 'pay'>('add');
-
   // Add Debt form state
   const [name, setName] = useState('');
   const [balance, setBalance] = useState('');
@@ -171,11 +154,6 @@ export const DebtTab: React.FC<DebtTabProps> = ({
   const [linkBankEnabled, setLinkBankEnabled] = useState<boolean>(false);
   const [addDisburseAccountId, setAddDisburseAccountId] = useState('');
   const [bankLinkTxType, setBankLinkTxType] = useState<'expense' | 'income'>('expense');
-
-  // Pay Debt Form State
-  const [payDebtId, setPayDebtId] = useState('');
-  const [payAmount, setPayAmount] = useState('');
-  const [sourceAccountId, setSourceAccountId] = useState('');
 
   // --- KPR (KREDIT PEMILIKAN RUMAH) CALCULATOR STATE ---
   const [kprName, setKprName] = useState('KPR Rumah Tinggal');
@@ -192,8 +170,30 @@ export const DebtTab: React.FC<DebtTabProps> = ({
   const [kprLinkBankEnabled, setKprLinkBankEnabled] = useState<boolean>(false);
   const [kprDisburseAccountId, setKprDisburseAccountId] = useState<string>('');
   const [kprBankTxType, setKprBankTxType] = useState<'expense' | 'income'>('expense');
+  const [kprPostInitialFees, setKprPostInitialFees] = useState<boolean>(false);
   const [showKprAmortization, setShowKprAmortization] = useState<boolean>(false);
-  const [kprChartView, setKprChartView] = useState<'yearly-split' | 'first-year-monthly' | 'balance-trend'>('yearly-split');
+  const [kprVisualSource, setKprVisualSource] = useState<'calculator' | 'saved'>('calculator');
+  const [selectedSavedKprId, setSelectedSavedKprId] = useState<string>('');
+  const [selectedKprPresetId, setSelectedKprPresetId] = useState<string>(kprPresets[0]?.id || '');
+
+  const activeKprPreset = useMemo(() => {
+    return kprPresets.find((p) => p.id === selectedKprPresetId) || kprPresets[0] || DEFAULT_KPR_PRESETS[0];
+  }, [kprPresets, selectedKprPresetId]);
+
+  const effectiveKprCoa = useMemo(() => {
+    return resolveEffectiveKprCoaMapping(kprCoaMapping, activeKprPreset);
+  }, [kprCoaMapping, activeKprPreset]);
+
+  const applyKprPreset = (preset: KprPreset) => {
+    setSelectedKprPresetId(preset.id);
+    setKprScheme(preset.scheme);
+    setKprTenorYears(preset.tenorYears);
+    setKprDownPayment(Math.round((kprPropertyPrice || 0) * (preset.dpPercent / 100)));
+    setKprAnnualRate(preset.annualRate);
+    setKprFixedRate(preset.fixedRate);
+    setKprFixedYears(Math.min(preset.tenorYears, preset.fixedYears));
+    setKprFloatingRate(preset.floatingRate);
+  };
 
   // Debt Payment Capacity optional income simulation override
   const [customMonthlyIncome, setCustomMonthlyIncome] = useState<number | null>(null);
@@ -246,22 +246,6 @@ export const DebtTab: React.FC<DebtTabProps> = ({
     .filter(a => a.type !== 'credit-card' && a.type !== 'paylater')
     .sort((a, b) => (a.type === 'bank' ? -1 : 1) - (b.type === 'bank' ? -1 : 1));
 
-  // Pre-select first available liquid account when selecting a debt
-  React.useEffect(() => {
-    if (payDebtId) {
-      const firstLiquid = liquidAccounts.find(a => a.currentBalance > 0) || liquidAccounts[0];
-      if (firstLiquid) {
-        setSourceAccountId(firstLiquid.id);
-      }
-      const matched = allDebts.find(d => d.id === payDebtId);
-      if (matched && !payAmount && matched.minPayment > 0) {
-        setPayAmount(String(Math.round(Math.min(matched.minPayment, matched.balance))));
-      }
-    } else {
-      setSourceAccountId('');
-    }
-  }, [payDebtId]);
-
   // Calculate order of payment based on selected strategy (only for debts with balance > 0)
   const getOrderedDebts = () => {
     const list = allDebts.filter(d => d.balance > 0);
@@ -289,202 +273,24 @@ export const DebtTab: React.FC<DebtTabProps> = ({
     const tenorYears = Math.max(1, Math.min(35, kprTenorYears || 1));
     const tenorMonths = tenorYears * 12;
 
-    if (principal <= 0) {
-      return {
-        principal: 0,
-        dpPercent,
-        tenorYears,
-        tenorMonths,
-        firstMonthPayment: 0,
-        floatingMonthPayment: 0,
-        firstMonthPrincipal: 0,
-        firstMonthInterest: 0,
-        totalInterest: 0,
-        totalPayment: 0,
-        effectiveApr: 0,
-        yearlySchedule: [] as Array<{
-          year: number;
-          yearLabel: string;
-          phase: string;
-          avgMonthlyPayment: number;
-          avgMonthlyPrincipal: number;
-          avgMonthlyInterest: number;
-          principalPaidYear: number;
-          interestPaidYear: number;
-          endingBalance: number;
-        }>,
-        firstYearMonthlySchedule: [] as Array<{
-          month: number;
-          monthLabel: string;
-          phase: string;
-          principal: number;
-          interest: number;
-          totalPayment: number;
-          endingBalance: number;
-        }>,
-      };
-    }
+    const computed = computeKprSchedule({
+      principal,
+      tenorMonths,
+      scheme: kprScheme,
+      annualRate: kprAnnualRate,
+      fixedRate: kprFixedRate,
+      fixedYears: kprFixedYears,
+      floatingRate: kprFloatingRate,
+      isEstimate: false,
+    });
 
-    const yearlySchedule: Array<{
-      year: number;
-      yearLabel: string;
-      phase: string;
-      avgMonthlyPayment: number;
-      avgMonthlyPrincipal: number;
-      avgMonthlyInterest: number;
-      principalPaidYear: number;
-      interestPaidYear: number;
-      endingBalance: number;
-    }> = [];
-
-    const firstYearMonthlySchedule: Array<{
-      month: number;
-      monthLabel: string;
-      phase: string;
-      principal: number;
-      interest: number;
-      totalPayment: number;
-      endingBalance: number;
-    }> = [];
-
-    let remaining = principal;
-    let totalInterest = 0;
-    let firstMonthPayment = 0;
-    let floatingMonthPayment = 0;
-    let firstMonthPrincipal = 0;
-    let firstMonthInterest = 0;
-
-    const fixedMonths = kprScheme === 'tiered'
-      ? Math.min(tenorMonths, Math.max(1, Math.round((kprFixedYears || 1) * 12)))
-      : 0;
-
-    let currentMonthlyPay =
-      kprScheme === 'annuity'
-        ? calcAnnuityPayment(principal, Math.max(0, kprAnnualRate), tenorMonths)
-        : kprScheme === 'tiered'
-        ? calcAnnuityPayment(principal, Math.max(0, kprFixedRate), tenorMonths)
-        : (principal / tenorMonths) + (principal * (Math.max(0, kprAnnualRate) / 100 / 12));
-
-    for (let year = 1; year <= tenorYears; year++) {
-      let yearPrincipal = 0;
-      let yearInterest = 0;
-      let yearTotalPay = 0;
-      let monthsInYear = 0;
-      let yearPhase = kprScheme === 'flat' ? 'Flat' : 'Anuitas';
-
-      for (let m = 1; m <= 12; m++) {
-        const monthIndex = (year - 1) * 12 + m;
-        if (monthIndex > tenorMonths || remaining <= 0.01) break;
-
-        if (kprScheme === 'tiered' && monthIndex === fixedMonths + 1) {
-          const remainingMonths = Math.max(1, tenorMonths - fixedMonths);
-          currentMonthlyPay = calcAnnuityPayment(remaining, Math.max(0, kprFloatingRate), remainingMonths);
-          floatingMonthPayment = currentMonthlyPay;
-        }
-
-        const activeRate =
-          kprScheme === 'tiered'
-            ? (monthIndex <= fixedMonths ? Math.max(0, kprFixedRate) : Math.max(0, kprFloatingRate))
-            : Math.max(0, kprAnnualRate);
-
-        if (kprScheme === 'tiered') {
-          yearPhase = monthIndex <= fixedMonths ? `Fixed ${kprFixedRate}%` : `Floating ${kprFloatingRate}%`;
-        }
-
-        let interestForMonth = 0;
-        let principalForMonth = 0;
-        let payForMonth = 0;
-
-        if (kprScheme === 'flat') {
-          principalForMonth = Math.min(remaining, principal / tenorMonths);
-          interestForMonth = principal * (activeRate / 100 / 12);
-          payForMonth = principalForMonth + interestForMonth;
-        } else {
-          const monthlyRate = activeRate / 100 / 12;
-          interestForMonth = remaining * monthlyRate;
-          if (monthIndex === tenorMonths) {
-            principalForMonth = remaining;
-            payForMonth = principalForMonth + interestForMonth;
-          } else {
-            principalForMonth = Math.min(remaining, Math.max(0, currentMonthlyPay - interestForMonth));
-            payForMonth = principalForMonth + interestForMonth;
-          }
-        }
-
-        if (monthIndex === 1) {
-          firstMonthPayment = payForMonth;
-          firstMonthPrincipal = principalForMonth;
-          firstMonthInterest = interestForMonth;
-          if (kprScheme !== 'tiered' || fixedMonths >= tenorMonths) {
-            floatingMonthPayment = payForMonth;
-          }
-        }
-
-        remaining = Math.max(0, remaining - principalForMonth);
-        totalInterest += interestForMonth;
-        yearPrincipal += principalForMonth;
-        yearInterest += interestForMonth;
-        yearTotalPay += payForMonth;
-        monthsInYear++;
-
-        if (year === 1 && m <= 12) {
-          firstYearMonthlySchedule.push({
-            month: m,
-            monthLabel: `Bln ${m}`,
-            phase: yearPhase,
-            principal: Math.round(principalForMonth),
-            interest: Math.round(interestForMonth),
-            totalPayment: Math.round(payForMonth),
-            endingBalance: Math.round(remaining),
-          });
-        }
-      }
-
-      if (monthsInYear > 0) {
-        yearlySchedule.push({
-          year,
-          yearLabel: `Thn ${year}`,
-          phase: yearPhase,
-          avgMonthlyPayment: Math.round(yearTotalPay / monthsInYear),
-          avgMonthlyPrincipal: Math.round(yearPrincipal / monthsInYear),
-          avgMonthlyInterest: Math.round(yearInterest / monthsInYear),
-          principalPaidYear: yearPrincipal,
-          interestPaidYear: yearInterest,
-          endingBalance: Math.round(remaining),
-        });
-      }
-    }
-
-    if (kprScheme === 'tiered' && fixedMonths < tenorMonths && floatingMonthPayment === 0) {
-      floatingMonthPayment = firstMonthPayment;
-    }
-
-    // Weighted effective annual rate so What-If & Avalanche stay mathematically aligned
-    let effectiveApr = Math.max(0, kprAnnualRate);
-    if (kprScheme === 'tiered') {
-      const floatMonths = Math.max(0, tenorMonths - fixedMonths);
-      effectiveApr =
-        ((Math.max(0, kprFixedRate) * fixedMonths) + (Math.max(0, kprFloatingRate) * floatMonths)) /
-        tenorMonths;
-    } else if (kprScheme === 'flat') {
-      // Approximate effective APR from flat rate (~1.85x) for accurate payoff/avalanche comparison
-      effectiveApr = Math.max(0, kprAnnualRate) * 1.85;
-    }
+    const closingCosts = calculateKprClosingCosts(propertyPrice, principal, activeKprPreset);
 
     return {
-      principal,
+      ...computed,
       dpPercent,
-      tenorYears,
-      tenorMonths,
-      firstMonthPayment,
-      floatingMonthPayment,
-      firstMonthPrincipal,
-      firstMonthInterest,
-      totalInterest,
-      totalPayment: principal + totalInterest,
-      effectiveApr,
-      yearlySchedule,
-      firstYearMonthlySchedule,
+      closingCosts,
+      totalInitialCashNeeded: downPayment + closingCosts.totalClosingCosts,
     };
   }, [
     kprPropertyPrice,
@@ -495,7 +301,19 @@ export const DebtTab: React.FC<DebtTabProps> = ({
     kprFixedRate,
     kprFixedYears,
     kprFloatingRate,
+    activeKprPreset,
   ]);
+
+  // --- ACTIVE SAVED KPR DEBTS FOR AMORTIZATION VISUALIZATION ---
+  const activeKprDebts = useMemo(
+    () =>
+      debts.filter(
+        (d) =>
+          d.balance > 0 &&
+          (d.category === 'KPR / Properti' || Boolean(d.kprScheme) || /\bkpr\b/i.test(d.name))
+      ),
+    [debts]
+  );
 
   // --- KAPASITAS PEMBAYARAN UTANG (DEBT-TO-INCOME RATIO) MEMO ---
   const debtCapacitySummary = useMemo(() => {
@@ -729,6 +547,7 @@ export const DebtTab: React.FC<DebtTabProps> = ({
       return;
     }
 
+    const todayDateStr = new Date().toISOString().split('T')[0];
     const debtPayload: Omit<Debt, 'id'> = {
       name: name.trim(),
       balance: b,
@@ -737,6 +556,7 @@ export const DebtTab: React.FC<DebtTabProps> = ({
       purpose,
       category,
       dueDay: d && d >= 1 && d <= 31 ? d : undefined,
+      startDate: todayDateStr,
     };
 
     if (linkBankEnabled) {
@@ -779,6 +599,7 @@ export const DebtTab: React.FC<DebtTabProps> = ({
     const effectiveApr = Number(kprCalculation.effectiveApr.toFixed(2));
     const safeDueDay = Math.min(31, Math.max(1, Math.round(kprDueDay || 10)));
     const principalAmt = Math.round(kprCalculation.principal);
+    const todayDateStr = new Date().toISOString().split('T')[0];
 
     const kprPayload: Omit<Debt, 'id'> = {
       name: cleanName,
@@ -788,16 +609,24 @@ export const DebtTab: React.FC<DebtTabProps> = ({
       purpose: kprPurpose,
       category: 'KPR / Properti',
       dueDay: safeDueDay,
+      startDate: todayDateStr,
       kprScheme,
+      kprPresetId: activeKprPreset.id,
       propertyPrice: Math.round(kprPropertyPrice),
       downPayment: Math.round(kprDownPayment),
       tenorMonths: kprCalculation.tenorMonths,
       fixedRate: kprScheme === 'tiered' ? kprFixedRate : kprAnnualRate,
       fixedYears: kprScheme === 'tiered' ? kprFixedYears : undefined,
       floatingRate: kprScheme === 'tiered' ? kprFloatingRate : undefined,
+      kprFeesSummary: kprCalculation.closingCosts,
+      kprCoaSnapshot: effectiveKprCoa,
     };
 
-    const commitKpr = (bankLink?: { accountId: string; transactionType: 'income' | 'expense' }) => {
+    const commitKpr = (bankLink?: {
+      accountId: string;
+      transactionType: 'income' | 'expense';
+      postKprInitialCostsToJournal?: boolean;
+    }) => {
       onAddDebt(kprPayload, bankLink);
       const linkedAcc = bankLink ? liquidAccounts.find((a) => a.id === bankLink.accountId) : null;
       const bankSyncMsg = linkedAcc
@@ -805,12 +634,17 @@ export const DebtTab: React.FC<DebtTabProps> = ({
           ? ` Pengeluaran pencairan KPR sebesar ${formatterIDR.format(principalAmt)} otomatis dicatat ke ${linkedAcc.name}.`
           : ` Pencairan dana KPR sebesar ${formatterIDR.format(principalAmt)} otomatis masuk ke ${linkedAcc.name}.`
         : '';
+      const feesJournalMsg =
+        bankLink?.postKprInitialCostsToJournal && linkedAcc
+          ? ` Jurnal COA biaya akad (${formatterIDR.format(kprCalculation.closingCosts.totalClosingCosts)}) & DP ikut dicatat ke ${linkedAcc.name}.`
+          : '';
 
       showAlert(
         'KPR Ditambahkan & Tersinkronisasi',
-        `"${cleanName}" dengan pokok ${formatterIDR.format(principalAmt)} dan cicilan ${formatterIDR.format(monthlyInstallment)}/bln berhasil masuk ke daftar hutang aktif serta tersinkronisasi dengan Simulator What-If, Snowball/Avalanche, dan Analisis AI.${bankSyncMsg}`
+        `"${cleanName}" dengan pokok ${formatterIDR.format(principalAmt)} dan cicilan ${formatterIDR.format(monthlyInstallment)}/bln berhasil masuk ke daftar hutang aktif serta tersinkronisasi dengan Simulator What-If, Snowball/Avalanche, dan Analisis AI.${bankSyncMsg}${feesJournalMsg}`
       );
       setKprLinkBankEnabled(false);
+      setKprPostInitialFees(false);
       setKprDisburseAccountId('');
     };
 
@@ -824,69 +658,31 @@ export const DebtTab: React.FC<DebtTabProps> = ({
         showAlert('Akun Tidak Ditemukan', 'Akun bank/kas yang dipilih tidak tersedia.');
         return;
       }
-      if (kprBankTxType === 'expense' && targetAcc.currentBalance < principalAmt) {
+      const totalDebitEstimate =
+        (kprBankTxType === 'expense' ? principalAmt : 0) +
+        (kprPostInitialFees ? kprCalculation.totalInitialCashNeeded : 0);
+      if (totalDebitEstimate > 0 && targetAcc.currentBalance < totalDebitEstimate) {
         showConfirm(
-          'Saldo Kas Lebih Kecil dari Plafon KPR',
-          `Saldo ${targetAcc.name} (${formatterIDR.format(targetAcc.currentBalance)}) lebih kecil dari nominal pencairan KPR (${formatterIDR.format(principalAmt)}). Tetap hubungkan dan sinkronkan?`,
-          () => commitKpr({ accountId: targetAcc.id, transactionType: kprBankTxType })
+          'Saldo Kas Lebih Kecil dari Total Pencatatan',
+          `Saldo ${targetAcc.name} (${formatterIDR.format(targetAcc.currentBalance)}) lebih kecil dari total nominal pencatatan otomatis (${formatterIDR.format(totalDebitEstimate)}). Tetap hubungkan dan sinkronkan?`,
+          () =>
+            commitKpr({
+              accountId: targetAcc.id,
+              transactionType: kprBankTxType,
+              postKprInitialCostsToJournal: kprPostInitialFees,
+            })
         );
         return;
       }
-      commitKpr({ accountId: targetAcc.id, transactionType: kprBankTxType });
+      commitKpr({
+        accountId: targetAcc.id,
+        transactionType: kprBankTxType,
+        postKprInitialCostsToJournal: kprPostInitialFees,
+      });
       return;
     }
 
     commitKpr();
-  };
-
-  const handlePaySubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    const amt = parseFloat(payAmount);
-    if (!payDebtId || isNaN(amt) || amt <= 0 || !sourceAccountId) {
-      showAlert('Formulir Tidak Valid', 'Mohon pilih target hutang, rekening sumber, dan nominal pembayaran yang valid.');
-      return;
-    }
-
-    // Verify source account balance
-    const sourceAcc = accounts.find(a => a.id === sourceAccountId);
-    if (!sourceAcc) {
-      showAlert('Formulir Tidak Valid', 'Rekening sumber tidak valid.');
-      return;
-    }
-    if (sourceAcc.currentBalance < amt) {
-      showAlert('Saldo Kurang', `Saldo ${sourceAcc.name} (${formatterIDR.format(sourceAcc.currentBalance)}) tidak mencukupi untuk pembayaran sebesar ${formatterIDR.format(amt)}.`);
-      return;
-    }
-
-    // Find the combined debt object
-    const targetDebt = allDebts.find(d => d.id === payDebtId);
-    if (!targetDebt) {
-      showAlert('Formulir Tidak Valid', 'Hutang tidak ditemukan.');
-      return;
-    }
-
-    if (targetDebt.balance < amt) {
-      showAlert('Jumlah Melebihi', `Jumlah bayar melebihi saldo hutang saat ini (${formatterIDR.format(targetDebt.balance)}).`);
-      return;
-    }
-
-    // Perform payment
-    if (targetDebt.isAccount) {
-      if (onTransferFunds) {
-        onTransferFunds(amt, sourceAccountId, payDebtId, `Pelunasan Tagihan: ${targetDebt.name}`);
-        setPayAmount('');
-        setPayDebtId('');
-        showAlert('Pembayaran Berhasil', 'Pembayaran tagihan kartu kredit/paylater berhasil dicatat! Sisa limit dan rekening kas Anda telah diperbarui.');
-      } else {
-        showAlert('Error', 'Fungsi mutasi dana tidak tersedia.');
-      }
-    } else {
-      const paid = onPayDebt(payDebtId, amt, sourceAccountId);
-      if (paid === false) return;
-      setPayAmount('');
-      setPayDebtId('');
-      showAlert('Pembayaran Berhasil', 'Pembayaran cicilan hutang berhasil dicatat! Saldo hutang, Jurnal Transaksi, dan rekening kas Anda telah diperbarui.');
-    }
   };
 
   const handleDeleteTop = () => {
@@ -907,17 +703,7 @@ export const DebtTab: React.FC<DebtTabProps> = ({
     }
   };
 
-  const selectedPayDebtObj = allDebts.find(d => d.id === payDebtId);
   const topPriorityDebt = orderedDebts[0];
-
-  const kprCompositionDonutData = useMemo(() => {
-    const p = Math.round(kprCalculation.firstMonthPrincipal);
-    const i = Math.round(kprCalculation.firstMonthInterest);
-    return [
-      { name: 'Porsi Pokok', value: p, color: '#10b981' },
-      { name: 'Porsi Bunga', value: i, color: '#f43f5e' },
-    ];
-  }, [kprCalculation.firstMonthPrincipal, kprCalculation.firstMonthInterest]);
 
   return (
     <div className="space-y-8">
@@ -1288,6 +1074,39 @@ export const DebtTab: React.FC<DebtTabProps> = ({
         </div>
 
         <div className="p-6 space-y-6">
+          {/* PRESET MASTER DATA KPR SELECTOR BAR */}
+          {kprPresets.length > 0 && (
+            <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-2">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <span className="text-[11px] font-extrabold uppercase tracking-wider text-slate-600">
+                  Pilih Preset Skema & Biaya dari Master Data KPR
+                </span>
+                <span className="text-[11px] text-slate-500 font-medium">
+                  Klik preset untuk mengisi otomatis tenor, bunga, DP, dan estimasi biaya akad
+                </span>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {kprPresets.map((preset) => {
+                  const isSelected = activeKprPreset.id === preset.id;
+                  return (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      onClick={() => applyKprPreset(preset)}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition cursor-pointer ${
+                        isSelected
+                          ? 'bg-blue-600 text-white border-blue-600 shadow-xs'
+                          : 'bg-white text-slate-700 border-slate-200 hover:border-blue-300 hover:text-blue-700'
+                      }`}
+                    >
+                      {preset.name}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
             {/* KPR INPUTS (LEFT 7 COLS) */}
             <div className="lg:col-span-7 space-y-4">
@@ -1548,53 +1367,68 @@ export const DebtTab: React.FC<DebtTabProps> = ({
                 </div>
 
                 {kprLinkBankEnabled && (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-slate-200">
-                    <div className="space-y-1">
-                      <label className="text-[10px] font-bold text-slate-600 uppercase tracking-wider block">
-                        Pilih Akun Bank / Kas
-                      </label>
-                      <select
-                        value={kprDisburseAccountId}
-                        onChange={(e) => setKprDisburseAccountId(e.target.value)}
-                        className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs font-bold text-slate-800 cursor-pointer"
-                      >
-                        <option value="">-- Pilih Akun Bank --</option>
-                        {liquidAccounts.map((acc) => (
-                          <option key={acc.id} value={acc.id}>
-                            {acc.type === 'bank' ? '[Bank] ' : ''}{acc.name} ({formatterIDR.format(acc.currentBalance)})
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-[10px] font-bold text-slate-600 uppercase tracking-wider block">
-                        Jenis Transaksi Otomatis
-                      </label>
-                      <div className="grid grid-cols-2 gap-1.5">
-                        <button
-                          type="button"
-                          onClick={() => setKprBankTxType('expense')}
-                          className={`py-2 px-2 rounded-xl text-[10px] font-extrabold border transition cursor-pointer ${
-                            kprBankTxType === 'expense'
-                              ? 'bg-rose-600 text-white border-rose-600'
-                              : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'
-                          }`}
+                  <div className="space-y-3 pt-2 border-t border-slate-200">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-bold text-slate-600 uppercase tracking-wider block">
+                          Pilih Akun Bank / Kas
+                        </label>
+                        <select
+                          value={kprDisburseAccountId}
+                          onChange={(e) => setKprDisburseAccountId(e.target.value)}
+                          className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs font-bold text-slate-800 cursor-pointer"
                         >
-                          Pengeluaran (- Kas)
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setKprBankTxType('income')}
-                          className={`py-2 px-2 rounded-xl text-[10px] font-extrabold border transition cursor-pointer ${
-                            kprBankTxType === 'income'
-                              ? 'bg-emerald-600 text-white border-emerald-600'
-                              : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'
-                          }`}
-                        >
-                          Pencairan (+ Kas)
-                        </button>
+                          <option value="">-- Pilih Akun Bank --</option>
+                          {liquidAccounts.map((acc) => (
+                            <option key={acc.id} value={acc.id}>
+                              {acc.type === 'bank' ? '[Bank] ' : ''}{acc.name} ({formatterIDR.format(acc.currentBalance)})
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-bold text-slate-600 uppercase tracking-wider block">
+                          Jenis Transaksi Otomatis
+                        </label>
+                        <div className="grid grid-cols-2 gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => setKprBankTxType('expense')}
+                            className={`py-2 px-2 rounded-xl text-[10px] font-extrabold border transition cursor-pointer ${
+                              kprBankTxType === 'expense'
+                                ? 'bg-rose-600 text-white border-rose-600'
+                                : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'
+                            }`}
+                          >
+                            Pengeluaran (- Kas)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setKprBankTxType('income')}
+                            className={`py-2 px-2 rounded-xl text-[10px] font-extrabold border transition cursor-pointer ${
+                              kprBankTxType === 'income'
+                                ? 'bg-emerald-600 text-white border-emerald-600'
+                                : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'
+                            }`}
+                          >
+                            Pencairan (+ Kas)
+                          </button>
+                        </div>
                       </div>
                     </div>
+
+                    <label className="flex items-start gap-2.5 p-2.5 rounded-lg bg-white border border-slate-200 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={kprPostInitialFees}
+                        onChange={(e) => setKprPostInitialFees(e.target.checked)}
+                        className="mt-0.5 rounded text-blue-600 focus:ring-blue-500 h-3.5 w-3.5 cursor-pointer"
+                      />
+                      <span className="text-[11px] text-slate-700 leading-snug">
+                        <strong className="text-slate-900">Catat Sekaligus Jurnal Biaya Akad &amp; DP ke COA:</strong>{' '}
+                        Otomatis memposting Uang Muka (COA {effectiveKprCoa.propertyAssetCode}), Provisi/Admin/Appraisal/Notaris (COA {effectiveKprCoa.provisiAdminLegalCode}), dan BPHTB/Asuransi (COA {effectiveKprCoa.taxInsuranceCode}).
+                      </span>
+                    </label>
                   </div>
                 )}
               </div>
@@ -1657,6 +1491,49 @@ export const DebtTab: React.FC<DebtTabProps> = ({
                   </div>
                 </div>
 
+                {/* Estimasi Biaya Akad & Total Persiapan Awal */}
+                <div className="bg-slate-800/70 border border-slate-700/70 rounded-xl p-3.5 space-y-1.5 text-[11px]">
+                  <div className="flex items-center justify-between text-[10px] font-extrabold uppercase tracking-wider text-slate-300 border-b border-slate-700/60 pb-1.5">
+                    <span>Estimasi Biaya Akad ({activeKprPreset.name})</span>
+                    <span className="font-mono text-amber-300">
+                      {formatterIDR.format(kprCalculation.closingCosts.totalClosingCosts)}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-slate-300">
+                    <div className="flex justify-between">
+                      <span>Provisi ({activeKprPreset.provisiPct}%):</span>
+                      <span className="font-mono tabular-nums">{formatCompactIDR(kprCalculation.closingCosts.provisiFee)}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span>Admin &amp; Appraisal:</span>
+                      <span className="font-mono tabular-nums">
+                        {formatCompactIDR(kprCalculation.closingCosts.adminFee + kprCalculation.closingCosts.appraisalFee)}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span>Notaris/AJB ({activeKprPreset.notaryAjbPct}%):</span>
+                      <span className="font-mono tabular-nums">{formatCompactIDR(kprCalculation.closingCosts.notaryAjbFee)}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span>BPHTB ({activeKprPreset.bphtbPct}%):</span>
+                      <span className="font-mono tabular-nums">{formatCompactIDR(kprCalculation.closingCosts.bphtbTax)}</span>
+                    </div>
+                    <div className="flex justify-between col-span-2">
+                      <span>Asuransi Jiwa &amp; Properti ({activeKprPreset.insurancePct}%):</span>
+                      <span className="font-mono tabular-nums">{formatCompactIDR(kprCalculation.closingCosts.insuranceFee)}</span>
+                    </div>
+                  </div>
+                  <div className="flex justify-between pt-1.5 border-t border-slate-700/60 font-bold text-white">
+                    <span>Total Dana Awal (DP + Biaya Akad):</span>
+                    <span className="font-mono tabular-nums text-emerald-300">
+                      {formatterIDR.format(kprCalculation.totalInitialCashNeeded)}
+                    </span>
+                  </div>
+                  <div className="pt-1.5 border-t border-slate-700/60 text-[10px] font-mono tabular-nums text-slate-400">
+                    Pemetaan COA: Aset {effectiveKprCoa.propertyAssetCode} · Utang {effectiveKprCoa.principalLiabilityCode} · Bunga {effectiveKprCoa.interestExpenseCode} · Legal {effectiveKprCoa.provisiAdminLegalCode} · Pajak {effectiveKprCoa.taxInsuranceCode}
+                  </div>
+                </div>
+
                 {/* Live Sync Impact Box */}
                 <div className="bg-blue-950/60 border border-blue-800/60 rounded-xl p-3.5 space-y-2">
                   <div className="flex items-center gap-1.5 text-[10px] font-extrabold uppercase tracking-wider text-blue-300">
@@ -1705,423 +1582,40 @@ export const DebtTab: React.FC<DebtTabProps> = ({
             </div>
           </div>
 
-          {/* KPR DATA VISUALIZATION: MONTHLY PRINCIPAL VS INTEREST CHARTS */}
-          {kprCalculation.principal > 0 && kprCalculation.yearlySchedule.length > 0 && (
-            <div className="rounded-2xl border border-slate-200 bg-slate-50/70 p-5 space-y-5">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div className="flex items-center gap-2.5">
-                  <div className="p-2 rounded-xl bg-blue-100 text-blue-700 shrink-0">
-                    <BarChart3 className="h-4 w-4" />
-                  </div>
-                  <div>
-                    <h4 className="text-xs sm:text-sm font-black text-slate-800 uppercase tracking-wider">
-                      Visualisasi Data KPR: Porsi Pokok &amp; Bunga Cicilan Bulanan
-                    </h4>
-                    <p className="text-[11px] text-slate-500">
-                      Perbandingan porsi pembayaran pokok vs bunga per bulan sepanjang tenor {kprCalculation.tenorYears} tahun ({kprCalculation.tenorMonths} bulan).
-                    </p>
-                  </div>
-                </div>
-
-                <div className="inline-flex flex-wrap bg-slate-200/80 p-1 rounded-xl shrink-0 gap-1">
-                  <button
-                    type="button"
-                    onClick={() => setKprChartView('yearly-split')}
-                    className={`px-3 py-1.5 rounded-lg text-[11px] font-extrabold transition cursor-pointer whitespace-nowrap shrink-0 ${
-                      kprChartView === 'yearly-split'
-                        ? 'bg-white text-blue-700 shadow-xs'
-                        : 'text-slate-600 hover:text-slate-900'
-                    }`}
-                  >
-                    Tahunan (Tenor)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setKprChartView('first-year-monthly')}
-                    className={`px-3 py-1.5 rounded-lg text-[11px] font-extrabold transition cursor-pointer whitespace-nowrap shrink-0 ${
-                      kprChartView === 'first-year-monthly'
-                        ? 'bg-white text-blue-700 shadow-xs'
-                        : 'text-slate-600 hover:text-slate-900'
-                    }`}
-                  >
-                    Rincian 12 Bulan Pertama
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setKprChartView('balance-trend')}
-                    className={`px-3 py-1.5 rounded-lg text-[11px] font-extrabold transition cursor-pointer whitespace-nowrap shrink-0 ${
-                      kprChartView === 'balance-trend'
-                        ? 'bg-white text-blue-700 shadow-xs'
-                        : 'text-slate-600 hover:text-slate-900'
-                    }`}
-                  >
-                    Tren Sisa Pokok
-                  </button>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
-                {/* Main Bar / Area Chart (8 cols) */}
-                <div className="lg:col-span-8 bg-white rounded-xl border border-slate-200 p-4 space-y-2">
-                  <div className="flex items-center justify-between text-[11px] font-bold text-slate-600 gap-2">
-                    <span>
-                      {kprChartView === 'yearly-split'
-                        ? 'Grafik Cicilan Bulanan: Rata-rata Porsi Pokok vs Bunga per Tahun'
-                        : kprChartView === 'first-year-monthly'
-                        ? 'Grafik Cicilan Bulanan: Rincian 12 Bulan Pertama (Pokok vs Bunga)'
-                        : 'Proyeksi Penurunan Sisa Pokok Pinjaman KPR'}
-                    </span>
-                    <span className="text-[10px] text-slate-400 whitespace-nowrap shrink-0">
-                      Skema: {kprScheme === 'tiered' ? 'Fixed → Floating' : kprScheme === 'flat' ? 'Bunga Flat' : 'Anuitas'}
-                    </span>
-                  </div>
-
-                  <div className="h-64 w-full">
-                    <ResponsiveContainer width="100%" height="100%">
-                      {kprChartView === 'yearly-split' ? (
-                        <BarChart
-                          data={kprCalculation.yearlySchedule}
-                          margin={{ top: 10, right: 12, left: 4, bottom: 0 }}
-                        >
-                          <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
-                          <XAxis
-                            dataKey="yearLabel"
-                            tick={{ fontSize: 10, fill: '#64748b', fontWeight: 600 }}
-                            axisLine={{ stroke: '#cbd5e1' }}
-                            tickLine={false}
-                          />
-                          <YAxis
-                            tickFormatter={(v) => formatCompactIDR(Number(v))}
-                            tick={{ fontSize: 10, fill: '#64748b', fontWeight: 600 }}
-                            axisLine={false}
-                            tickLine={false}
-                            width={66}
-                          />
-                          <Tooltip
-                            formatter={(value: number | string, name: string) => [
-                              formatterIDR.format(Number(value)),
-                              name,
-                            ]}
-                            labelFormatter={(label, payload) => {
-                              const row = payload?.[0]?.payload;
-                              return row
-                                ? `${label} (${row.phase}) — Total Cicilan: ${formatterIDR.format(row.avgMonthlyPayment)}/bln`
-                                : String(label);
-                            }}
-                            contentStyle={{
-                              borderRadius: '12px',
-                              border: '1px solid #e2e8f0',
-                              fontSize: '11px',
-                              fontWeight: 700,
-                              boxShadow: '0 10px 25px -5px rgba(15, 23, 42, 0.1)',
-                            }}
-                          />
-                          <Legend
-                            wrapperStyle={{ fontSize: '11px', fontWeight: 700, paddingTop: '6px' }}
-                          />
-                          <Bar
-                            dataKey="avgMonthlyPrincipal"
-                            name="Porsi Pokok / Bln"
-                            stackId="cicilan"
-                            fill="#10b981"
-                            radius={[0, 0, 0, 0]}
-                          />
-                          <Bar
-                            dataKey="avgMonthlyInterest"
-                            name="Porsi Bunga / Bln"
-                            stackId="cicilan"
-                            fill="#f43f5e"
-                            radius={[4, 4, 0, 0]}
-                          />
-                        </BarChart>
-                      ) : kprChartView === 'first-year-monthly' ? (
-                        <BarChart
-                          data={kprCalculation.firstYearMonthlySchedule}
-                          margin={{ top: 10, right: 12, left: 4, bottom: 0 }}
-                        >
-                          <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
-                          <XAxis
-                            dataKey="monthLabel"
-                            tick={{ fontSize: 10, fill: '#64748b', fontWeight: 600 }}
-                            axisLine={{ stroke: '#cbd5e1' }}
-                            tickLine={false}
-                          />
-                          <YAxis
-                            tickFormatter={(v) => formatCompactIDR(Number(v))}
-                            tick={{ fontSize: 10, fill: '#64748b', fontWeight: 600 }}
-                            axisLine={false}
-                            tickLine={false}
-                            width={66}
-                          />
-                          <Tooltip
-                            formatter={(value: number | string, name: string) => [
-                              formatterIDR.format(Number(value)),
-                              name,
-                            ]}
-                            labelFormatter={(label, payload) => {
-                              const row = payload?.[0]?.payload;
-                              return row
-                                ? `${label} (${row.phase}) — Total: ${formatterIDR.format(row.totalPayment)} · Sisa Pokok: ${formatterIDR.format(row.endingBalance)}`
-                                : String(label);
-                            }}
-                            contentStyle={{
-                              borderRadius: '12px',
-                              border: '1px solid #e2e8f0',
-                              fontSize: '11px',
-                              fontWeight: 700,
-                              boxShadow: '0 10px 25px -5px rgba(15, 23, 42, 0.1)',
-                            }}
-                          />
-                          <Legend
-                            wrapperStyle={{ fontSize: '11px', fontWeight: 700, paddingTop: '6px' }}
-                          />
-                          <Bar
-                            dataKey="principal"
-                            name="Porsi Pokok"
-                            stackId="cicilan-bln"
-                            fill="#10b981"
-                            radius={[0, 0, 0, 0]}
-                          />
-                          <Bar
-                            dataKey="interest"
-                            name="Porsi Bunga"
-                            stackId="cicilan-bln"
-                            fill="#f43f5e"
-                            radius={[4, 4, 0, 0]}
-                          />
-                        </BarChart>
-                      ) : (
-                        <AreaChart
-                          data={kprCalculation.yearlySchedule}
-                          margin={{ top: 10, right: 12, left: 4, bottom: 0 }}
-                        >
-                          <defs>
-                            <linearGradient id="kprBalanceGradient" x1="0" y1="0" x2="0" y2="1">
-                              <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.35} />
-                              <stop offset="95%" stopColor="#3b82f6" stopOpacity={0.02} />
-                            </linearGradient>
-                          </defs>
-                          <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
-                          <XAxis
-                            dataKey="yearLabel"
-                            tick={{ fontSize: 10, fill: '#64748b', fontWeight: 600 }}
-                            axisLine={{ stroke: '#cbd5e1' }}
-                            tickLine={false}
-                          />
-                          <YAxis
-                            tickFormatter={(v) => formatCompactIDR(Number(v))}
-                            tick={{ fontSize: 10, fill: '#64748b', fontWeight: 600 }}
-                            axisLine={false}
-                            tickLine={false}
-                            width={68}
-                          />
-                          <Tooltip
-                            formatter={(value: number | string) => [
-                              formatterIDR.format(Number(value)),
-                              'Sisa Pokok KPR',
-                            ]}
-                            contentStyle={{
-                              borderRadius: '12px',
-                              border: '1px solid #e2e8f0',
-                              fontSize: '11px',
-                              fontWeight: 700,
-                            }}
-                          />
-                          <Area
-                            type="monotone"
-                            dataKey="endingBalance"
-                            name="Sisa Pokok KPR"
-                            stroke="#2563eb"
-                            strokeWidth={2.5}
-                            fillOpacity={1}
-                            fill="url(#kprBalanceGradient)"
-                          />
-                        </AreaChart>
-                      )}
-                    </ResponsiveContainer>
-                  </div>
-                </div>
-
-                {/* Donut Chart: Month 1 Installment Split & Total Cost Ratio (4 cols) */}
-                <div className="lg:col-span-4 bg-white rounded-xl border border-slate-200 p-4 flex flex-col justify-between space-y-3">
-                  <div className="flex items-center gap-2">
-                    <PieChartIcon className="h-4 w-4 text-indigo-600 shrink-0" />
-                    <span className="text-[11px] font-extrabold text-slate-800 uppercase tracking-wider">
-                      Komposisi Cicilan Bulan ke-1
-                    </span>
-                  </div>
-
-                  <div className="h-40 w-full relative">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <PieChart>
-                        <Pie
-                          data={kprCompositionDonutData}
-                          dataKey="value"
-                          nameKey="name"
-                          cx="50%"
-                          cy="50%"
-                          innerRadius={44}
-                          outerRadius={66}
-                          paddingAngle={3}
-                        >
-                          {kprCompositionDonutData.map((entry, idx) => (
-                            <Cell key={`kpr-cell-${idx}`} fill={entry.color} />
-                          ))}
-                        </Pie>
-                        <Tooltip
-                          formatter={(value: number | string, name: string) => [
-                            formatterIDR.format(Number(value)),
-                            name,
-                          ]}
-                          contentStyle={{
-                            borderRadius: '10px',
-                            border: '1px solid #e2e8f0',
-                            fontSize: '11px',
-                            fontWeight: 700,
-                          }}
-                        />
-                      </PieChart>
-                    </ResponsiveContainer>
-                    <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
-                      <span className="text-[9px] font-bold uppercase text-slate-400">Cicilan Bln 1</span>
-                      <span className="text-[11px] font-black text-slate-900 font-mono">
-                        {formatCompactIDR(kprCalculation.firstMonthPayment)}
-                      </span>
-                    </div>
-                  </div>
-
-                  <div className="space-y-2 text-[11px]">
-                    <div className="flex items-center justify-between bg-emerald-50/70 px-2.5 py-1.5 rounded-lg border border-emerald-100">
-                      <span className="flex items-center gap-1.5 font-bold text-emerald-900">
-                        <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 inline-block" />
-                        Porsi Pokok ({kprCalculation.firstMonthPayment > 0 ? ((kprCalculation.firstMonthPrincipal / kprCalculation.firstMonthPayment) * 100).toFixed(1) : '0'}%)
-                      </span>
-                      <span className="font-mono font-extrabold text-emerald-700">
-                        {formatterIDR.format(kprCalculation.firstMonthPrincipal)}
-                      </span>
-                    </div>
-
-                    <div className="flex items-center justify-between bg-rose-50/70 px-2.5 py-1.5 rounded-lg border border-rose-100">
-                      <span className="flex items-center gap-1.5 font-bold text-rose-900">
-                        <span className="w-2.5 h-2.5 rounded-full bg-rose-500 inline-block" />
-                        Porsi Bunga ({kprCalculation.firstMonthPayment > 0 ? ((kprCalculation.firstMonthInterest / kprCalculation.firstMonthPayment) * 100).toFixed(1) : '0'}%)
-                      </span>
-                      <span className="font-mono font-extrabold text-rose-700">
-                        {formatterIDR.format(kprCalculation.firstMonthInterest)}
-                      </span>
-                    </div>
-
-                    <div className="pt-1 border-t border-slate-100 flex items-center justify-between text-[10px] font-bold text-slate-500">
-                      <span>Total Akumulasi Bunga ({kprCalculation.tenorYears} thn):</span>
-                      <span className="font-mono text-rose-600">
-                        {formatterIDR.format(kprCalculation.totalInterest)}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Collapsible Yearly Amortization Schedule */}
-          {showKprAmortization && kprCalculation.yearlySchedule.length > 0 && (
-            <div className="border border-slate-200 rounded-xl overflow-hidden bg-slate-50/70">
-              <div className="px-4 py-3 bg-slate-100 border-b border-slate-200 flex items-center justify-between">
-                <h4 className="text-xs font-extrabold text-slate-700 uppercase tracking-wider">
-                  Simulasi Jadwal Amortisasi KPR per Tahun
-                </h4>
-                <span className="text-[11px] font-bold text-slate-500">
-                  Plafon {formatterIDR.format(kprCalculation.principal)} • {kprCalculation.tenorYears} Tahun
-                </span>
-              </div>
-              <div className="overflow-x-auto max-h-72 overflow-y-auto">
-                <table className="w-full text-left border-collapse text-xs">
-                  <thead className="bg-slate-100/90 sticky top-0 text-[10px] uppercase font-extrabold text-slate-500 border-b border-slate-200">
-                    <tr>
-                      <th className="px-4 py-2.5">Tahun</th>
-                      <th className="px-4 py-2.5">Fase / Bunga</th>
-                      <th className="px-4 py-2.5 text-right">Cicilan / Bln</th>
-                      <th className="px-4 py-2.5 text-right">Pokok Dibayar (1 Thn)</th>
-                      <th className="px-4 py-2.5 text-right">Bunga Dibayar (1 Thn)</th>
-                      <th className="px-4 py-2.5 text-right">Sisa Pokok KPR</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-200/70 bg-white">
-                    {kprCalculation.yearlySchedule.map((row) => (
-                      <tr key={row.year} className="hover:bg-blue-50/40 transition">
-                        <td className="px-4 py-2 font-bold text-slate-800">Thn ke-{row.year}</td>
-                        <td className="px-4 py-2">
-                          <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                            row.phase.startsWith('Floating')
-                              ? 'bg-amber-100 text-amber-800'
-                              : 'bg-blue-100 text-blue-800'
-                          }`}>
-                            {row.phase}
-                          </span>
-                        </td>
-                        <td className="px-4 py-2 text-right font-mono font-bold text-slate-800">
-                          {formatterIDR.format(row.avgMonthlyPayment)}
-                        </td>
-                        <td className="px-4 py-2 text-right font-mono text-emerald-700 font-semibold">
-                          {formatterIDR.format(row.principalPaidYear)}
-                        </td>
-                        <td className="px-4 py-2 text-right font-mono text-rose-600 font-semibold">
-                          {formatterIDR.format(row.interestPaidYear)}
-                        </td>
-                        <td className="px-4 py-2 text-right font-mono font-extrabold text-slate-900">
-                          {formatterIDR.format(row.endingBalance)}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          )}
+          <KprAmortizationChart
+            calculatorSchedule={kprCalculation}
+            calculatorName={kprName}
+            calculatorScheme={kprScheme}
+            activeKprDebts={activeKprDebts}
+            visualSource={kprVisualSource}
+            onChangeVisualSource={setKprVisualSource}
+            selectedSavedKprId={selectedSavedKprId}
+            onChangeSavedKprId={setSelectedSavedKprId}
+            showAmortizationTable={showKprAmortization}
+            onToggleAmortizationTable={() => setShowKprAmortization((prev) => !prev)}
+            formatterIDR={formatterIDR}
+            formatCompactIDR={formatCompactIDR}
+          />
         </div>
       </div>
 
       {/* SECTION 2: MANAJEMEN HUTANG & PRIORITAS PELUNASAN */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-        {/* Column 1: Interactive Add Debt & Pay Installment Panel */}
+        {/* Column 1: Add New Debt Only (Payments are centralized in Jurnal Transaksi) */}
         <div className="space-y-6 lg:col-span-1">
           <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-            {/* Switcher Tabs */}
-            <div className="grid grid-cols-2 bg-slate-100 p-1.5 border-b border-slate-200">
-              <button
-                type="button"
-                onClick={() => setDebtActionTab('add')}
-                className={`py-2 px-3 rounded-xl text-xs font-extrabold uppercase tracking-wider flex items-center justify-center gap-1.5 transition cursor-pointer ${
-                  debtActionTab === 'add'
-                    ? 'bg-blue-600 text-white shadow-sm'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                <Plus className="h-3.5 w-3.5" />
-                Tambah Hutang
-              </button>
-              <button
-                type="button"
-                onClick={() => setDebtActionTab('pay')}
-                className={`py-2 px-3 rounded-xl text-xs font-extrabold uppercase tracking-wider flex items-center justify-center gap-1.5 transition cursor-pointer ${
-                  debtActionTab === 'pay'
-                    ? 'bg-emerald-600 text-white shadow-sm'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                <Wallet className="h-3.5 w-3.5" />
-                Bayar Cicilan
-              </button>
+            <div className="px-5 py-3.5 bg-blue-600 text-white flex items-center gap-2 border-b border-blue-700/40">
+              <Plus className="h-4 w-4 shrink-0" />
+              <span className="text-xs font-extrabold uppercase tracking-wider">Tambah Hutang Baru</span>
             </div>
 
-            {debtActionTab === 'add' ? (
-              <form onSubmit={handleAddDebtSubmit} className="p-5 space-y-4">
-                <div>
-                  <h3 className="font-bold text-slate-800 text-sm">Catat Kewajiban Hutang Baru</h3>
-                  <p className="text-[11px] text-slate-500 mt-0.5">
-                    Otomatis masuk ke daftar pelunasan, Simulator What-If, dan sinkronisasi database.
-                  </p>
-                </div>
+            <form onSubmit={handleAddDebtSubmit} className="p-5 space-y-4">
+              <div>
+                <h3 className="font-bold text-slate-800 text-sm">Catat Kewajiban Hutang Baru</h3>
+                <p className="text-[11px] text-slate-500 mt-0.5">
+                  Khusus perhitungan &amp; penambahan hutang baru. Otomatis masuk ke daftar prioritas, Simulator What-If, dan Analisis AI.
+                </p>
+              </div>
 
                 <div className="space-y-1">
                   <label className="text-[11px] font-bold text-slate-600 uppercase tracking-wider block">
@@ -2357,106 +1851,29 @@ export const DebtTab: React.FC<DebtTabProps> = ({
                   Simpan &amp; Sinkronkan Hutang
                 </button>
               </form>
-            ) : (
-              <form onSubmit={handlePaySubmit} className="p-5 space-y-4">
-                <div>
-                  <h3 className="font-bold text-slate-800 text-sm">Bayar Cicilan / Pelunasan</h3>
-                  <p className="text-[11px] text-slate-500 mt-0.5">
-                    Mengurangi saldo hutang, mencatat transaksi pengeluaran, dan memotong rekening kas secara sinkron.
-                  </p>
-                </div>
-
-                <div className="space-y-1">
-                  <label className="text-[11px] font-bold text-slate-600 uppercase tracking-wider block">
-                    Pilih Hutang / KPR Target
-                  </label>
-                  <select
-                    value={payDebtId}
-                    onChange={(e) => {
-                      setPayDebtId(e.target.value);
-                      const picked = allDebts.find(d => d.id === e.target.value);
-                      if (picked && picked.minPayment > 0) {
-                        setPayAmount(String(Math.round(Math.min(picked.minPayment, picked.balance))));
-                      } else {
-                        setPayAmount('');
-                      }
-                    }}
-                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-bold text-slate-800 cursor-pointer"
-                    required
-                  >
-                    <option value="">-- Pilih Hutang Aktif --</option>
-                    {allDebts.filter(d => d.balance > 0).map((d) => (
-                      <option key={d.id} value={d.id}>
-                        {d.name} (Sisa: {formatterIDR.format(d.balance)})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="space-y-1">
-                  <label className="text-[11px] font-bold text-slate-600 uppercase tracking-wider block">
-                    Rekening Sumber Dana
-                  </label>
-                  <select
-                    value={sourceAccountId}
-                    onChange={(e) => setSourceAccountId(e.target.value)}
-                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-bold text-slate-800 cursor-pointer"
-                    required
-                  >
-                    <option value="">-- Pilih Rekening Pembayar --</option>
-                    {liquidAccounts.map((acc) => (
-                      <option key={acc.id} value={acc.id}>
-                        {acc.name} (Saldo: {formatterIDR.format(acc.currentBalance)})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="space-y-1">
-                  <div className="flex items-center justify-between">
-                    <label className="text-[11px] font-bold text-slate-600 uppercase tracking-wider">
-                      Nominal Pembayaran (Rp)
-                    </label>
-                    {selectedPayDebtObj && selectedPayDebtObj.minPayment > 0 && (
-                      <button
-                        type="button"
-                        onClick={() => setPayAmount(String(Math.round(Math.min(selectedPayDebtObj.minPayment, selectedPayDebtObj.balance))))}
-                        className="text-[10px] font-bold text-emerald-700 hover:underline cursor-pointer"
-                      >
-                        Isi Min. Cicilan ({formatterIDR.format(selectedPayDebtObj.minPayment)})
-                      </button>
-                    )}
-                  </div>
-                  <FormattedNumberInput
-                    value={payAmount}
-                    onChange={(val) => setPayAmount(String(val))}
-                    placeholder="Contoh: 1.500.000"
-                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                  />
-                </div>
-
-                <button
-                  type="submit"
-                  className="w-full py-2.5 px-4 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-extrabold uppercase tracking-wider shadow-sm transition flex items-center justify-center gap-2 cursor-pointer"
-                >
-                  <CheckCircle2 className="h-4 w-4" />
-                  Catat Pembayaran Cicilan
-                </button>
-              </form>
-            )}
           </div>
 
-          {/* Synchronization Info Card */}
-          <div className="bg-slate-900 text-white p-5 rounded-2xl border border-slate-800 shadow-sm space-y-2.5">
+          {/* Centralized Payment & Synchronization Info Card */}
+          <div className="bg-slate-900 text-white p-5 rounded-2xl border border-slate-800 shadow-sm space-y-3">
             <div className="flex items-center gap-2">
-              <Info className="h-4 w-4 text-blue-400 shrink-0" />
+              <Wallet className="h-4 w-4 text-emerald-400 shrink-0" />
               <h4 className="font-bold text-xs uppercase tracking-wider text-slate-100">
-                Terintegrasi Jurnal & AI
+                Pembayaran &amp; Pelunasan Terpusat
               </h4>
             </div>
             <p className="text-[11px] text-slate-300 leading-relaxed">
-              Setiap penambahan KPR, hutang reguler, maupun pembayaran cicilan di sini langsung tersinkronisasi ke <strong>Urutan Pelunasan</strong>, <strong>Simulator What-If</strong>, <strong>Jurnal Transaksi</strong>, dan <strong>Penjadwal Prioritas AI</strong>.
+              Menu Hutang khusus untuk <strong>perhitungan kapasitas, simulasi &amp; penambahan KPR baru, serta pencatatan hutang baru</strong>. Seluruh pembayaran cicilan hutang maupun KPR dilakukan dalam <strong>satu proses</strong> di menu <strong>Jurnal Transaksi</strong> agar tidak terjadi transaksi ganda.
             </p>
+            {onNavigateToPayDebt && (
+              <button
+                type="button"
+                onClick={() => onNavigateToPayDebt()}
+                className="w-full py-2.5 px-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-[11px] font-extrabold uppercase tracking-wider transition flex items-center justify-center gap-1.5 cursor-pointer shadow-sm"
+              >
+                <Wallet className="h-3.5 w-3.5" />
+                Bayar Cicilan di Jurnal Transaksi →
+              </button>
+            )}
           </div>
         </div>
 
@@ -2660,6 +2077,34 @@ export const DebtTab: React.FC<DebtTabProps> = ({
                               {dueInfo.text}
                             </span>
                           )}
+                          <div className="pt-1 flex flex-wrap items-center justify-end gap-1.5">
+                            {isKpr && !d.isAccount && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setKprVisualSource('saved');
+                                  setSelectedSavedKprId(d.id);
+                                  document
+                                    .getElementById('kpr-amortization-chart')
+                                    ?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                                }}
+                                className="inline-flex items-center gap-1 px-2.5 py-1 bg-indigo-50 hover:bg-indigo-600 text-indigo-700 hover:text-white border border-indigo-200 hover:border-indigo-600 rounded-lg text-[10px] font-extrabold transition cursor-pointer"
+                              >
+                                <BarChart3 className="h-3 w-3" />
+                                Grafik Amortisasi
+                              </button>
+                            )}
+                            {onNavigateToPayDebt && (
+                              <button
+                                type="button"
+                                onClick={() => onNavigateToPayDebt(d.isAccount ? `acc-debt-${d.id}` : d.id)}
+                                className="inline-flex items-center gap-1 px-2.5 py-1 bg-emerald-50 hover:bg-emerald-600 text-emerald-700 hover:text-white border border-emerald-200 hover:border-emerald-600 rounded-lg text-[10px] font-extrabold transition cursor-pointer"
+                              >
+                                <Wallet className="h-3 w-3" />
+                                Bayar di Jurnal →
+                              </button>
+                            )}
+                          </div>
                         </div>
                       </div>
                     </div>
@@ -2673,7 +2118,7 @@ export const DebtTab: React.FC<DebtTabProps> = ({
                     <ShieldAlert className="h-4 w-4 shrink-0" /> Rekomendasi Alur Pembayaran:
                   </p>
                   <p className="leading-relaxed">
-                    Lakukan pembayaran minimum untuk semua utang lainnya. Sisa budget dana bebas pelunasan utang bulan ini wajib Anda salurkan seutuhnya langsung ke <strong>{orderedDebts[0]?.name}</strong> untuk mempercepat pelunasan total!
+                    Lakukan pembayaran minimum untuk semua utang lainnya, dan salurkan dana bebas pelunasan Anda ke <strong>{orderedDebts[0]?.name}</strong> melalui menu <strong>Jurnal Transaksi</strong> agar saldo hutang dan jurnal tercatat dalam satu proses tanpa duplikasi.
                   </p>
                 </div>
 

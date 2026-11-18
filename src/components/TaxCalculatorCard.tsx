@@ -1,6 +1,8 @@
 import React, { useState, useMemo } from 'react';
 import { Transaction } from '../types';
-import { Calculator, CalculatorIcon, DollarSign, ShieldAlert, FileText, Info, ArrowRight, CheckCircle2, Award, Percent } from 'lucide-react';
+import { isOperatingIncome } from '../utils/accountingEngine';
+import { formatterIDR } from '../utils/formatters';
+import { CalculatorIcon, FileText, Info } from 'lucide-react';
 
 interface TaxCalculatorCardProps {
   transactions: Transaction[];
@@ -26,13 +28,6 @@ export const PTKP_LIST: PTKPOption[] = [
   { code: 'K/3', label: 'K/3 - Kawin, 3 Tanggungan (Rp 72 Juta)', value: 72000000 },
 ];
 
-const formatterIDR = new Intl.NumberFormat('id-ID', {
-  style: 'currency',
-  currency: 'IDR',
-  minimumFractionDigits: 0,
-  maximumFractionDigits: 0,
-});
-
 export const TaxCalculatorCard: React.FC<TaxCalculatorCardProps> = ({
   transactions,
   className = '',
@@ -56,11 +51,11 @@ export const TaxCalculatorCard: React.FC<TaxCalculatorCardProps> = ({
     return Array.from(years).sort((a, b) => b - a);
   }, [transactions, currentYear]);
 
-  // Total recorded income for the selected year
+  // Total recorded operating income for the selected year (excluding loans, transfers, asset swaps)
   const recordedAnnualIncome = useMemo(() => {
     return transactions
       .filter((t) => {
-        if (t.type !== 'income') return false;
+        if (!isOperatingIncome(t)) return false;
         if (!t.date) return true;
         const y = new Date(t.date).getFullYear();
         return y === selectedYear;

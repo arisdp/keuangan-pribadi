@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useRef } from 'react';
-import { Transaction, Account, CategoryBudget, Debt, InvestmentAsset, EmergencyFundTransaction } from '../types';
+import { Transaction, Account, CategoryBudget, Debt, InvestmentAsset, EmergencyFundTransaction, KprCoaMappingConfig } from '../types';
 import { CategoryNode, DEFAULT_CATEGORY_HIERARCHY } from '../categoryHierarchy';
 import { HierarchicalPivotReport } from './HierarchicalPivotReport';
 import { MasterCategoryManager } from './MasterCategoryManager';
@@ -11,6 +11,7 @@ import { LiquidityProjectionCard } from './LiquidityProjectionCard';
 import { AiLedgerReconciliation } from './AiLedgerReconciliation';
 import { MonthlyExpenseD3TrendChart } from './MonthlyExpenseD3TrendChart';
 import { IntegrityReport } from './IntegrityReport';
+import { AdjustingEntriesPanel, AdjustingEntryDraft } from './AdjustingEntriesPanel';
 import { 
   exportIncomeStatementToCSV, 
   exportBalanceSheetToCSV, 
@@ -20,6 +21,15 @@ import {
 } from '../utils/exportFinancialReports';
 import html2canvas from 'html2canvas';
 import jsPDF from 'jspdf';
+import {
+  calculateCashFlowStatement,
+  calculateBalanceSheet,
+  calculateTotalLiquidCash,
+  isOperatingIncome,
+  isOperatingExpense,
+} from '../utils/accountingEngine';
+import { formatterIDR } from '../utils/formatters';
+import { showToast } from '../utils/toast';
 import { 
   FileText, 
   FileSpreadsheet, 
@@ -35,7 +45,6 @@ import {
   Search, 
   Download, 
   Printer, 
-  Plus, 
   ShieldCheck, 
   Scale, 
   Layers, 
@@ -65,58 +74,17 @@ interface ReportsTabProps {
   investments: InvestmentAsset[];
   emergencyTransactions: EmergencyFundTransaction[];
   masterCategories?: CategoryNode[];
+  kprCoaMapping?: KprCoaMappingConfig;
   onUpdateMasterCategories?: (newCats: CategoryNode[]) => void;
   onResetMasterCategories?: () => void;
   onUpdateAccounts?: (updatedAccounts: Account[]) => void;
   onUpdateTransactions?: (updatedTransactions: Transaction[]) => void;
   onUpdateInvestments?: (updatedInvestments: InvestmentAsset[]) => void;
+  onApplyAdjustments?: (entries: AdjustingEntryDraft[]) => void;
+  onReverseAdjustment?: (txId: string) => void;
   onOpenIntegrityModal?: () => void;
 }
 
-// Default Standard Chart of Accounts (COA) Structure
-interface AccountCOA {
-  code: string;
-  name: string;
-  category: 'Asset' | 'Liability' | 'Equity' | 'Income' | 'Expense';
-  normalBalance: 'Debet' | 'Kredit';
-  description: string;
-}
-
-const DEFAULT_COA_LIST: AccountCOA[] = [
-  // 1000: Aset
-  { code: '1100', name: 'Kas Tunai / Cash on Hand', category: 'Asset', normalBalance: 'Debet', description: 'Uang fisik tunai di dompet' },
-  { code: '1200', name: 'Bank Mandiri / Tabungan', category: 'Asset', normalBalance: 'Debet', description: 'Rekening utama simpanan bank' },
-  { code: '1210', name: 'Bank BCA / Tabungan', category: 'Asset', normalBalance: 'Debet', description: 'Rekening transaksi harian bank' },
-  { code: '1300', name: 'E-Wallet (GoPay, OVO, ShopeePay)', category: 'Asset', normalBalance: 'Debet', description: 'Dompet digital dan transaksi online' },
-  { code: '1400', name: 'Alokasi Dana Darurat', category: 'Asset', normalBalance: 'Debet', description: 'Dana cadangan darurat likuid' },
-  { code: '1500', name: 'Portofolio Investasi (Saham/Emas/Reksadana)', category: 'Asset', normalBalance: 'Debet', description: 'Investasi pasar modal dan logam mulia' },
-  
-  // 2000: Kewajiban
-  { code: '2100', name: 'Utang Kartu Kredit', category: 'Liability', normalBalance: 'Kredit', description: 'Tagihan penggunaan limit kartu kredit' },
-  { code: '2200', name: 'Utang Paylater', category: 'Liability', normalBalance: 'Kredit', description: 'Tagihan pinjaman paylater singkat' },
-  { code: '2300', name: 'Pinjaman Personal / Bank / KPR', category: 'Liability', normalBalance: 'Kredit', description: 'Kewajiban pinjaman jangka panjang' },
-  
-  // 3000: Ekuitas
-  { code: '3100', name: 'Modal Awal Keuangan', category: 'Equity', normalBalance: 'Kredit', description: 'Setoran modal saldo awal akun' },
-  { code: '3200', name: 'Saldo Laba Ditahan (Retained Surplus)', category: 'Equity', normalBalance: 'Kredit', description: 'Akumulasi surplus/defisit transaksi berjalan' },
-  
-  // 4000: Pendapatan
-  { code: '4100', name: 'Pendapatan Gaji Utama', category: 'Income', normalBalance: 'Kredit', description: 'Gaji rutin dari pekerjaan utama' },
-  { code: '4200', name: 'Pendapatan Freelance & Usaha', category: 'Income', normalBalance: 'Kredit', description: 'Hasil kerja sampingan atau proyek' },
-  { code: '4300', name: 'Hasil Investasi & Dividen', category: 'Income', normalBalance: 'Kredit', description: 'Gain & dividen portofolio investasi' },
-  { code: '4400', name: 'Pendapatan Lain-lain', category: 'Income', normalBalance: 'Kredit', description: 'Hadiah, refund, atau penerimaan tak terduga' },
-  
-  // 5000: Beban / Pengeluaran
-  { code: '5100', name: 'Beban Makanan & Minuman', category: 'Expense', normalBalance: 'Debet', description: 'Konsumsi harian, resto, dan groceries' },
-  { code: '5200', name: 'Beban Belanja Harian & Rumah Tangga', category: 'Expense', normalBalance: 'Debet', description: 'Kebutuhan fisik rumah dan perlengkapan' },
-  { code: '5300', name: 'Beban Utilitas & Tagihan', category: 'Expense', normalBalance: 'Debet', description: 'Listrik, air, internet Wi-Fi, pulsa' },
-  { code: '5400', name: 'Beban Transportasi & Bensin', category: 'Expense', normalBalance: 'Debet', description: 'BBM, tol, ojek online, parkir' },
-  { code: '5500', name: 'Beban Hiburan & Langganan Digital', category: 'Expense', normalBalance: 'Debet', description: 'Streaming, rekreasi, hobi, dan jalan-jalan' },
-  { code: '5600', name: 'Beban Kesehatan & Medis', category: 'Expense', normalBalance: 'Debet', description: 'Obat, dokter, asuransi, dan perawatan' },
-  { code: '5700', name: 'Beban Pendidikan & Pengembangan Diri', category: 'Expense', normalBalance: 'Debet', description: 'Buku, kursus, seminar, dan spp' },
-  { code: '5800', name: 'Beban Angsuran Utang & Bunga', category: 'Expense', normalBalance: 'Debet', description: 'Pembayaran pokok & bunga utang' },
-  { code: '5900', name: 'Beban Operasional Lainnya', category: 'Expense', normalBalance: 'Debet', description: 'Pengeluaran tak terduga lainnya' },
-];
 
 export const ReportsTab: React.FC<ReportsTabProps> = ({
   transactions,
@@ -126,15 +94,18 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
   investments,
   emergencyTransactions,
   masterCategories = DEFAULT_CATEGORY_HIERARCHY,
+  kprCoaMapping,
   onUpdateMasterCategories,
   onResetMasterCategories,
   onUpdateAccounts,
   onUpdateTransactions,
   onUpdateInvestments,
+  onApplyAdjustments,
+  onReverseAdjustment,
   onOpenIntegrityModal,
 }) => {
   // Sub-tab selection
-  const [activeReport, setActiveReport] = useState<'pivot-tree' | 'category-tree' | 'master-categories' | 'cashflow' | 'balance-sheet' | 'coa' | 'budget-realization' | 'tax-calculator' | 'advanced-analytics' | 'sankey-flow' | 'financial-ratios' | 'ai-reconciliation' | 'integrity-report'>('pivot-tree');
+  const [activeReport, setActiveReport] = useState<'pivot-tree' | 'category-tree' | 'master-categories' | 'cashflow' | 'balance-sheet' | 'adjusting-entries' | 'budget-realization' | 'tax-calculator' | 'advanced-analytics' | 'sankey-flow' | 'financial-ratios' | 'ai-reconciliation' | 'integrity-report'>('pivot-tree');
   const [selectedCategoryFilter, setSelectedCategoryFilter] = useState<'all' | 'financial' | 'analytics' | 'planning'>('all');
 
   // PDF Export
@@ -155,7 +126,11 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
       pdf.save(`Laporan_Keuangan_NusantaraWealth_${new Date().toISOString().split('T')[0]}.pdf`);
     } catch (error) {
       console.error('Failed to export PDF:', error);
-      alert('Gagal mengekspor ke PDF.');
+      showToast({
+        type: 'error',
+        title: 'Gagal Ekspor PDF',
+        message: 'Terjadi kendala saat membuat dokumen PDF laporan keuangan.',
+      });
     } finally {
       setIsExporting(false);
     }
@@ -188,25 +163,8 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
   // Filter Period State
   const [periodFilter, setPeriodFilter] = useState<'this-month' | 'last-3-months' | 'this-year' | 'all'>('this-month');
 
-  // Search query for COA & Budget vs Realization
+  // Search query for Budget vs Realization
   const [searchQuery, setSearchQuery] = useState<string>('');
-
-  // Custom COA state list
-  const [coaList, setCoaList] = useState<AccountCOA[]>(DEFAULT_COA_LIST);
-  const [showAddCoaModal, setShowAddCoaModal] = useState<boolean>(false);
-  const [newCoaCode, setNewCoaCode] = useState<string>('');
-  const [newCoaName, setNewCoaName] = useState<string>('');
-  const [newCoaCategory, setNewCoaCategory] = useState<'Asset' | 'Liability' | 'Equity' | 'Income' | 'Expense'>('Expense');
-  const [newCoaBalance, setNewCoaBalance] = useState<'Debet' | 'Kredit'>('Debet');
-  const [newCoaDesc, setNewCoaDesc] = useState<string>('');
-
-  // Formatter Currency IDR
-  const formatterIDR = new Intl.NumberFormat('id-ID', {
-    style: 'currency',
-    currency: 'IDR',
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 0,
-  });
 
   // Calculate filtered transactions based on period filter
   const filteredTxs = useMemo(() => {
@@ -234,99 +192,21 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
     });
   }, [transactions, periodFilter]);
 
-  // --- 1. CASHFLOW STATEMENT CALCULATIONS ---
+  // --- 1. CASHFLOW STATEMENT CALCULATIONS (Standardized 3-Activity Engine) ---
   const cashflowData = useMemo(() => {
-    // Operating Cash Flow (Revenue vs Operating Expenses - excluding internal account transfers)
-    const isInternalTransfer = (cat: string) => 
-      cat === 'Mutasi Masuk' || cat === 'Mutasi Keluar' || cat.toLowerCase().includes('mutasi');
-
-    const operatingInflows = filteredTxs
-      .filter((tx) => tx.type === 'income' && !isInternalTransfer(tx.category))
-      .reduce((sum, tx) => sum + tx.amount, 0);
-
-    const operatingOutflows = filteredTxs
-      .filter((tx) => tx.type === 'expense' && !isInternalTransfer(tx.category))
-      .reduce((sum, tx) => sum + tx.amount, 0);
-
-    const netOperating = operatingInflows - operatingOutflows;
-
-    // Investing Cash Flow (Buying/Selling Investments)
-    const investmentOutflows = filteredTxs
-      .filter((tx) => tx.type === 'investment')
-      .reduce((sum, tx) => sum + tx.amount, 0);
-
-    const netInvesting = -investmentOutflows;
-
-    // Financing Cash Flow (Saving to Emergency Fund, Paying Debts)
-    const savingOutflows = filteredTxs
-      .filter((tx) => tx.type === 'saving')
-      .reduce((sum, tx) => sum + tx.amount, 0);
-
-    const netFinancing = -savingOutflows;
-
-    const netCashChange = netOperating + netInvesting + netFinancing;
-
-    return {
-      operatingInflows,
-      operatingOutflows,
-      netOperating,
-      investmentOutflows,
-      netInvesting,
-      savingOutflows,
-      netFinancing,
-      netCashChange,
-    };
+    return calculateCashFlowStatement(filteredTxs);
   }, [filteredTxs]);
 
   // --- 2. BALANCE SHEET CALCULATIONS ---
   const balanceSheetData = useMemo(() => {
-    // Liquid Cash & Bank Assets
-    const liquidAssets = accounts
-      .filter((a) => a.type !== 'credit-card' && a.type !== 'paylater')
-      .reduce((sum, a) => sum + a.currentBalance, 0);
-
-    // Emergency Fund Total Assets
-    const emergencyAssets = emergencyTransactions.reduce((sum, tx) => {
-      return tx.type === 'addition' ? sum + tx.amount : sum - tx.amount;
-    }, 0);
-
-    // Investments Total Assets
-    const investmentAssets = (investments || []).reduce((sum, inv) => sum + inv.balance, 0);
-
-    const totalAssets = liquidAssets + emergencyAssets + investmentAssets;
-
-    // Liabilities
-    const creditCardPaylaterBills = accounts
-      .filter((a) => a.type === 'credit-card' || a.type === 'paylater')
-      .reduce((sum, a) => sum + (a.usedLimit || 0), 0);
-
-    const activeDebtsBalance = debts.reduce((sum, d) => sum + d.balance, 0);
-
-    const totalLiabilities = creditCardPaylaterBills + activeDebtsBalance;
-
-    // Equity (Net Worth = Total Assets - Total Liabilities)
-    const equity = totalAssets - totalLiabilities;
-
-    const isBalanced = Math.abs(totalAssets - (totalLiabilities + equity)) < 1;
-
-    return {
-      liquidAssets,
-      emergencyAssets,
-      investmentAssets,
-      totalAssets,
-      creditCardPaylaterBills,
-      activeDebtsBalance,
-      totalLiabilities,
-      equity,
-      isBalanced,
-    };
+    return calculateBalanceSheet(accounts, emergencyTransactions, investments, debts);
   }, [accounts, emergencyTransactions, investments, debts]);
 
   // --- 3. BUDGET VS REALIZATION CALCULATIONS ---
   const budgetVsRealization = useMemo(() => {
     const now = new Date();
     const currentYM = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-    const monthlyExpenses = transactions.filter((tx) => tx.type === 'expense' && tx.date.startsWith(currentYM));
+    const monthlyExpenses = transactions.filter((tx) => isOperatingExpense(tx) && tx.date.startsWith(currentYM));
 
     // Calculate actual spending per category
     const categorySpendingMap: Record<string, number> = {};
@@ -412,42 +292,10 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
     }));
   }, [budgetVsRealization]);
 
-  // COA Filtered List
-  const filteredCoaList = useMemo(() => {
-    return coaList.filter(
-      (acc) =>
-        acc.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        acc.code.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        acc.category.toLowerCase().includes(searchQuery.toLowerCase())
-    );
-  }, [coaList, searchQuery]);
-
-  // COA Add Handler
-  const handleAddCoaSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newCoaCode.trim() || !newCoaName.trim()) return;
-
-    setCoaList((prev) => [
-      ...prev,
-      {
-        code: newCoaCode.trim(),
-        name: newCoaName.trim(),
-        category: newCoaCategory,
-        normalBalance: newCoaBalance,
-        description: newCoaDesc.trim() || 'Akun perkiraan kustom pengguna',
-      },
-    ]);
-
-    setNewCoaCode('');
-    setNewCoaName('');
-    setNewCoaDesc('');
-    setShowAddCoaModal(false);
-  };
-
   // --- 4. ADVANCED ANALYTICS CALCULATIONS ---
   // A. 3-Month Cash Balance Projection
   const projectionData = useMemo(() => {
-    // 1. Get average net cash flow of the last 3 months
+    // 1. Get average net operating cash flow of the last 3 months
     const now = new Date();
     const threeMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 3, 1);
     const last3MonthsTxs = transactions.filter(tx => {
@@ -455,16 +303,14 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
       return d >= threeMonthsAgo && d <= now;
     });
 
-    const totalIncome = last3MonthsTxs.filter(tx => tx.type === 'income').reduce((sum, tx) => sum + tx.amount, 0);
-    const totalExpense = last3MonthsTxs.filter(tx => tx.type === 'expense').reduce((sum, tx) => sum + tx.amount, 0);
+    const totalIncome = last3MonthsTxs.filter(isOperatingIncome).reduce((sum, tx) => sum + tx.amount, 0);
+    const totalExpense = last3MonthsTxs.filter(isOperatingExpense).reduce((sum, tx) => sum + tx.amount, 0);
     
     // Average net flow per month over the last 3 months
     const avgNetFlow = (totalIncome - totalExpense) / 3;
 
     // Current Liquid Assets
-    const liquidAssets = accounts
-      .filter((a) => a.type !== 'credit-card' && a.type !== 'paylater')
-      .reduce((sum, a) => sum + a.currentBalance, 0);
+    const liquidAssets = calculateTotalLiquidCash(accounts);
 
     const data = [];
     
@@ -481,7 +327,7 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
       const nextMonthDate = new Date(now.getFullYear(), now.getMonth() + i, 1);
       data.push({
         month: nextMonthDate.toLocaleDateString('id-ID', { month: 'short', year: '2-digit' }),
-        Saldo: Math.max(0, projectedBalance) // Prevent negative balance for projection display if desired, or allow it
+        Saldo: Math.max(0, projectedBalance)
       });
     }
 
@@ -494,8 +340,8 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
     const currentYM = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
     const lastYearYM = `${now.getFullYear() - 1}-${String(now.getMonth() + 1).padStart(2, '0')}`;
 
-    const currentMonthExpenses = transactions.filter(tx => tx.type === 'expense' && tx.date.startsWith(currentYM));
-    const lastYearMonthExpenses = transactions.filter(tx => tx.type === 'expense' && tx.date.startsWith(lastYearYM));
+    const currentMonthExpenses = transactions.filter(tx => isOperatingExpense(tx) && tx.date.startsWith(currentYM));
+    const lastYearMonthExpenses = transactions.filter(tx => isOperatingExpense(tx) && tx.date.startsWith(lastYearYM));
 
     const categoryMap: Record<string, { current: number, lastYear: number }> = {};
 
@@ -527,9 +373,9 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
     const now = new Date();
     const map: Record<string, number> = {};
 
-    // Sum expenses by date
+    // Sum operating expenses by date
     transactions.forEach(tx => {
-      if (tx.type === 'expense') {
+      if (isOperatingExpense(tx)) {
         map[tx.date] = (map[tx.date] || 0) + tx.amount;
       }
     });
@@ -571,9 +417,9 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
       if (!tx.date) return;
       const key = tx.date.substring(0, 7);
       if (monthsMap[key]) {
-        if (tx.type === 'expense') {
+        if (isOperatingExpense(tx)) {
           monthsMap[key].Pengeluaran += tx.amount;
-        } else if (tx.type === 'income') {
+        } else if (isOperatingIncome(tx)) {
           monthsMap[key].Pemasukan += tx.amount;
         }
       }
@@ -591,7 +437,7 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
   const categoryCompositionData = useMemo(() => {
     const map: Record<string, number> = {};
     filteredTxs
-      .filter((tx) => tx.type === 'expense' && tx.category !== 'Mutasi Keluar' && tx.category !== 'Mutasi Masuk')
+      .filter(isOperatingExpense)
       .forEach((tx) => {
         const cat = tx.category || 'Lainnya';
         map[cat] = (map[cat] || 0) + tx.amount;
@@ -666,8 +512,8 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
 
           <div className="flex items-center gap-1.5 overflow-x-auto pb-1 sm:pb-0">
             {[
-              { id: 'all', label: 'Semua Laporan (11)' },
-              { id: 'financial', label: 'Laporan Keuangan & Audit (5)' },
+              { id: 'all', label: 'Semua Laporan (12)' },
+              { id: 'financial', label: 'Laporan Keuangan & Audit (6)' },
               { id: 'analytics', label: 'Analisis, Tren & Visualisasi (3)' },
               { id: 'planning', label: 'Perencanaan, Rasio & Pajak (3)' },
             ].map((cat) => (
@@ -711,6 +557,14 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
               shortDesc: 'Aset, Utang & Ekuitas',
               icon: Scale,
               category: 'financial',
+            },
+            {
+              id: 'adjusting-entries',
+              label: 'Adjusting Entries',
+              shortDesc: 'Depresiasi & Akrual Bunga',
+              icon: BookOpen,
+              category: 'financial',
+              badge: 'Non-Kas',
             },
             {
               id: 'ai-reconciliation',
@@ -823,6 +677,18 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
         />
       )}
 
+      {/* VIEW 0A2: MODUL ADJUSTING ENTRIES (JURNAL PENYESUAIAN OTOMATIS) */}
+      {activeReport === 'adjusting-entries' && (
+        <AdjustingEntriesPanel
+          transactions={transactions}
+          investments={investments}
+          debts={debts}
+          kprCoaMapping={kprCoaMapping}
+          onApplyAdjustments={(entries) => onApplyAdjustments?.(entries)}
+          onReverseAdjustment={(txId) => onReverseAdjustment?.(txId)}
+        />
+      )}
+
       {/* VIEW 0B: POHON KATEGORI VISUAL (TREE DIAGRAM) */}
       {activeReport === 'category-tree' && (
         <CategoryTreeDiagram
@@ -846,6 +712,7 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
             accounts={accounts}
             debts={debts}
             investments={investments}
+            emergencyTransactions={emergencyTransactions}
           />
           <LiquidityProjectionCard
             transactions={transactions}
@@ -976,11 +843,11 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
             </div>
 
             <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm space-y-1">
-              <p className="text-[10px] text-slate-400 font-extrabold uppercase tracking-wider">Arus Kas Investasi</p>
+              <p className="text-[10px] text-slate-400 font-extrabold uppercase tracking-wider">Arus Kas Investasi & Cadangan</p>
               <p className={`text-base font-black ${cashflowData.netInvesting >= 0 ? 'text-emerald-600' : 'text-blue-600'}`}>
                 {formatterIDR.format(cashflowData.netInvesting)}
               </p>
-              <p className="text-[10px] text-slate-400">Setoran ke Aset Investasi</p>
+              <p className="text-[10px] text-slate-400">Investasi & Dana Darurat</p>
             </div>
 
             <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm space-y-1">
@@ -988,7 +855,7 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
               <p className={`text-base font-black ${cashflowData.netFinancing >= 0 ? 'text-emerald-600' : 'text-amber-600'}`}>
                 {formatterIDR.format(cashflowData.netFinancing)}
               </p>
-              <p className="text-[10px] text-slate-400">Alokasi Dana Darurat & Utang</p>
+              <p className="text-[10px] text-slate-400">Pinjaman Baru & Cicilan Utang</p>
             </div>
 
             <div className="bg-blue-600 text-white p-5 rounded-xl shadow-md space-y-1">
@@ -1159,19 +1026,33 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
                 </div>
               </div>
 
-              {/* 2. INVESTING ACTIVITIES */}
+              {/* 2. INVESTING & RESERVE ACTIVITIES */}
               <div className="p-4">
                 <p className="font-extrabold text-slate-800 uppercase text-[11px] mb-2 text-blue-700">
-                  2. Arus Kas Dari Aktivitas Investasi
+                  2. Arus Kas Dari Aktivitas Investasi & Cadangan Aset
                 </p>
                 <div className="space-y-2 pl-3">
+                  <div className="flex justify-between text-slate-600">
+                    <span>Pencairan / Penjualan Portofolio Investasi</span>
+                    <span className="font-mono text-emerald-600 font-bold">+{formatterIDR.format(cashflowData.investmentInflows)}</span>
+                  </div>
                   <div className="flex justify-between text-slate-600">
                     <span>Pembelian / Setoran Modal ke Portofolio Investasi</span>
                     <span className="font-mono text-blue-600 font-bold">-{formatterIDR.format(cashflowData.investmentOutflows)}</span>
                   </div>
+                  <div className="flex justify-between text-slate-600">
+                    <span>Pencairan Cadangan Dana Darurat</span>
+                    <span className="font-mono text-emerald-600 font-bold">+{formatterIDR.format(cashflowData.savingInflows)}</span>
+                  </div>
+                  <div className="flex justify-between text-slate-600">
+                    <span>Setoran Alokasi Dana Darurat</span>
+                    <span className="font-mono text-blue-600 font-bold">-{formatterIDR.format(cashflowData.savingOutflows)}</span>
+                  </div>
                   <div className="flex justify-between font-extrabold text-slate-800 border-t border-slate-200 pt-2">
-                    <span>Kas Bersih Digunakan Untuk Aktivitas Investasi</span>
-                    <span className="font-mono text-blue-600">{formatterIDR.format(cashflowData.netInvesting)}</span>
+                    <span>Kas Bersih Untuk Aktivitas Investasi & Cadangan</span>
+                    <span className={`font-mono ${cashflowData.netInvesting >= 0 ? 'text-emerald-600' : 'text-blue-600'}`}>
+                      {formatterIDR.format(cashflowData.netInvesting)}
+                    </span>
                   </div>
                 </div>
               </div>
@@ -1183,12 +1064,18 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
                 </p>
                 <div className="space-y-2 pl-3">
                   <div className="flex justify-between text-slate-600">
-                    <span>Setoran Tabungan & Dana Darurat Cadangan</span>
-                    <span className="font-mono text-amber-600 font-bold">-{formatterIDR.format(cashflowData.savingOutflows)}</span>
+                    <span>Penerimaan / Pencairan Pinjaman Utang Baru</span>
+                    <span className="font-mono text-emerald-600 font-bold">+{formatterIDR.format(cashflowData.debtProceedsInflows)}</span>
+                  </div>
+                  <div className="flex justify-between text-slate-600">
+                    <span>Pembayaran Cicilan Pokok Utang & KPR</span>
+                    <span className="font-mono text-amber-600 font-bold">-{formatterIDR.format(cashflowData.debtPaymentOutflows)}</span>
                   </div>
                   <div className="flex justify-between font-extrabold text-slate-800 border-t border-slate-200 pt-2">
                     <span>Kas Bersih Dari Aktivitas Pendanaan</span>
-                    <span className="font-mono text-amber-600">{formatterIDR.format(cashflowData.netFinancing)}</span>
+                    <span className={`font-mono ${cashflowData.netFinancing >= 0 ? 'text-emerald-600' : 'text-amber-600'}`}>
+                      {formatterIDR.format(cashflowData.netFinancing)}
+                    </span>
                   </div>
                 </div>
               </div>
@@ -1377,88 +1264,6 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
         </div>
       )}
 
-      {/* VIEW 3: MASTER COA (CHART OF ACCOUNTS) */}
-      {activeReport === 'coa' && (
-        <div className="space-y-6 animate-fadeIn">
-          {/* COA Header & Actions Bar */}
-          <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div className="relative flex-1 max-w-md">
-              <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
-              <input
-                type="text"
-                placeholder="Cari kode akun, nama, atau kategori COA..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full bg-slate-50 border border-slate-200 rounded-lg pl-9 pr-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500 font-medium text-slate-800"
-              />
-            </div>
-
-            <button
-              onClick={() => setShowAddCoaModal(true)}
-              className="flex items-center justify-center gap-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold px-4 py-2 rounded-xl transition cursor-pointer shrink-0 shadow-xs"
-            >
-              <Plus className="h-4 w-4" />
-              + Kode Akun Baru
-            </button>
-          </div>
-
-          {/* COA Table */}
-          <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-            <div className="p-4 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
-              <h3 className="font-extrabold text-slate-800 text-xs uppercase tracking-wider">
-                Daftar Kode Perkiraan Akun Standar (Standard Chart of Accounts)
-              </h3>
-              <span className="text-[10px] text-slate-400 font-mono">Total {filteredCoaList.length} Akun</span>
-            </div>
-
-            <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse text-xs">
-                <thead>
-                  <tr className="bg-slate-100 text-slate-600 font-bold uppercase tracking-wider text-[10px] border-b border-slate-200">
-                    <th className="p-3">Kode Akun</th>
-                    <th className="p-3">Nama Akun Perkiraan</th>
-                    <th className="p-3">Kategori Akun</th>
-                    <th className="p-3">Saldo Normal</th>
-                    <th className="p-3">Deskripsi / Peruntukan</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {filteredCoaList.map((acc, index) => {
-                    let catColor = 'bg-slate-100 text-slate-700';
-                    if (acc.category === 'Asset') catColor = 'bg-emerald-50 text-emerald-700 border-emerald-200';
-                    if (acc.category === 'Liability') catColor = 'bg-rose-50 text-rose-700 border-rose-200';
-                    if (acc.category === 'Equity') catColor = 'bg-blue-50 text-blue-700 border-blue-200';
-                    if (acc.category === 'Income') catColor = 'bg-emerald-50 text-emerald-700 border-emerald-200';
-                    if (acc.category === 'Expense') catColor = 'bg-amber-50 text-amber-700 border-amber-200';
-
-                    return (
-                      <tr key={`coa-${acc.code}-${index}`} className="hover:bg-slate-50 transition-colors font-medium text-slate-800">
-                        <td className="p-3 font-mono font-black text-blue-600">{acc.code}</td>
-                        <td className="p-3 font-extrabold">{acc.name}</td>
-                        <td className="p-3">
-                          <span className={`px-2.5 py-0.5 rounded text-[10px] font-extrabold border uppercase ${catColor}`}>
-                            {acc.category}
-                          </span>
-                        </td>
-                        <td className="p-3">
-                          <span
-                            className={`font-mono text-[10px] font-bold px-2 py-0.5 rounded ${
-                              acc.normalBalance === 'Debet' ? 'bg-blue-50 text-blue-600' : 'bg-purple-50 text-purple-600'
-                            }`}
-                          >
-                            {acc.normalBalance}
-                          </span>
-                        </td>
-                        <td className="p-3 text-slate-500 max-w-xs">{acc.description}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* VIEW 4: BUDGET VS REALISASI (EKSPERIMEN) */}
       {activeReport === 'budget-realization' && (
@@ -1840,114 +1645,6 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
         </div>
       )}
 
-      {/* MODAL TAMBAH KODE AKUN COA */}
-      {showAddCoaModal && (
-        <div className="fixed inset-0 z-[999] bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 animate-fadeIn">
-          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-200 space-y-4">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-              <h3 className="font-extrabold text-slate-800 text-sm uppercase tracking-wider">
-                Tambah Kode Perkiraan Akun Baru (COA)
-              </h3>
-              <button
-                onClick={() => setShowAddCoaModal(false)}
-                className="text-slate-400 hover:text-slate-600 font-bold text-xs p-1 rounded-lg hover:bg-slate-100 transition cursor-pointer"
-              >
-                ✕
-              </button>
-            </div>
-
-            <form onSubmit={handleAddCoaSubmit} className="space-y-4 text-xs">
-              <div>
-                <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">
-                  Kode Akun (misal: 1250, 5150)
-                </label>
-                <input
-                  type="text"
-                  placeholder="Kode 4 digit..."
-                  value={newCoaCode}
-                  onChange={(e) => setNewCoaCode(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono font-bold text-slate-800"
-                  required
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">
-                  Nama Akun Perkiraan
-                </label>
-                <input
-                  type="text"
-                  placeholder="Nama akun..."
-                  value={newCoaName}
-                  onChange={(e) => setNewCoaName(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 font-medium text-slate-800"
-                  required
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">
-                  Kategori Akun
-                </label>
-                <select
-                  value={newCoaCategory}
-                  onChange={(e) => setNewCoaCategory(e.target.value as any)}
-                  className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 font-medium text-slate-800"
-                >
-                  <option value="Asset">Asset (Aset / Harta)</option>
-                  <option value="Liability">Liability (Kewajiban / Utang)</option>
-                  <option value="Equity">Equity (Ekuitas / Modal)</option>
-                  <option value="Income">Income (Pendapatan)</option>
-                  <option value="Expense">Expense (Beban / Pengeluaran)</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">
-                  Saldo Normal
-                </label>
-                <select
-                  value={newCoaBalance}
-                  onChange={(e) => setNewCoaBalance(e.target.value as any)}
-                  className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 font-medium text-slate-800"
-                >
-                  <option value="Debet">Debet</option>
-                  <option value="Kredit">Kredit</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">
-                  Deskripsi / Catatan
-                </label>
-                <input
-                  type="text"
-                  placeholder="Keterangan singkat..."
-                  value={newCoaDesc}
-                  onChange={(e) => setNewCoaDesc(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 font-medium text-slate-800"
-                />
-              </div>
-
-              <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
-                <button
-                  type="button"
-                  onClick={() => setShowAddCoaModal(false)}
-                  className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-600 font-bold rounded-lg transition cursor-pointer text-xs"
-                >
-                  Batal
-                </button>
-                <button
-                  type="submit"
-                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-lg transition cursor-pointer text-xs uppercase tracking-wider shadow-sm"
-                >
-                  Simpan Akun
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
     </div>
   );
 };

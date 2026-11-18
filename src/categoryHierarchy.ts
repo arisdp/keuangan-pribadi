@@ -69,6 +69,7 @@ export const DEFAULT_CATEGORY_HIERARCHY: CategoryNode[] = [
               { id: 'item-refund', name: 'Refund', type: 'item', parentId: 'subgrp-pendapatan-lainnya' },
               { id: 'item-sampingan', name: 'Sampingan', type: 'item', parentId: 'subgrp-pendapatan-lainnya' },
               { id: 'item-penerimaan-utang', name: 'Penerimaan Utang Baru', type: 'item', parentId: 'subgrp-pendapatan-lainnya' },
+              { id: 'item-pencairan-kpr', name: 'Pencairan KPR', type: 'item', parentId: 'subgrp-pendapatan-lainnya' },
               { id: 'item-penjualan-investasi', name: 'Penjualan Investasi', type: 'item', parentId: 'subgrp-pendapatan-lainnya' },
             ],
           },
@@ -166,9 +167,70 @@ export const DEFAULT_CATEGORY_HIERARCHY: CategoryNode[] = [
           { id: 'item-transportasi', name: 'Transportasi', type: 'item', parentId: 'grp-transportasi' },
         ],
       },
+      {
+        id: 'grp-kpr-properti',
+        name: 'KPR & Pembiayaan Properti',
+        type: 'group',
+        parentId: 'type-expense',
+        children: [
+          { id: 'item-cicilan-kpr', name: 'Cicilan KPR', type: 'item', parentId: 'grp-kpr-properti' },
+          { id: 'item-beban-bunga-kpr', name: 'Beban Bunga KPR', type: 'item', parentId: 'grp-kpr-properti' },
+          { id: 'item-biaya-provisi-kpr', name: 'Biaya Provisi & Admin KPR', type: 'item', parentId: 'grp-kpr-properti' },
+          { id: 'item-biaya-notaris-ajb', name: 'Biaya Notaris & AJB', type: 'item', parentId: 'grp-kpr-properti' },
+          { id: 'item-pajak-properti-kpr', name: 'Pajak Properti (BPHTB & PBB)', type: 'item', parentId: 'grp-kpr-properti' },
+          { id: 'item-asuransi-kpr', name: 'Asuransi KPR & Properti', type: 'item', parentId: 'grp-kpr-properti' },
+          { id: 'item-dp-kpr', name: 'Uang Muka (DP) KPR', type: 'item', parentId: 'grp-kpr-properti' },
+        ],
+      },
+      {
+        id: 'grp-penyesuaian-akuntansi',
+        name: 'Penyesuaian Akuntansi (Non-Kas)',
+        type: 'group',
+        parentId: 'type-expense',
+        children: [
+          { id: 'item-depresiasi-investasi', name: 'Depresiasi Aset Investasi', type: 'item', parentId: 'grp-penyesuaian-akuntansi' },
+          { id: 'item-akrual-bunga-utang', name: 'Akrual Bunga Utang', type: 'item', parentId: 'grp-penyesuaian-akuntansi' },
+        ],
+      },
     ],
   },
 ];
+
+// Merge any newly added system default nodes into user-stored category tree without overwriting custom entries
+export function mergeMissingDefaultCategories(storedNodes: CategoryNode[]): CategoryNode[] {
+  const existingNames = new Set<string>();
+  const collectNames = (nodes: CategoryNode[]) => {
+    nodes.forEach((n) => {
+      if (n.name) existingNames.add(n.name.toLowerCase().trim());
+      if (n.children) collectNames(n.children);
+    });
+  };
+  collectNames(storedNodes);
+
+  const cloned: CategoryNode[] = JSON.parse(JSON.stringify(storedNodes));
+
+  const mergeBranch = (targetParentChildren: CategoryNode[], defaultNodes: CategoryNode[], parentId?: string) => {
+    defaultNodes.forEach((defNode) => {
+      const defLower = defNode.name.toLowerCase().trim();
+      const existingTarget = targetParentChildren.find(
+        (t) => t.id === defNode.id || t.name.toLowerCase().trim() === defLower
+      );
+      if (!existingTarget && !existingNames.has(defLower)) {
+        targetParentChildren.push({
+          ...JSON.parse(JSON.stringify(defNode)),
+          parentId: parentId ?? defNode.parentId,
+        });
+        existingNames.add(defLower);
+      } else if (existingTarget && defNode.children && defNode.children.length > 0) {
+        if (!existingTarget.children) existingTarget.children = [];
+        mergeBranch(existingTarget.children, defNode.children, existingTarget.id);
+      }
+    });
+  };
+
+  mergeBranch(cloned, DEFAULT_CATEGORY_HIERARCHY);
+  return cloned;
+}
 
 // Local Storage Storage Helper
 export function getStoredCategories(username?: string): CategoryNode[] {
@@ -176,7 +238,10 @@ export function getStoredCategories(username?: string): CategoryNode[] {
     const key = username ? `fin_${username}_master_categories` : 'fin_default_master_categories';
     const saved = secureStorage.getItem(key);
     if (saved) {
-      return JSON.parse(saved);
+      const parsed = JSON.parse(saved);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return mergeMissingDefaultCategories(parsed);
+      }
     }
   } catch (err) {
     logger.error('Failed to load categories from storage', err);
