@@ -4,11 +4,14 @@ import { FormattedNumberInput } from './FormattedNumberInput';
 import { Plus, Trash2, CreditCard, Wallet, Banknote, ShieldCheck, Info, Sparkles, Check, X, AlertCircle, Percent, DollarSign, FileText, Calendar, ArrowUpRight, ArrowDownLeft, RefreshCw, Layers, Building2, CheckCircle2 } from 'lucide-react';
 import { getAccountCoaMapping, synchronizeAccountsAndCOA, CoaSyncReport } from '../coaUtils';
 import {
+  applyAccountBalanceChange,
+  applyCreditBillPayment,
   calculateCreditPaylaterBills,
   calculateTotalLiquidCash,
   getAccountCreditBill,
   getCreditAccounts,
   getLiquidAccounts,
+  getTransactionAccountDelta,
   isCreditAccount,
 } from '../utils/accountingEngine';
 
@@ -219,8 +222,9 @@ export const AccountsTab: React.FC<AccountsTabProps> = ({
   const handlePayBillSubmit = (e: React.FormEvent, card: Account) => {
     e.preventDefault();
     
-    const amountVal = parseFloat(paymentAmount);
-    if (isNaN(amountVal) || amountVal <= 0) {
+    const rawVal = parseFloat(paymentAmount);
+    const amountVal = Number.isFinite(rawVal) ? Math.abs(rawVal) : 0;
+    if (isNaN(rawVal) || amountVal <= 0) {
       showAlert('Formulir Tidak Valid', 'Jumlah pembayaran harus bernilai positif.');
       return;
     }
@@ -569,6 +573,34 @@ export const AccountsTab: React.FC<AccountsTabProps> = ({
                           </button>
                         </div>
                       </div>
+
+                      {(() => {
+                        const payVal = Math.abs(parseFloat(paymentAmount) || 0);
+                        const sourceAcc = liquidAccounts.find((la) => la.id === sourceAccountId);
+                        if (!sourceAcc || payVal <= 0) return null;
+                        const sourceDelta = getTransactionAccountDelta({ type: 'expense', amount: payVal });
+                        const projectedSource = applyAccountBalanceChange(sourceAcc, sourceDelta);
+                        const projectedCard = applyCreditBillPayment(acc, payVal, 'pay');
+                        const currentBill = getAccountCreditBill(acc);
+                        const projectedBill = getAccountCreditBill(projectedCard);
+
+                        return (
+                          <div className="bg-slate-950/90 border border-slate-800 rounded-lg p-2 space-y-1 text-[10px]">
+                            <div className="flex justify-between gap-2">
+                              <span className="text-slate-400">Saldo {sourceAcc.name}:</span>
+                              <span className={`font-mono tabular-nums font-bold ${projectedSource.currentBalance < 0 ? 'text-rose-400' : 'text-slate-200'}`}>
+                                {formatterIDR.format(sourceAcc.currentBalance)} &rarr; {formatterIDR.format(projectedSource.currentBalance)}
+                              </span>
+                            </div>
+                            <div className="flex justify-between gap-2">
+                              <span className="text-slate-400">Sisa Tagihan:</span>
+                              <span className="font-mono tabular-nums font-bold text-emerald-400">
+                                {formatterIDR.format(currentBill)} &rarr; {formatterIDR.format(projectedBill)}
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })()}
                     </form>
                   )}
 

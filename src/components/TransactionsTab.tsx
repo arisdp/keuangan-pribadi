@@ -9,6 +9,7 @@ import { DEFAULT_KPR_COA_MAPPING, resolveEffectiveKprCoaMapping, resolveTransact
 import { showToast } from '../utils/toast';
 import {
   applyAccountBalanceChange,
+  applyCreditBillPayment,
   calculateKprInstallmentBreakdown,
   getAccountCreditBill,
   getTransactionAccountDelta,
@@ -1502,11 +1503,11 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
 
   const filteredIncomeTotal = filteredTransactions
     .filter(tx => !tx.isAdjustment && tx.type === 'income')
-    .reduce((sum, tx) => sum + tx.amount, 0);
+    .reduce((sum, tx) => sum + Math.abs(tx.amount || 0), 0);
 
   const filteredExpenseTotal = filteredTransactions
     .filter(tx => !tx.isAdjustment && tx.type === 'expense')
-    .reduce((sum, tx) => sum + tx.amount, 0);
+    .reduce((sum, tx) => sum + Math.abs(tx.amount || 0), 0);
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -1783,13 +1784,13 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
               const activeDebtsList = allDebts.filter((d) => d.balance > 0);
               const selectedDebtObj = activeDebtsList.find((d) => d.id === linkedDebtId);
               const sourceAccObj = accounts.find((a) => a.id === accountId);
-              const parsedPayAmt = parseFloat(amount) || 0;
+              const parsedPayAmt = Math.abs(parseFloat(amount) || 0);
               const canSplitLoan = Boolean(
                 selectedDebtObj && !selectedDebtObj.isAccount && (selectedDebtObj.interestRate || 0) > 0
               );
               const activeInterestAmt =
                 canSplitLoan && splitPrincipalInterest
-                  ? Math.min(parsedPayAmt, Math.max(0, parseFloat(interestPortion) || 0))
+                  ? Math.min(parsedPayAmt, Math.abs(parseFloat(interestPortion) || 0))
                   : 0;
               const effectivePrincipalPay = Math.max(0, parsedPayAmt - activeInterestAmt);
               const isInsufficientSource = Boolean(sourceAccObj && parsedPayAmt > 0 && sourceAccObj.currentBalance < parsedPayAmt);
@@ -2041,16 +2042,47 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
                               </span>
                             </div>
                           )}
-                          <div className="flex justify-between gap-2">
-                            <span className="text-slate-500 font-semibold">Sisa Pokok Setelah Bayar:</span>
-                            <span className={`font-mono font-bold ${isOverDebtBalance ? 'text-rose-600' : 'text-emerald-700'}`}>
-                              {isOverDebtBalance
-                                ? 'Porsi pokok melebihi sisa utang!'
-                                : selectedDebtObj.balance - effectivePrincipalPay <= 0
-                                ? 'Rp 0 (LUNAS!)'
-                                : formatterIDR.format(selectedDebtObj.balance - effectivePrincipalPay)}
-                            </span>
-                          </div>
+                          {(() => {
+                            const creditCardTarget = selectedDebtObj.isAccount
+                              ? accounts.find((a) => `acc-debt-${a.id}` === selectedDebtObj.id)
+                              : null;
+                            if (creditCardTarget) {
+                              const projectedCard = applyCreditBillPayment(creditCardTarget, parsedPayAmt, 'pay');
+                              const nextBill = getAccountCreditBill(projectedCard);
+                              return (
+                                <>
+                                  <div className="flex justify-between gap-2">
+                                    <span className="text-slate-500 font-semibold">Sisa Tagihan Setelah Bayar:</span>
+                                    <span className={`font-mono tabular-nums font-bold ${isOverDebtBalance ? 'text-rose-600' : 'text-emerald-700'}`}>
+                                      {isOverDebtBalance
+                                        ? 'Nominal melebihi sisa tagihan!'
+                                        : nextBill <= 0
+                                        ? 'Rp 0 (LUNAS!)'
+                                        : formatterIDR.format(nextBill)}
+                                    </span>
+                                  </div>
+                                  <div className="flex justify-between gap-2">
+                                    <span className="text-slate-500 font-semibold">Proyeksi Sisa Limit {creditCardTarget.name}:</span>
+                                    <span className="font-mono tabular-nums font-bold text-slate-800">
+                                      {formatterIDR.format(creditCardTarget.currentBalance)} &rarr; {formatterIDR.format(projectedCard.currentBalance)}
+                                    </span>
+                                  </div>
+                                </>
+                              );
+                            }
+                            return (
+                              <div className="flex justify-between gap-2">
+                                <span className="text-slate-500 font-semibold">Sisa Pokok Setelah Bayar:</span>
+                                <span className={`font-mono tabular-nums font-bold ${isOverDebtBalance ? 'text-rose-600' : 'text-emerald-700'}`}>
+                                  {isOverDebtBalance
+                                    ? 'Porsi pokok melebihi sisa utang!'
+                                    : selectedDebtObj.balance - effectivePrincipalPay <= 0
+                                    ? 'Rp 0 (LUNAS!)'
+                                    : formatterIDR.format(selectedDebtObj.balance - effectivePrincipalPay)}
+                                </span>
+                              </div>
+                            );
+                          })()}
                         </div>
                       )}
 
@@ -2427,6 +2459,62 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
               </div>
             )}
 
+            {/* Pratinjau Dampak Saldo Rekening (Non-Debt Mode) */}
+            {!isDebtPayMode && (() => {
+              const selectedAcc = accounts.find((a) => a.id === accountId);
+              const parsedAmt = Math.abs(parseFloat(amount) || 0);
+              if (!selectedAcc || parsedAmt <= 0) return null;
+              const delta = getTransactionAccountDelta({ type, amount: parsedAmt });
+              const projectedAcc = applyAccountBalanceChange(selectedAcc, delta);
+              const isCredit = isCreditAccount(selectedAcc);
+              const currentBill = isCredit ? getAccountCreditBill(selectedAcc) : 0;
+              const projectedBill = isCredit ? getAccountCreditBill(projectedAcc) : 0;
+              const isNegativeProjected = delta < 0 && projectedAcc.currentBalance < 0;
+
+              return (
+                <div className={`rounded-xl border p-3 text-[11px] space-y-1.5 ${
+                  isNegativeProjected
+                    ? 'bg-rose-50/70 border-rose-200'
+                    : 'bg-slate-50 border-slate-200'
+                }`}>
+                  <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                    <span>Pratinjau Dampak Saldo ({selectedAcc.name})</span>
+                    <span className={`font-mono tabular-nums font-extrabold ${
+                      delta >= 0 ? 'text-emerald-600' : 'text-rose-600'
+                    }`}>
+                      {delta >= 0 ? '+' : ''}
+                      {formatterIDR.format(delta)}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between gap-2 text-xs">
+                    <span className="text-slate-600 font-medium">
+                      {isCredit ? 'Sisa Limit:' : 'Saldo Rekening:'}
+                    </span>
+                    <span className={`font-mono tabular-nums font-bold ${
+                      isNegativeProjected ? 'text-rose-700' : 'text-slate-900'
+                    }`}>
+                      {formatterIDR.format(selectedAcc.currentBalance)} &rarr; {formatterIDR.format(projectedAcc.currentBalance)}
+                    </span>
+                  </div>
+                  {isCredit && (
+                    <div className="flex items-center justify-between gap-2 text-[10px] pt-1 border-t border-slate-200/80">
+                      <span className="text-slate-500 font-semibold">Tagihan Terpakai:</span>
+                      <span className="font-mono tabular-nums font-bold text-rose-700">
+                        {formatterIDR.format(currentBill)} &rarr; {formatterIDR.format(projectedBill)}
+                      </span>
+                    </div>
+                  )}
+                  {isNegativeProjected && (
+                    <p className="text-[10px] text-rose-700 font-semibold pt-0.5">
+                      {isCredit
+                        ? 'Nominal melebihi sisa limit tersedia pada kartu/PayLater.'
+                        : 'Nominal melebihi saldo kas rekening saat ini.'}
+                    </p>
+                  )}
+                </div>
+              );
+            })()}
+
             <button
               type="submit"
               className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2.5 px-4 rounded-lg text-xs uppercase tracking-wider transition cursor-pointer"
@@ -2512,6 +2600,52 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
                 className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-700"
               />
             </div>
+
+            {/* Pratinjau Saldo Mutasi Dana */}
+            {(() => {
+              const sourceAcc = accounts.find((a) => a.id === fromAccount);
+              const destAcc = accounts.find((a) => a.id === toAccount);
+              const parsedTransferAmt = Math.abs(parseFloat(transferAmount) || 0);
+              if (!sourceAcc || !destAcc || fromAccount === toAccount || parsedTransferAmt <= 0) return null;
+
+              const outDelta = getTransactionAccountDelta({ type: 'expense', amount: parsedTransferAmt });
+              const inDelta = getTransactionAccountDelta({ type: 'income', amount: parsedTransferAmt });
+              const projectedSource = applyAccountBalanceChange(sourceAcc, outDelta);
+              const projectedDest = applyAccountBalanceChange(destAcc, inDelta);
+              const isInsufficient = projectedSource.currentBalance < 0;
+
+              return (
+                <div className={`rounded-xl border p-3 text-[11px] space-y-1.5 ${
+                  isInsufficient ? 'bg-rose-50/70 border-rose-200' : 'bg-slate-50 border-slate-200'
+                }`}>
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                    Pratinjau Proyeksi Saldo Mutasi
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-slate-600 font-medium truncate">Asal ({sourceAcc.name}):</span>
+                    <span className={`font-mono tabular-nums font-bold shrink-0 ${
+                      isInsufficient ? 'text-rose-700' : 'text-rose-600'
+                    }`}>
+                      {formatterIDR.format(sourceAcc.currentBalance)} &rarr; {formatterIDR.format(projectedSource.currentBalance)}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-slate-600 font-medium truncate">Tujuan ({destAcc.name}):</span>
+                    <span className="font-mono tabular-nums font-bold text-emerald-700 shrink-0">
+                      {formatterIDR.format(destAcc.currentBalance)} &rarr; {formatterIDR.format(projectedDest.currentBalance)}
+                    </span>
+                  </div>
+                  {isCreditAccount(destAcc) && (
+                    <div className="flex items-center justify-between gap-2 text-[10px] pt-1 border-t border-slate-200/80">
+                      <span className="text-slate-500 font-semibold">Sisa Tagihan {destAcc.name}:</span>
+                      <span className="font-mono tabular-nums font-bold text-slate-800">
+                        {formatterIDR.format(getAccountCreditBill(destAcc))} &rarr; {formatterIDR.format(getAccountCreditBill(projectedDest))}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
 
             <button
               type="submit"

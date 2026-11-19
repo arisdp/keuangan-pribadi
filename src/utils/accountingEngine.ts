@@ -92,8 +92,9 @@ export function calculateKprInstallmentBreakdown(params: {
     /\bkpr\b/i.test(debt.name || '');
 
   const scheme: 'annuity' | 'tiered' | 'flat' = debt.kprScheme || 'annuity';
-  const remBalance = Math.max(0, Number(debt.balance) || 0);
-  const safePay = Math.max(0, Number(paymentAmount) || 0);
+  const rawRemBalance = Number(debt.balance);
+  const remBalance = Number.isFinite(rawRemBalance) ? Math.max(0, rawRemBalance) : 0;
+  const safePay = normalizeAbsAmount(paymentAmount);
 
   let elapsedMonths = 1;
   const payDateStr = (paymentDate || new Date().toISOString().split('T')[0]).slice(0, 10);
@@ -176,7 +177,7 @@ export function resolveDebtInstallmentAccounting(params: {
   interestExpenseAmount: number;
 } {
   const { tx, debt, baseCoaMapping, sourceAccountCoaCode } = params;
-  const safeAmt = Math.abs(Number(tx.amount) || 0);
+  const safeAmt = normalizeAbsAmount(tx.amount);
   const effectiveCoa = resolveEffectiveKprCoaForEngine(baseCoaMapping, debt.kprCoaSnapshot);
   const isKpr =
     debt.category === 'KPR / Properti' ||
@@ -323,7 +324,7 @@ export function calculateTotalEmergencyFund(
   emergencyTransactions: EmergencyFundTransaction[]
 ): number {
   return (emergencyTransactions || []).reduce((sum, tx) => {
-    const amt = Math.abs(tx.amount || 0);
+    const amt = normalizeAbsAmount(tx.amount);
     return tx.type === 'addition' ? sum + amt : sum - amt;
   }, 0);
 }
@@ -354,17 +355,25 @@ export function calculateMonthlyDebtService(accounts: Account[], debts: Debt[]):
   return loanMin + creditMin;
 }
 
+export function normalizeAbsAmount(value: unknown): number {
+  const num = Number(value);
+  return Number.isFinite(num) ? Math.abs(num) : 0;
+}
+
 export function getTransactionAccountDelta(
   tx: Pick<Transaction, 'type' | 'amount' | 'isAdjustment'>
 ): number {
-  if (tx.isAdjustment) return 0;
-  const amount = Math.abs(Number(tx.amount) || 0);
+  if (!tx || tx.isAdjustment) return 0;
+  const amount = normalizeAbsAmount(tx.amount);
+  if (amount === 0) return 0;
   return tx.type === 'income' ? amount : -amount;
 }
 
 export function applyAccountBalanceChange(acc: Account, delta: number): Account {
   const safeDelta = Number.isFinite(delta) ? delta : 0;
-  const nextBalance = (acc.currentBalance || 0) + safeDelta;
+  const rawCurrentBalance = Number(acc?.currentBalance);
+  const baseBalance = Number.isFinite(rawCurrentBalance) ? rawCurrentBalance : 0;
+  const nextBalance = baseBalance + safeDelta;
   if (!isCreditAccount(acc)) {
     return {
       ...acc,
@@ -372,7 +381,8 @@ export function applyAccountBalanceChange(acc: Account, delta: number): Account 
     };
   }
 
-  const limit = acc.creditLimit ?? acc.startingBalance ?? 0;
+  const rawLimit = Number(acc.creditLimit ?? acc.startingBalance ?? 0);
+  const limit = Number.isFinite(rawLimit) ? Math.max(0, rawLimit) : 0;
   return {
     ...acc,
     currentBalance: nextBalance,
@@ -386,7 +396,9 @@ export function applyAccountBalanceChange(acc: Account, delta: number): Account 
  */
 export function setAccountTargetBalance(acc: Account, targetBalance: number): Account {
   const safeTarget = Number.isFinite(targetBalance) ? targetBalance : 0;
-  const delta = safeTarget - (acc.currentBalance || 0);
+  const rawCurrent = Number(acc?.currentBalance);
+  const currentBalance = Number.isFinite(rawCurrent) ? rawCurrent : 0;
+  const delta = safeTarget - currentBalance;
   return applyAccountBalanceChange(acc, delta);
 }
 
@@ -399,8 +411,9 @@ export function updateAccountMetadataAndStartingBalance(
   newStartingBalance: number,
   newName?: string
 ): Account {
-  const safeStart = Number.isFinite(newStartingBalance) ? newStartingBalance : 0;
-  const diff = safeStart - (acc.startingBalance || 0);
+  const safeStart = normalizeAbsAmount(newStartingBalance);
+  const oldStart = normalizeAbsAmount(acc?.startingBalance);
+  const diff = safeStart - oldStart;
   const updatedBase: Account = {
     ...acc,
     name: newName !== undefined ? newName : acc.name,
@@ -448,9 +461,10 @@ export function applyCreditBillPayment(
   paymentAmount: number,
   mode: 'pay' | 'revert' = 'pay'
 ): Account {
+  const safePayment = normalizeAbsAmount(paymentAmount);
   const delta = getTransactionAccountDelta({
     type: mode === 'pay' ? 'income' : 'expense',
-    amount: paymentAmount,
+    amount: safePayment,
   });
   return applyAccountBalanceChange(acc, delta);
 }
@@ -470,9 +484,9 @@ export function createAccountRecord(params: {
   interestRate?: number;
   minPayment?: number;
 }): Account {
-  const safeStart = Math.max(0, Number(params.startingBalance) || 0);
+  const safeStart = normalizeAbsAmount(params.startingBalance);
   const creditAccount = isCreditAccount({ type: params.type });
-  const safeInitialDebt = creditAccount ? Math.max(0, Number(params.initialDebt) || 0) : undefined;
+  const safeInitialDebt = creditAccount ? normalizeAbsAmount(params.initialDebt) : undefined;
 
   const baseAccount: Account = {
     id: params.id,
@@ -576,7 +590,7 @@ export function auditLedgerIntegrity(
     const accPart = (tx.accountId || '').trim();
     const typePart = tx.type || 'expense';
     const catPart = (tx.category || '').trim().toLowerCase();
-    const amtPart = Math.round((Number(tx.amount) || 0) * 100);
+    const amtPart = Math.round(normalizeAbsAmount(tx.amount) * 100);
     const descPart = (tx.description || '').trim().toLowerCase();
     const adjPart = tx.isAdjustment ? 'adj' : 'std';
     const sig = `${datePart}|${accPart}|${typePart}|${catPart}|${amtPart}|${descPart}|${adjPart}`;
@@ -669,14 +683,16 @@ export function calculateAccountGLBalance(
       tx.linkedDebtId === `acc-debt-${acc.id}`
     ) {
       txCount += 1;
-      calculatedDelta += Math.abs(Number(tx.amount) || 0);
+      calculatedDelta += getTransactionAccountDelta({ type: 'income', amount: tx.amount });
     }
   });
 
-  const startingBal = acc.startingBalance || 0;
-  const initialDebt = isCreditAccount(acc) ? (acc.initialDebt || 0) : 0;
+  const rawStart = Number(acc?.startingBalance);
+  const startingBal = Number.isFinite(rawStart) ? rawStart : 0;
+  const initialDebt = isCreditAccount(acc) ? normalizeAbsAmount(acc?.initialDebt) : 0;
   const glCalculatedBalance = startingBal - initialDebt + calculatedDelta;
-  const recordedBalance = acc.currentBalance || 0;
+  const rawRecorded = Number(acc?.currentBalance);
+  const recordedBalance = Number.isFinite(rawRecorded) ? rawRecorded : 0;
   const difference = recordedBalance - glCalculatedBalance;
 
   return {
@@ -746,11 +762,15 @@ export function removeDuplicateTransactionsWithBalanceSync(
   const removedTxs = safeTxs.filter((_, idx) => removeSet.has(idx));
   const updatedTransactions = safeTxs.filter((_, idx) => !removeSet.has(idx));
 
-  const affectedAccountIds = new Set(
-    removedTxs
-      .filter((t) => t && !t.isAdjustment && t.accountId)
-      .map((t) => t.accountId)
-  );
+  const affectedAccountIds = new Set<string>();
+  removedTxs.forEach((t) => {
+    if (!t || t.isAdjustment) return;
+    if (t.accountId) affectedAccountIds.add(t.accountId);
+    if (t.linkedDebtAction === 'pay' && t.linkedDebtId?.startsWith('acc-debt-')) {
+      const linkedCreditAccId = t.linkedDebtId.replace('acc-debt-', '');
+      if (linkedCreditAccId) affectedAccountIds.add(linkedCreditAccId);
+    }
+  });
 
   const updatedAccounts = safeAccounts.map((acc) => {
     if (!affectedAccountIds.has(acc.id)) return acc;
@@ -852,16 +872,31 @@ export function previewSafeAnomalyCleanupImpact(
   const duplicateRowCountByAccount = new Map<string, number>();
 
   safeTxs.forEach((tx, idx) => {
-    if (!tx || tx.isAdjustment || !tx.accountId) return;
+    if (!tx || tx.isAdjustment) return;
     if (dupSet.has(idx)) {
-      duplicateRowCountByAccount.set(
-        tx.accountId,
-        (duplicateRowCountByAccount.get(tx.accountId) || 0) + 1
-      );
-      touchedCountByAccount.set(
-        tx.accountId,
-        (touchedCountByAccount.get(tx.accountId) || 0) + 1
-      );
+      if (tx.accountId) {
+        duplicateRowCountByAccount.set(
+          tx.accountId,
+          (duplicateRowCountByAccount.get(tx.accountId) || 0) + 1
+        );
+        touchedCountByAccount.set(
+          tx.accountId,
+          (touchedCountByAccount.get(tx.accountId) || 0) + 1
+        );
+      }
+      if (tx.linkedDebtAction === 'pay' && tx.linkedDebtId?.startsWith('acc-debt-')) {
+        const linkedCreditAccId = tx.linkedDebtId.replace('acc-debt-', '');
+        if (linkedCreditAccId && linkedCreditAccId !== tx.accountId) {
+          duplicateRowCountByAccount.set(
+            linkedCreditAccId,
+            (duplicateRowCountByAccount.get(linkedCreditAccId) || 0) + 1
+          );
+          touchedCountByAccount.set(
+            linkedCreditAccId,
+            (touchedCountByAccount.get(linkedCreditAccId) || 0) + 1
+          );
+        }
+      }
     }
   });
 
@@ -897,8 +932,10 @@ export function previewSafeAnomalyCleanupImpact(
       workingAcc = applyAccountBalanceChange(workingAcc, orphanDelta);
     }
 
-    const currentBalance = acc.currentBalance || 0;
-    const projectedBalance = workingAcc.currentBalance || 0;
+    const rawCur = Number(acc?.currentBalance);
+    const currentBalance = Number.isFinite(rawCur) ? rawCur : 0;
+    const rawProj = Number(workingAcc?.currentBalance);
+    const projectedBalance = Number.isFinite(rawProj) ? rawProj : 0;
     const netBalanceDelta = projectedBalance - currentBalance;
     const affectedRowCount = touchedCountByAccount.get(acc.id) || 0;
 
@@ -1023,7 +1060,7 @@ export function calculateIncomeStatementSummary(
   let kprInterestExpense = 0;
 
   (transactions || []).forEach((tx) => {
-    const amt = Math.abs(tx.amount || 0);
+    const amt = normalizeAbsAmount(tx.amount);
     const nature = classifyTransaction(tx);
     switch (nature) {
       case 'operating_income':
@@ -1121,7 +1158,7 @@ export function calculateCashFlowStatement(
   let nonCashCreditOutflows = 0;
 
   (transactions || []).forEach((tx) => {
-    const amt = Math.abs(tx.amount || 0);
+    const amt = normalizeAbsAmount(tx.amount);
     const nature = classifyTransaction(tx);
     const isCreditCharge = Boolean(tx.accountId && creditAccountIds.has(tx.accountId));
 
@@ -1283,7 +1320,7 @@ export function calculateNetWorthHistory30Days(
     let rolledDebts = currentDebts;
 
     txsAfter.forEach((tx) => {
-      const amt = Math.abs(tx.amount || 0);
+      const amt = normalizeAbsAmount(tx.amount);
       const nature = classifyTransaction(tx);
       const acc = accountTypeMap.get(tx.accountId);
       const onCreditCard = isCreditAccount(acc);

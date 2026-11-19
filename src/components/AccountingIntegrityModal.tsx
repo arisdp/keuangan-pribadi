@@ -43,8 +43,12 @@ import {
 } from 'lucide-react';
 
 import {
+  applyAccountBalanceChange,
   auditLedgerIntegrity,
   calculateAccountGLBalance,
+  getAccountCreditBill,
+  getTransactionAccountDelta,
+  isCreditAccount,
   previewSafeAnomalyCleanupImpact,
 } from '../utils/accountingEngine';
 import { formatterIDR } from '../utils/formatters';
@@ -172,15 +176,24 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
       amount: number;
       debitCreditNote: string;
       difference: number;
+      currentBalance: number;
+      projectedBalance: number;
+      isCredit: boolean;
+      currentBill: number;
+      projectedBill: number;
     }> = [];
 
-    const todayStr = new Date().toISOString().split('T')[0];
-
     accountAudit.forEach((acc) => {
-      if (Math.abs(acc.difference) > 0) {
+      const absDiff = Math.abs(acc.difference);
+      if (absDiff > 0) {
+        const accountObj = accounts.find((a) => a.id === acc.id);
+        const entryType: 'income' | 'expense' = acc.difference < 0 ? 'expense' : 'income';
+        const delta = getTransactionAccountDelta({ type: entryType, amount: absDiff });
+        const projectedAcc = accountObj ? applyAccountBalanceChange(accountObj, delta) : null;
+        const isCredit = accountObj ? isCreditAccount(accountObj) : false;
+
         if (acc.difference < 0) {
           // Cash shortfall / missing cash
-          const absDiff = Math.abs(acc.difference);
           entries.push({
             accountId: acc.id,
             accountName: acc.name,
@@ -190,6 +203,11 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
             amount: absDiff,
             debitCreditNote: `Debet: Beban Penyesuaian (${formatterIDR.format(absDiff)}) | Kredit: ${acc.name} (${formatterIDR.format(absDiff)})`,
             difference: acc.difference,
+            currentBalance: accountObj?.currentBalance ?? acc.recordedBalance,
+            projectedBalance: projectedAcc ? projectedAcc.currentBalance : acc.recordedBalance + delta,
+            isCredit,
+            currentBill: accountObj && isCredit ? getAccountCreditBill(accountObj) : 0,
+            projectedBill: projectedAcc && isCredit ? getAccountCreditBill(projectedAcc) : 0,
           });
         } else {
           // Cash surplus
@@ -199,16 +217,21 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
             type: 'income',
             category: 'Pendapatan Lain-lain',
             description: `[Auto-Reconciliation] Entri Penyesuaian Surplus Kas Akhir Bulan - ${acc.name}`,
-            amount: acc.difference,
-            debitCreditNote: `Debet: ${acc.name} (${formatterIDR.format(acc.difference)}) | Kredit: Pendapatan Penyesuaian (${formatterIDR.format(acc.difference)})`,
+            amount: absDiff,
+            debitCreditNote: `Debet: ${acc.name} (${formatterIDR.format(absDiff)}) | Kredit: Pendapatan Penyesuaian (${formatterIDR.format(absDiff)})`,
             difference: acc.difference,
+            currentBalance: accountObj?.currentBalance ?? acc.recordedBalance,
+            projectedBalance: projectedAcc ? projectedAcc.currentBalance : acc.recordedBalance + delta,
+            isCredit,
+            currentBill: accountObj && isCredit ? getAccountCreditBill(accountObj) : 0,
+            projectedBill: projectedAcc && isCredit ? getAccountCreditBill(projectedAcc) : 0,
           });
         }
       }
     });
 
     return entries;
-  }, [accountAudit]);
+  }, [accountAudit, accounts]);
 
   // 3. CHART OF ACCOUNTS (COA) MAPPING AUDIT
   const categoryAudit = useMemo(() => {
@@ -823,6 +846,8 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
                           <span aria-hidden="true">·</span>
                           <span>{tx.category}</span>
                           <span aria-hidden="true">·</span>
+                          <span className="font-mono text-[10px]">ID: {tx.id || '-'}</span>
+                          <span aria-hidden="true">·</span>
                           <span>{row.issueSummary}</span>
                         </div>
                       </td>
@@ -927,52 +952,98 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
               )}
             </div>
 
-            {cleanupPreview.accountImpacts.length > 0 ? (
-              <div className="overflow-x-auto border border-slate-200 dark:border-slate-700 rounded-lg bg-white dark:bg-slate-900">
-                <table className="w-full text-left text-xs">
-                  <thead className="bg-slate-100/80 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 text-[10px] font-bold text-slate-500 uppercase">
-                    <tr>
-                      <th className="py-2 px-3">Rekening Terdampak</th>
-                      <th className="py-2 px-3 text-right">Saldo Saat Ini</th>
-                      <th className="py-2 px-3 text-right">Koreksi Bersih</th>
-                      <th className="py-2 px-3 text-right">Proyeksi Saldo Akhir</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                    {cleanupPreview.accountImpacts.map((imp) => (
-                      <tr key={imp.accountId}>
-                        <td className="py-2 px-3">
-                          <div className="font-bold text-slate-800 dark:text-slate-100">{imp.accountName}</div>
-                          <div className="text-[10px] text-slate-500 dark:text-slate-400">
-                            {imp.affectedRowCount} baris dipilih
-                            {imp.glAlreadyExcludedCount > 0 &&
-                              ` · ${imp.glAlreadyExcludedCount} duplikat sudah tidak terhitung di saldo`}
-                          </div>
-                        </td>
-                        <td className="py-2 px-3 text-right font-mono tabular-nums text-slate-600 dark:text-slate-300 whitespace-nowrap">
-                          {formatterIDR.format(imp.currentBalance)}
-                        </td>
-                        <td
-                          className={`py-2 px-3 text-right font-mono tabular-nums font-bold whitespace-nowrap ${
-                            imp.netBalanceDelta > 0
-                              ? 'text-emerald-600 dark:text-emerald-400'
-                              : imp.netBalanceDelta < 0
-                              ? 'text-rose-600 dark:text-rose-400'
-                              : 'text-slate-500 dark:text-slate-400'
-                          }`}
-                        >
-                          {imp.netBalanceDelta > 0 ? '+' : ''}
-                          {formatterIDR.format(imp.netBalanceDelta)}
-                        </td>
-                        <td className="py-2 px-3 text-right font-mono tabular-nums font-extrabold text-slate-900 dark:text-white whitespace-nowrap">
-                          {formatterIDR.format(imp.projectedBalance)}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            ) : (
+            {cleanupPreview.accountImpacts.length > 0 ? (() => {
+              const totalCurrent = cleanupPreview.accountImpacts.reduce((s, imp) => s + imp.currentBalance, 0);
+              const totalNetDelta = cleanupPreview.accountImpacts.reduce((s, imp) => s + imp.netBalanceDelta, 0);
+              const totalProjected = cleanupPreview.accountImpacts.reduce((s, imp) => s + imp.projectedBalance, 0);
+              return (
+                <div className="space-y-2.5">
+                  <div className="overflow-x-auto border border-slate-200 dark:border-slate-700 rounded-lg bg-white dark:bg-slate-900">
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-slate-100/80 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 text-[10px] font-bold text-slate-500 uppercase">
+                        <tr>
+                          <th className="py-2 px-3">Rekening Terdampak</th>
+                          <th className="py-2 px-3 text-right">Saldo Saat Ini</th>
+                          <th className="py-2 px-3 text-right">Koreksi Bersih</th>
+                          <th className="py-2 px-3 text-right">Proyeksi Saldo Akhir</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                        {cleanupPreview.accountImpacts.map((imp) => (
+                          <tr key={imp.accountId}>
+                            <td className="py-2 px-3">
+                              <div className="font-bold text-slate-800 dark:text-slate-100">{imp.accountName}</div>
+                              <div className="text-[10px] text-slate-500 dark:text-slate-400">
+                                {imp.affectedRowCount} baris dipilih
+                                {imp.glAlreadyExcludedCount > 0 &&
+                                  ` · ${imp.glAlreadyExcludedCount} duplikat sudah tidak terhitung di saldo`}
+                              </div>
+                            </td>
+                            <td className="py-2 px-3 text-right font-mono tabular-nums text-slate-600 dark:text-slate-300 whitespace-nowrap">
+                              {formatterIDR.format(imp.currentBalance)}
+                            </td>
+                            <td
+                              className={`py-2 px-3 text-right font-mono tabular-nums font-bold whitespace-nowrap ${
+                                imp.netBalanceDelta > 0
+                                  ? 'text-emerald-600 dark:text-emerald-400'
+                                  : imp.netBalanceDelta < 0
+                                  ? 'text-rose-600 dark:text-rose-400'
+                                  : 'text-slate-500 dark:text-slate-400'
+                              }`}
+                            >
+                              {imp.netBalanceDelta > 0 ? '+' : ''}
+                              {formatterIDR.format(imp.netBalanceDelta)}
+                            </td>
+                            <td className="py-2 px-3 text-right font-mono tabular-nums font-extrabold text-slate-900 dark:text-white whitespace-nowrap">
+                              {formatterIDR.format(imp.projectedBalance)}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                      <tfoot className="bg-slate-50 dark:bg-slate-800/80 border-t border-slate-200 dark:border-slate-700 text-xs font-extrabold">
+                        <tr>
+                          <td className="py-2 px-3 text-slate-800 dark:text-slate-100">
+                            Total Dampak ({cleanupPreview.accountImpacts.length} Rekening)
+                          </td>
+                          <td className="py-2 px-3 text-right font-mono tabular-nums text-slate-700 dark:text-slate-200 whitespace-nowrap">
+                            {formatterIDR.format(totalCurrent)}
+                          </td>
+                          <td
+                            className={`py-2 px-3 text-right font-mono tabular-nums whitespace-nowrap ${
+                              totalNetDelta > 0
+                                ? 'text-emerald-600 dark:text-emerald-400'
+                                : totalNetDelta < 0
+                                ? 'text-rose-600 dark:text-rose-400'
+                                : 'text-slate-500 dark:text-slate-400'
+                            }`}
+                          >
+                            {totalNetDelta > 0 ? '+' : ''}
+                            {formatterIDR.format(totalNetDelta)}
+                          </td>
+                          <td className="py-2 px-3 text-right font-mono tabular-nums text-slate-900 dark:text-white whitespace-nowrap">
+                            {formatterIDR.format(totalProjected)}
+                          </td>
+                        </tr>
+                      </tfoot>
+                    </table>
+                  </div>
+
+                  {showCleanupConfirm && (
+                    <div className="p-2.5 rounded-lg border border-rose-200 dark:border-rose-800 bg-rose-50/70 dark:bg-rose-950/30 text-[11px] text-rose-800 dark:text-rose-200 flex items-center gap-2">
+                      <AlertTriangle className="h-4 w-4 text-rose-600 shrink-0" />
+                      <span>
+                        Konfirmasi eksekusi: <strong>{cleanupPreview.totalAffectedRows} baris anomali</strong> akan dibersihkan dengan total koreksi bersih{' '}
+                        <strong className="font-mono tabular-nums">
+                          {totalNetDelta > 0 ? '+' : ''}
+                          {formatterIDR.format(totalNetDelta)}
+                        </strong>{' '}
+                        pada {cleanupPreview.accountImpacts.length} rekening.
+                      </span>
+                    </div>
+                  )}
+                </div>
+              );
+            })() : (
               <p className="text-[11px] text-slate-600 dark:text-slate-300">
                 Baris terpilih tidak memengaruhi saldo rekening aktif saat ini (entri yatim tanpa rekening valid atau sudah tersinkron di GL).
               </p>
@@ -1114,7 +1185,13 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
                       : 'bg-amber-500/20 text-amber-300 border-amber-500/40'
                   }`}
                 >
-                  {isIntegrityValid ? 'COA Valid 100%' : 'Anomali COA Terdeteksi'}
+                  {isIntegrityValid
+                    ? 'COA & Buku Besar Valid 100%'
+                    : categoryAudit.unmappedCategories.length > 0 && !ledgerAudit.isLedgerClean
+                    ? 'Anomali COA & Buku Besar'
+                    : categoryAudit.unmappedCategories.length > 0
+                    ? 'Anomali COA Terdeteksi'
+                    : 'Anomali Buku Besar'}
                 </span>
               </h3>
               <p className="text-xs text-slate-400 font-medium">
@@ -1348,14 +1425,24 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
                 <div className="p-4 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 rounded-2xl flex items-center gap-3 text-emerald-900 dark:text-emerald-200 text-xs font-medium">
                   <CheckCircle2 className="h-5 w-5 text-emerald-600 shrink-0" />
                   <div>
-                    <strong>Seluruh Struktur Jurnal Valid!</strong> Semua {categoryAudit.totalCategoriesInTx} kategori transaksi terdaftar dengan sempurna dalam Master Chart of Accounts (COA).
+                    <strong>Seluruh Struktur Jurnal &amp; Referensi Valid!</strong> Semua {categoryAudit.totalCategoriesInTx} kategori transaksi terdaftar dalam Master COA serta tidak ada entri duplikat maupun transaksi yatim.
                   </div>
                 </div>
               ) : (
                 <div className="p-4 bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 rounded-2xl flex items-center gap-3 text-amber-900 dark:text-amber-200 text-xs font-medium">
                   <AlertTriangle className="h-5 w-5 text-amber-600 shrink-0" />
                   <div>
-                    <strong>Anomali MAPPING COA Terdeteksi!</strong> Terdapat <strong>{categoryAudit.unmappedCategories.length} kategori transaksi</strong> yang digunakan pada log transaksi tetapi belum terdaftar resmi pada pohon Master COA.
+                    <strong>Anomali Integritas Terdeteksi!</strong>{' '}
+                    {categoryAudit.unmappedCategories.length > 0 && (
+                      <span>
+                        Terdapat <strong>{categoryAudit.unmappedCategories.length} kategori transaksi</strong> yang belum terdaftar di pohon Master COA.{' '}
+                      </span>
+                    )}
+                    {ledgerAudit.totalIssues > 0 && (
+                      <span>
+                        Ditemukan <strong>{ledgerAudit.totalIssues} anomali buku besar</strong> ({ledgerAudit.totalDuplicateIdRows} ID duplikat, {ledgerAudit.totalSameDayDuplicateRows} identik hari sama, {ledgerAudit.totalOrphans} transaksi yatim).
+                      </span>
+                    )}
                   </div>
                 </div>
               )}
@@ -1589,8 +1676,11 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
                           <strong>Deskripsi:</strong> {e.description}
                         </p>
 
-                        <div className="p-2 bg-slate-100 dark:bg-slate-800 rounded-xl text-[10px] font-mono text-slate-600 dark:text-slate-400">
-                          {e.debitCreditNote}
+                        <div className="p-2 bg-slate-100 dark:bg-slate-800 rounded-xl text-[10px] font-mono text-slate-600 dark:text-slate-400 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1">
+                          <span>{e.debitCreditNote}</span>
+                          <span className="font-bold text-slate-800 dark:text-slate-200 tabular-nums">
+                            {e.isCredit ? 'Sisa Limit:' : 'Proyeksi Saldo:'} {formatterIDR.format(e.currentBalance)} &rarr; {formatterIDR.format(e.projectedBalance)}
+                          </span>
                         </div>
                       </div>
                     ))}
@@ -2051,7 +2141,7 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
               Tutup
             </button>
 
-            {activeTab === 'audit' && !isIntegrityValid && (
+            {activeTab === 'audit' && categoryAudit.unmappedCategories.length > 0 && (
               <button
                 type="button"
                 onClick={handleHarmonizeClick}

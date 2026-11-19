@@ -776,7 +776,8 @@ export default function App() {
         return false;
       }
 
-      if (!Number.isFinite(newTx.amount) || newTx.amount <= 0) {
+      const rawPayAmt = Number(newTx.amount);
+      if (!Number.isFinite(rawPayAmt) || rawPayAmt <= 0) {
         showToast({
           type: 'warning',
           title: 'Nominal Tidak Valid',
@@ -925,6 +926,10 @@ export default function App() {
 
     const resolvedKprBreakdown = resolvedDebtAccounting?.linkedKprBreakdown ?? newTx.linkedKprBreakdown;
 
+    const normalizedAmount = Number.isFinite(Number(newTx.amount))
+      ? Math.abs(Number(newTx.amount))
+      : 0;
+
     const tx: Transaction = {
       id: txId,
       date: newTx.date,
@@ -932,7 +937,7 @@ export default function App() {
       type: newTx.type,
       category: newTx.category,
       description: newTx.description,
-      amount: newTx.amount,
+      amount: normalizedAmount,
       ...(resolvedCoaDebitCode ? { coaDebitCode: resolvedCoaDebitCode } : {}),
       ...(resolvedCoaCreditCode ? { coaCreditCode: resolvedCoaCreditCode } : {}),
       ...(resolvedKprBreakdown ? { linkedKprBreakdown: resolvedKprBreakdown } : {}),
@@ -1364,7 +1369,9 @@ export default function App() {
     const fromAcc = accounts.find((a) => a.id === fromAccountId);
     const toAcc = accounts.find((a) => a.id === toAccountId);
 
-    if (!fromAcc || !toAcc) return;
+    const rawTransferAmt = Number(amount);
+    const normalizedTransferAmt = Number.isFinite(rawTransferAmt) ? Math.abs(rawTransferAmt) : 0;
+    if (!fromAcc || !toAcc || normalizedTransferAmt <= 0) return;
 
     const outTx: Transaction = {
       id: outTxId,
@@ -1373,7 +1380,7 @@ export default function App() {
       type: 'expense',
       category: 'Mutasi Keluar',
       description: `${description} (Ke ${toAcc.name})`,
-      amount,
+      amount: normalizedTransferAmt,
     };
 
     const inTx: Transaction = {
@@ -1383,7 +1390,7 @@ export default function App() {
       type: 'income',
       category: 'Mutasi Masuk',
       description: `${description} (Dari ${fromAcc.name})`,
-      amount,
+      amount: normalizedTransferAmt,
     };
 
     setTransactions((prev) => [outTx, inTx, ...prev]);

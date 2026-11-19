@@ -502,11 +502,16 @@ export const IntegrityReport: React.FC<IntegrityReportProps> = ({
       showToast(`Berhasil merekonsiliasi saldo akun "${item.affectedRecordName}" ke ${formatterIDR.format(targetBalance)}!`);
     } else if (item.fixType === 'remove-orphan-tx' && onUpdateTransactions) {
       const { txIndex, transactionId } = item.payload || {};
-      const updated =
-        typeof txIndex === 'number'
-          ? transactions.filter((_, idx) => idx !== txIndex)
-          : transactions.filter((t) => t.id !== transactionId);
-      onUpdateTransactions(updated);
+      if (typeof txIndex === 'number') {
+        const res = removeDuplicateTransactionsWithBalanceSync(transactions, accounts, [txIndex]);
+        onUpdateTransactions(res.updatedTransactions);
+        if (onUpdateAccounts) {
+          onUpdateAccounts(res.updatedAccounts);
+        }
+      } else {
+        const updated = transactions.filter((t) => t.id !== transactionId);
+        onUpdateTransactions(updated);
+      }
       showToast(`Berhasil menghapus transaksi yatim "${item.affectedRecordName}"!`);
     } else if (
       item.fixType === 'remove-duplicate-tx' &&
@@ -588,11 +593,14 @@ export const IntegrityReport: React.FC<IntegrityReportProps> = ({
 
     fixableItems.forEach((item) => {
       if (item.fixType === 'reconcile-account' && item.payload?.accountId) {
-        updatedAccounts = updatedAccounts.map((acc) =>
-          acc.id === item.payload.accountId
-            ? setAccountTargetBalance(acc, item.payload.targetBalance)
-            : acc
-        );
+        updatedAccounts = updatedAccounts.map((acc) => {
+          if (acc.id !== item.payload.accountId) return acc;
+          const freshTarget =
+            allRemovedTxIndices.length > 0
+              ? calculateAccountGLBalance(acc, updatedTransactions).glCalculatedBalance
+              : item.payload.targetBalance;
+          return setAccountTargetBalance(acc, freshTarget);
+        });
       } else if (item.fixType === 'add-missing-cat' && item.payload?.categoryName) {
         missingCatsToAdd.push(item.payload.categoryName);
       } else if (item.fixType === 'reconcile-investment' && item.payload?.investmentId) {
