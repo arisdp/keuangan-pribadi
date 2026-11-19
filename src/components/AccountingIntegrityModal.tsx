@@ -41,7 +41,12 @@ import {
   BarChart3,
 } from 'lucide-react';
 
-import { calculateAccountGLBalance } from '../utils/accountingEngine';
+import {
+  auditLedgerIntegrity,
+  calculateAccountGLBalance,
+  reassignOrphanTransactionWithBalanceSync,
+  removeDuplicateTransactionsWithBalanceSync,
+} from '../utils/accountingEngine';
 import { formatterIDR } from '../utils/formatters';
 import { showToast } from '../utils/toast';
 
@@ -54,6 +59,7 @@ interface AccountingIntegrityModalProps {
   onHarmonize: (updatedAccounts: Account[], missingCategoriesToAdd: string[]) => void;
   onApplyAdjustmentEntries?: (entries: Omit<Transaction, 'id'>[]) => void;
   onUpdateAccounts?: (updatedAccounts: Account[]) => void;
+  onUpdateTransactions?: (updatedTransactions: Transaction[]) => void;
   defaultTab?: 'audit' | 'auto-reconcile' | 'manual-reconcile' | 'change-log';
 }
 
@@ -66,11 +72,13 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
   onHarmonize,
   onApplyAdjustmentEntries,
   onUpdateAccounts,
+  onUpdateTransactions,
   defaultTab = 'audit',
 }) => {
   const [activeTab, setActiveTab] = useState<'audit' | 'auto-reconcile' | 'manual-reconcile' | 'change-log'>(defaultTab);
   const [customActualBalances, setCustomActualBalances] = useState<Record<string, number>>({});
   const [reconciliationSuccessMessage, setReconciliationSuccessMessage] = useState<string | null>(null);
+  const [orphanTargetAccounts, setOrphanTargetAccounts] = useState<Record<number, string>>({});
 
   // COA List state for manual reconciliation
   const [activeCoaList, setActiveCoaList] = useState<AccountCOA[]>([]);
@@ -229,7 +237,12 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
     };
   }, [transactions, allMasterCategoryNames]);
 
-  const isIntegrityValid = categoryAudit.unmappedCategories.length === 0;
+  const ledgerAudit = useMemo(
+    () => auditLedgerIntegrity(transactions, accounts),
+    [transactions, accounts]
+  );
+
+  const isIntegrityValid = categoryAudit.unmappedCategories.length === 0 && ledgerAudit.isLedgerClean;
 
   // Integration Health Level Progress Bar Metrics
   const healthMetrics = useMemo(() => {
@@ -247,7 +260,12 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
     const categoryMappingPct = totalCatCount > 0 ? Math.round((mappedCatCount / totalCatCount) * 100) : 100;
     const reconciledCount = accountAudit.filter((a) => a.difference === 0).length;
     const balanceReconciledPct = accounts.length > 0 ? Math.round((reconciledCount / accounts.length) * 100) : 100;
-    const overallHealthScore = Math.round((accountCoaPct + categoryMappingPct + balanceReconciledPct) / 3);
+    const validLedgerCount = Math.max(0, transactions.length - ledgerAudit.totalIssues);
+    const ledgerValidPct =
+      transactions.length > 0 ? Math.round((validLedgerCount / transactions.length) * 100) : 100;
+    const overallHealthScore = Math.round(
+      (accountCoaPct + categoryMappingPct + balanceReconciledPct + ledgerValidPct) / 4
+    );
 
     return {
       validCoaAccountsCount,
@@ -258,9 +276,10 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
       categoryMappingPct,
       reconciledCount,
       balanceReconciledPct,
+      ledgerValidPct,
       overallHealthScore,
     };
-  }, [accounts, activeCoaList, categoryAudit, accountAudit]);
+  }, [accounts, activeCoaList, categoryAudit, accountAudit, transactions.length, ledgerAudit.totalIssues]);
 
   // Helper to compute string similarity (0.0 - 1.0) for Auto-Fix
   const calculateSimilarity = (str1: string, str2: string): number => {
@@ -491,6 +510,86 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
   const handleHarmonizeClick = () => {
     const missingNames = categoryAudit.unmappedCategories.map((c) => c.name);
     onHarmonize(accounts, missingNames);
+  };
+
+  const defaultValidAccountId =
+    accounts.find((a) => a.type === 'bank' || a.type === 'cash' || a.type === 'e-wallet')?.id ||
+    accounts[0]?.id ||
+    '';
+
+  const handleReassignOrphan = (txIndex: number) => {
+    if (!onUpdateTransactions) return;
+    const targetAccountId = orphanTargetAccounts[txIndex] || defaultValidAccountId;
+    if (!targetAccountId) return;
+
+    const { updatedTransactions, updatedAccounts, changed } = reassignOrphanTransactionWithBalanceSync(
+      transactions,
+      accounts,
+      txIndex,
+      targetAccountId
+    );
+    if (!changed) return;
+
+    onUpdateTransactions(updatedTransactions);
+    if (onUpdateAccounts) {
+      onUpdateAccounts(updatedAccounts);
+    }
+    const targetAcc = accounts.find((a) => a.id === targetAccountId);
+    const tx = transactions[txIndex];
+    addMasterChangeLog(
+      'Account',
+      targetAcc?.name || targetAccountId,
+      'RECONCILE',
+      `Mengalihkan transaksi yatim "${tx?.description || tx?.category || txIndex}" (${formatterIDR.format(tx?.amount || 0)}) ke rekening "${targetAcc?.name || targetAccountId}".`,
+      'Audit Integritas'
+    );
+    setChangeLogs(getMasterChangeLogs());
+    setReconciliationSuccessMessage(
+      `Transaksi "${tx?.description || tx?.category}" dialihkan ke ${targetAcc?.name || targetAccountId} dan saldo telah disinkronkan.`
+    );
+    setTimeout(() => setReconciliationSuccessMessage(null), 5000);
+  };
+
+  const handleDeleteOrphan = (txIndex: number) => {
+    if (!onUpdateTransactions) return;
+    const tx = transactions[txIndex];
+    const updatedTransactions = transactions.filter((_, idx) => idx !== txIndex);
+    onUpdateTransactions(updatedTransactions);
+    addMasterChangeLog(
+      'Account',
+      tx?.description || tx?.category || 'Transaksi Yatim',
+      'DELETE',
+      `Menghapus transaksi tanpa referensi akun valid (${tx?.date || '-'} · ${formatterIDR.format(tx?.amount || 0)}).`,
+      'Audit Integritas'
+    );
+    setChangeLogs(getMasterChangeLogs());
+    setReconciliationSuccessMessage(`Transaksi yatim "${tx?.description || tx?.category}" berhasil dihapus dari buku besar.`);
+    setTimeout(() => setReconciliationSuccessMessage(null), 5000);
+  };
+
+  const handleRemoveDuplicates = (indicesToRemove: number[], label: string) => {
+    if (!onUpdateTransactions || indicesToRemove.length === 0) return;
+    const { updatedTransactions, updatedAccounts, removedCount } = removeDuplicateTransactionsWithBalanceSync(
+      transactions,
+      accounts,
+      indicesToRemove
+    );
+    if (removedCount === 0) return;
+
+    onUpdateTransactions(updatedTransactions);
+    if (onUpdateAccounts) {
+      onUpdateAccounts(updatedAccounts);
+    }
+    addMasterChangeLog(
+      'Account',
+      label,
+      'RECONCILE',
+      `Menghapus ${removedCount} entri duplikat di buku besar dan menyinkronkan saldo rekening terkait.`,
+      'Audit Integritas'
+    );
+    setChangeLogs(getMasterChangeLogs());
+    setReconciliationSuccessMessage(`Berhasil membersihkan ${removedCount} entri ganda dan menyinkronkan saldo rekening.`);
+    setTimeout(() => setReconciliationSuccessMessage(null), 5000);
   };
 
   const handleExecuteAutoReconciliation = () => {
@@ -910,6 +1009,186 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
                 </div>
               )}
 
+              {/* Ledger Reference & Duplicate Audit Panel */}
+              <div className="p-4 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 dark:border-slate-800 pb-3">
+                  <div className="space-y-0.5">
+                    <h4 className="text-xs font-extrabold uppercase tracking-wider text-slate-800 dark:text-slate-100 flex items-center gap-2">
+                      {ledgerAudit.isLedgerClean ? (
+                        <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0" />
+                      ) : (
+                        <AlertTriangle className="h-4 w-4 text-rose-600 shrink-0" />
+                      )}
+                      <span>Validasi Referensi Akun &amp; Duplikasi Buku Besar</span>
+                    </h4>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                      {transactions.length} entri buku besar dipindai · {ledgerAudit.totalOrphans} transaksi yatim ·{' '}
+                      {ledgerAudit.totalDuplicateIdRows} ID duplikat · {ledgerAudit.totalSameDayDuplicateRows} entri identik di hari sama
+                    </p>
+                  </div>
+
+                  {!ledgerAudit.isLedgerClean &&
+                    (ledgerAudit.totalDuplicateIdRows > 0 || ledgerAudit.totalSameDayDuplicateRows > 0) &&
+                    onUpdateTransactions && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleRemoveDuplicates(
+                            [
+                              ...ledgerAudit.duplicateIdGroups.flatMap((g) => g.duplicateIndices),
+                              ...ledgerAudit.sameDayDuplicateGroups.flatMap((g) => g.duplicateIndices),
+                            ],
+                            'Pembersihan Semua Duplikat Buku Besar'
+                          )
+                        }
+                        className="px-3.5 py-2 bg-rose-600 hover:bg-rose-700 text-white text-xs font-extrabold rounded-xl transition cursor-pointer shrink-0 whitespace-nowrap"
+                      >
+                        Bersihkan Semua Duplikat ({ledgerAudit.totalDuplicateIdRows + ledgerAudit.totalSameDayDuplicateRows})
+                      </button>
+                    )}
+                </div>
+
+                {ledgerAudit.isLedgerClean ? (
+                  <p className="text-xs text-emerald-700 dark:text-emerald-300 font-medium">
+                    Seluruh transaksi non-penyesuaian terhubung ke rekening valid dan tidak ditemukan data ganda di buku besar.
+                  </p>
+                ) : (
+                  <div className="space-y-4">
+                    {/* Orphan Transactions */}
+                    {ledgerAudit.orphanTransactions.length > 0 && (
+                      <div className="space-y-2">
+                        <div className="text-[11px] font-extrabold text-rose-700 dark:text-rose-300">
+                          Transaksi Tanpa Referensi Akun Valid ({ledgerAudit.orphanTransactions.length})
+                        </div>
+                        <div className="overflow-x-auto border border-slate-200 dark:border-slate-800 rounded-xl">
+                          <table className="w-full text-left text-xs">
+                            <thead className="bg-slate-50 dark:bg-slate-800/80 border-b border-slate-200 dark:border-slate-800 text-[10px] font-extrabold text-slate-500 uppercase">
+                              <tr>
+                                <th className="py-2 px-3">Tanggal</th>
+                                <th className="py-2 px-3">Transaksi</th>
+                                <th className="py-2 px-3">Akun Bermasalah</th>
+                                <th className="py-2 px-3 text-right">Nominal</th>
+                                <th className="py-2 px-3 text-right">Perbaikan</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                              {ledgerAudit.orphanTransactions.map((orphan) => {
+                                const tx = orphan.transaction;
+                                const selectedAcc = orphanTargetAccounts[orphan.index] || defaultValidAccountId;
+                                return (
+                                  <tr key={`${orphan.index}-${tx.id}`}>
+                                    <td className="py-2 px-3 font-mono tabular-nums text-slate-600 dark:text-slate-300 whitespace-nowrap">
+                                      {tx.date}
+                                    </td>
+                                    <td className="py-2 px-3">
+                                      <div className="font-bold text-slate-800 dark:text-slate-100">
+                                        {tx.description || tx.category}
+                                      </div>
+                                      <div className="text-[10px] text-slate-500">
+                                        {tx.category} · {tx.type}
+                                      </div>
+                                    </td>
+                                    <td className="py-2 px-3 font-mono text-[11px] text-rose-600 dark:text-rose-400">
+                                      {orphan.reason === 'missing_account_id' ? '(Kosong)' : tx.accountId}
+                                    </td>
+                                    <td className="py-2 px-3 font-mono tabular-nums text-right font-bold text-slate-900 dark:text-slate-100 whitespace-nowrap">
+                                      {formatterIDR.format(tx.amount)}
+                                    </td>
+                                    <td className="py-2 px-3">
+                                      {onUpdateTransactions && (
+                                        <div className="flex items-center justify-end gap-1.5">
+                                          {accounts.length > 0 && (
+                                            <>
+                                              <select
+                                                value={selectedAcc}
+                                                onChange={(e) =>
+                                                  setOrphanTargetAccounts((prev) => ({
+                                                    ...prev,
+                                                    [orphan.index]: e.target.value,
+                                                  }))
+                                                }
+                                                className="px-2 py-1 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-lg text-[11px] font-semibold text-slate-800 dark:text-slate-100 max-w-[140px]"
+                                              >
+                                                {accounts.map((acc) => (
+                                                  <option key={acc.id} value={acc.id}>
+                                                    {acc.name}
+                                                  </option>
+                                                ))}
+                                              </select>
+                                              <button
+                                                type="button"
+                                                onClick={() => handleReassignOrphan(orphan.index)}
+                                                className="px-2.5 py-1 bg-blue-600 hover:bg-blue-700 text-white text-[11px] font-bold rounded-lg transition cursor-pointer whitespace-nowrap"
+                                              >
+                                                Alihkan
+                                              </button>
+                                            </>
+                                          )}
+                                          <button
+                                            type="button"
+                                            onClick={() => handleDeleteOrphan(orphan.index)}
+                                            className="px-2.5 py-1 bg-rose-600 hover:bg-rose-700 text-white text-[11px] font-bold rounded-lg transition cursor-pointer whitespace-nowrap"
+                                          >
+                                            Hapus
+                                          </button>
+                                        </div>
+                                      )}
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Duplicate Groups (ID Duplicates + Same-Day Identical) */}
+                    {(ledgerAudit.duplicateIdGroups.length > 0 || ledgerAudit.sameDayDuplicateGroups.length > 0) && (
+                      <div className="space-y-2">
+                        <div className="text-[11px] font-extrabold text-amber-800 dark:text-amber-300">
+                          Potensi Data Ganda di Buku Besar (
+                          {ledgerAudit.duplicateIdGroups.length + ledgerAudit.sameDayDuplicateGroups.length} Kelompok)
+                        </div>
+                        <div className="divide-y divide-slate-100 dark:divide-slate-800 border border-slate-200 dark:border-slate-800 rounded-xl">
+                          {[...ledgerAudit.duplicateIdGroups, ...ledgerAudit.sameDayDuplicateGroups].map((grp) => {
+                            const sample = grp.items[0]?.transaction;
+                            return (
+                              <div
+                                key={grp.groupKey}
+                                className="p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
+                              >
+                                <div className="space-y-0.5 min-w-0">
+                                  <div className="font-bold text-slate-900 dark:text-slate-100 truncate">
+                                    {grp.kind === 'duplicate_id' ? 'ID Duplikat' : 'Entri Identik Hari Sama'} ·{' '}
+                                    {sample?.description || sample?.category}
+                                  </div>
+                                  <div className="text-[11px] text-slate-500 dark:text-slate-400 font-mono tabular-nums">
+                                    {sample?.date} · {grp.items.length}x tercatat ·{' '}
+                                    {formatterIDR.format(sample?.amount || 0)}
+                                  </div>
+                                </div>
+                                {onUpdateTransactions && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handleRemoveDuplicates(grp.duplicateIndices, grp.fingerprintLabel)
+                                    }
+                                    className="px-3 py-1.5 bg-rose-600 hover:bg-rose-700 text-white text-[11px] font-extrabold rounded-lg transition cursor-pointer shrink-0 whitespace-nowrap"
+                                  >
+                                    Hapus {grp.duplicateIndices.length} Salinan
+                                  </button>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
               {/* Account Balances Ledger Table */}
               <div className="space-y-3">
                 <h4 className="text-xs font-black uppercase tracking-wider text-slate-700 dark:text-slate-300 flex items-center justify-between">
@@ -1159,7 +1438,7 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
                   )}
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
                   <div className="p-3 bg-slate-800/60 rounded-xl border border-slate-700/60 space-y-1.5">
                     <div className="flex items-center justify-between">
                       <span className="font-bold text-slate-300">COA Duplikat:</span>
@@ -1198,6 +1477,41 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
                       </div>
                     ) : (
                       <p className="text-[11px] text-slate-400">Semua COA terhubung secara aktif.</p>
+                    )}
+                  </div>
+
+                  <div className="p-3 bg-slate-800/60 rounded-xl border border-slate-700/60 space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-slate-300">Duplikat Buku Besar:</span>
+                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-black uppercase ${
+                        scanResult.totalLedgerDuplicates > 0 ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30' : 'bg-emerald-500/20 text-emerald-300'
+                      }`}>
+                        {scanResult.totalLedgerDuplicates} Entri
+                      </span>
+                    </div>
+                    {scanResult.totalLedgerDuplicates > 0 ? (
+                      <div className="space-y-2">
+                        <p className="text-[11px] text-rose-200">
+                          {scanResult.ledgerDuplicateIdGroups.length} grup ID duplikat · {scanResult.ledgerSameDayDuplicateGroups.length} grup identik hari sama.
+                        </p>
+                        {onUpdateTransactions && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const allDupIndices = [
+                                ...scanResult.ledgerDuplicateIdGroups.flatMap((g) => g.duplicateIndices),
+                                ...scanResult.ledgerSameDayDuplicateGroups.flatMap((g) => g.duplicateIndices),
+                              ];
+                              handleRemoveDuplicates(allDupIndices, 'Pembersihan Duplikat Buku Besar (COA Scanner)');
+                            }}
+                            className="px-2.5 py-1 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-[10px] font-bold transition cursor-pointer"
+                          >
+                            Bersihkan Aman Saldo
+                          </button>
+                        )}
+                      </div>
+                    ) : (
+                      <p className="text-[11px] text-slate-400">Tidak ada ID ganda atau entri identik harian.</p>
                     )}
                   </div>
                 </div>

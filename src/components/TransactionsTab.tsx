@@ -7,7 +7,12 @@ import { PlusCircle, ArrowLeftRight, Trash2, Calendar, FileText, DollarSign, Arr
 import { getStoredCoaList, getAccountCoaMapping, AccountCOA } from '../coaUtils';
 import { DEFAULT_KPR_COA_MAPPING, resolveEffectiveKprCoaMapping, resolveTransactionCoaCodes } from '../utils/kprPresets';
 import { showToast } from '../utils/toast';
-import { getAccountCreditBill, isCreditAccount } from '../utils/accountingEngine';
+import {
+  applyAccountBalanceChange,
+  getAccountCreditBill,
+  getTransactionAccountDelta,
+  isCreditAccount,
+} from '../utils/accountingEngine';
 
 interface TransactionsTabProps {
   transactions: Transaction[];
@@ -1867,7 +1872,13 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
                             <div className="flex justify-between gap-2">
                               <span className="text-slate-500 font-semibold">Saldo {sourceAccObj.name}:</span>
                               <span className={`font-mono font-bold ${isInsufficientSource ? 'text-rose-600' : 'text-slate-800'}`}>
-                                {formatterIDR.format(sourceAccObj.currentBalance)} &rarr; {formatterIDR.format(sourceAccObj.currentBalance - parsedPayAmt)}
+                                {formatterIDR.format(sourceAccObj.currentBalance)} &rarr;{' '}
+                                {formatterIDR.format(
+                                  applyAccountBalanceChange(
+                                    sourceAccObj,
+                                    getTransactionAccountDelta({ type: 'expense', amount: parsedPayAmt })
+                                  ).currentBalance
+                                )}
                               </span>
                             </div>
                           )}

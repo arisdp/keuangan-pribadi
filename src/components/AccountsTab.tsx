@@ -3,6 +3,14 @@ import { Account, AccountType, Transaction } from '../types';
 import { FormattedNumberInput } from './FormattedNumberInput';
 import { Plus, Trash2, CreditCard, Wallet, Banknote, ShieldCheck, Info, Sparkles, Check, X, AlertCircle, Percent, DollarSign, FileText, Calendar, ArrowUpRight, ArrowDownLeft, RefreshCw, Layers, Building2, CheckCircle2 } from 'lucide-react';
 import { getAccountCoaMapping, synchronizeAccountsAndCOA, CoaSyncReport } from '../coaUtils';
+import {
+  calculateCreditPaylaterBills,
+  calculateTotalLiquidCash,
+  getAccountCreditBill,
+  getCreditAccounts,
+  getLiquidAccounts,
+  isCreditAccount,
+} from '../utils/accountingEngine';
 
 interface AccountsTabProps {
   accounts: Account[];
@@ -98,16 +106,16 @@ export const AccountsTab: React.FC<AccountsTabProps> = ({
     minimumFractionDigits: 0,
   });
 
-  // Calculate stats
-  const liquidAccounts = accounts.filter(a => a.type !== 'credit-card' && a.type !== 'paylater');
-  const creditCardAndPaylaterAccounts = accounts.filter(a => a.type === 'credit-card' || a.type === 'paylater');
+  // Calculate stats via centralized accounting engine
+  const liquidAccounts = getLiquidAccounts(accounts);
+  const creditCardAndPaylaterAccounts = getCreditAccounts(accounts);
 
-  const totalLiquidBalance = liquidAccounts.reduce((sum, a) => sum + a.currentBalance, 0);
+  const totalLiquidBalance = calculateTotalLiquidCash(accounts);
   const totalCreditLimit = creditCardAndPaylaterAccounts.reduce((sum, a) => sum + (a.creditLimit || 0), 0);
-  const totalCreditBill = creditCardAndPaylaterAccounts.reduce((sum, a) => sum + (a.usedLimit || 0), 0);
+  const totalCreditBill = calculateCreditPaylaterBills(accounts);
   const cashBalance = accounts.filter(a => a.type === 'cash').reduce((sum, a) => sum + a.currentBalance, 0);
 
-  const isSelectedCreditOrPaylater = type === 'credit-card' || type === 'paylater';
+  const isSelectedCreditOrPaylater = isCreditAccount({ type });
 
   // Filtered transactions for the selected account
   const selectedAccount = selectedAccountId ? accounts.find(acc => acc.id === selectedAccountId) : null;
@@ -191,7 +199,7 @@ export const AccountsTab: React.FC<AccountsTabProps> = ({
 
   const initiatePayment = (card: Account) => {
     setPayingId(card.id);
-    setPaymentAmount((card.usedLimit || 0).toString());
+    setPaymentAmount(getAccountCreditBill(card).toString());
     setPaymentDescription(`Pembayaran Tagihan ${card.name}`);
     
     // Pre-select first available liquid account
@@ -225,7 +233,7 @@ export const AccountsTab: React.FC<AccountsTabProps> = ({
       return;
     }
 
-    const usedLimitVal = card.usedLimit || 0;
+    const usedLimitVal = getAccountCreditBill(card);
     if (amountVal > usedLimitVal) {
       showConfirm(
         'Konfirmasi Pembayaran Lebih',
@@ -361,8 +369,9 @@ export const AccountsTab: React.FC<AccountsTabProps> = ({
                 icon = <CreditCard className="h-5 w-5 text-violet-400 animate-pulse" />;
               }
 
-              const isCreditOrPaylater = acc.type === 'credit-card' || acc.type === 'paylater';
-              const usedLimitPercent = isCreditOrPaylater && acc.creditLimit ? ((acc.usedLimit || 0) / acc.creditLimit) * 100 : 0;
+              const isCreditOrPaylater = isCreditAccount(acc);
+              const accountCreditBill = getAccountCreditBill(acc);
+              const usedLimitPercent = isCreditOrPaylater && acc.creditLimit ? (accountCreditBill / acc.creditLimit) * 100 : 0;
               const isSelected = selectedAccountId === acc.id;
 
               return (
@@ -458,7 +467,7 @@ export const AccountsTab: React.FC<AccountsTabProps> = ({
                           </div>
                           <div className="text-center">
                             <span className="block text-[8px] text-slate-500 uppercase tracking-widest font-bold">Hutang Terpakai</span>
-                            <span className="text-rose-300 font-mono text-xs block">{formatterIDR.format(acc.usedLimit || 0)}</span>
+                            <span className="text-rose-300 font-mono text-xs block">{formatterIDR.format(accountCreditBill)}</span>
                           </div>
                           <div className="text-right">
                             <span className="block text-[8px] text-slate-500 uppercase tracking-widest font-bold">Jatuh Tempo</span>
@@ -523,7 +532,7 @@ export const AccountsTab: React.FC<AccountsTabProps> = ({
                         <div className="flex items-end justify-end gap-1.5">
                           <button
                             type="button"
-                            onClick={(e) => { e.stopPropagation(); setPaymentAmount((acc.usedLimit || 0).toString()); }}
+                            onClick={(e) => { e.stopPropagation(); setPaymentAmount(accountCreditBill.toString()); }}
                             className="bg-slate-800 hover:bg-slate-700 text-slate-300 px-2 py-1 rounded text-[10px] font-semibold h-7"
                           >
                             Lunas
@@ -562,9 +571,9 @@ export const AccountsTab: React.FC<AccountsTabProps> = ({
                         {isCreditOrPaylater && onTransferFunds && (
                           <button
                             onClick={(e) => { e.stopPropagation(); initiatePayment(acc); }}
-                            disabled={!acc.usedLimit || acc.usedLimit <= 0}
+                            disabled={accountCreditBill <= 0}
                             className={`text-[10px] font-bold py-1 px-2.5 rounded-lg transition shrink-0 ${
-                              acc.usedLimit && acc.usedLimit > 0
+                              accountCreditBill > 0
                                 ? 'bg-rose-600 hover:bg-rose-500 text-white shadow-sm'
                                 : 'bg-slate-800 text-slate-500 cursor-not-allowed'
                             }`}

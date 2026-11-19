@@ -1,5 +1,6 @@
 import {
   Account,
+  AccountType,
   Debt,
   EmergencyFundTransaction,
   InvestmentAsset,
@@ -119,12 +120,13 @@ export function getTransactionAccountDelta(
   tx: Pick<Transaction, 'type' | 'amount' | 'isAdjustment'>
 ): number {
   if (tx.isAdjustment) return 0;
-  const amount = Number(tx.amount) || 0;
+  const amount = Math.abs(Number(tx.amount) || 0);
   return tx.type === 'income' ? amount : -amount;
 }
 
 export function applyAccountBalanceChange(acc: Account, delta: number): Account {
-  const nextBalance = (acc.currentBalance || 0) + delta;
+  const safeDelta = Number.isFinite(delta) ? delta : 0;
+  const nextBalance = (acc.currentBalance || 0) + safeDelta;
   if (!isCreditAccount(acc)) {
     return {
       ...acc,
@@ -137,6 +139,269 @@ export function applyAccountBalanceChange(acc: Account, delta: number): Account 
     ...acc,
     currentBalance: nextBalance,
     usedLimit: Math.max(0, limit - nextBalance),
+  };
+}
+
+/**
+ * Menetapkan saldo absolut rekening (mis. saat rekonsiliasi GL) sekaligus
+ * menyinkronkan usedLimit kartu kredit/PayLater secara terpusat.
+ */
+export function setAccountTargetBalance(acc: Account, targetBalance: number): Account {
+  const safeTarget = Number.isFinite(targetBalance) ? targetBalance : 0;
+  const delta = safeTarget - (acc.currentBalance || 0);
+  return applyAccountBalanceChange(acc, delta);
+}
+
+/**
+ * Memperbarui saldo awal / batas limit serta nama rekening secara seragam
+ * melalui mesin perubahan saldo terpusat.
+ */
+export function updateAccountMetadataAndStartingBalance(
+  acc: Account,
+  newStartingBalance: number,
+  newName?: string
+): Account {
+  const safeStart = Number.isFinite(newStartingBalance) ? newStartingBalance : 0;
+  const diff = safeStart - (acc.startingBalance || 0);
+  const updatedBase: Account = {
+    ...acc,
+    name: newName !== undefined ? newName : acc.name,
+    startingBalance: safeStart,
+    creditLimit: isCreditAccount(acc) ? safeStart : acc.creditLimit,
+  };
+  return applyAccountBalanceChange(updatedBase, diff);
+}
+
+/**
+ * Menerapkan atau membalikkan kumpulan transaksi ke daftar rekening
+ * menggunakan getTransactionAccountDelta dan applyAccountBalanceChange.
+ */
+export function applyTransactionsToAccounts(
+  accounts: Account[],
+  txs: Pick<Transaction, 'accountId' | 'type' | 'amount' | 'isAdjustment'>[],
+  mode: 'apply' | 'revert' = 'apply'
+): Account[] {
+  if (!txs || txs.length === 0) return accounts;
+  const sign = mode === 'revert' ? -1 : 1;
+  const deltaByAccount = new Map<string, number>();
+
+  txs.forEach((tx) => {
+    if (!tx || !tx.accountId) return;
+    const delta = getTransactionAccountDelta(tx) * sign;
+    if (delta === 0) return;
+    deltaByAccount.set(tx.accountId, (deltaByAccount.get(tx.accountId) || 0) + delta);
+  });
+
+  if (deltaByAccount.size === 0) return accounts;
+
+  return accounts.map((acc) => {
+    const netDelta = deltaByAccount.get(acc.id);
+    if (!netDelta) return acc;
+    return applyAccountBalanceChange(acc, netDelta);
+  });
+}
+
+/**
+ * Menerapkan atau membalikkan pembayaran tagihan rekening kredit / PayLater
+ * melalui getTransactionAccountDelta dan applyAccountBalanceChange secara seragam.
+ */
+export function applyCreditBillPayment(
+  acc: Account,
+  paymentAmount: number,
+  mode: 'pay' | 'revert' = 'pay'
+): Account {
+  const delta = getTransactionAccountDelta({
+    type: mode === 'pay' ? 'income' : 'expense',
+    amount: paymentAmount,
+  });
+  return applyAccountBalanceChange(acc, delta);
+}
+
+/**
+ * Membentuk objek rekening baru dengan saldo awal, limit kredit, dan usedLimit
+ * yang konsisten melalui mesin perubahan saldo terpusat.
+ */
+export function createAccountRecord(params: {
+  id: string;
+  name: string;
+  type: AccountType;
+  startingBalance: number;
+  accountNumber?: string;
+  initialDebt?: number;
+  dueDay?: number;
+  interestRate?: number;
+  minPayment?: number;
+}): Account {
+  const safeStart = Math.max(0, Number(params.startingBalance) || 0);
+  const creditAccount = isCreditAccount({ type: params.type });
+  const safeInitialDebt = creditAccount ? Math.max(0, Number(params.initialDebt) || 0) : undefined;
+
+  const baseAccount: Account = {
+    id: params.id,
+    name: params.name,
+    type: params.type,
+    startingBalance: safeStart,
+    currentBalance: safeStart,
+    accountNumber: params.accountNumber,
+    creditLimit: creditAccount ? safeStart : undefined,
+    usedLimit: creditAccount ? 0 : undefined,
+    initialDebt: safeInitialDebt,
+    dueDay: creditAccount ? params.dueDay : undefined,
+    interestRate: creditAccount ? params.interestRate : undefined,
+    minPayment: creditAccount ? params.minPayment : undefined,
+  };
+
+  if (creditAccount && safeInitialDebt && safeInitialDebt > 0) {
+    const debtDelta = getTransactionAccountDelta({ type: 'expense', amount: safeInitialDebt });
+    return applyAccountBalanceChange(baseAccount, debtDelta);
+  }
+
+  return baseAccount;
+}
+
+export interface OrphanTransactionIssue {
+  transaction: Transaction;
+  index: number;
+  reason: 'missing_account_id' | 'account_not_found';
+}
+
+export interface DuplicateTransactionGroup {
+  groupKey: string;
+  kind: 'duplicate_id' | 'same_day_identical';
+  keepIndex: number;
+  duplicateIndices: number[];
+  items: Array<{ transaction: Transaction; index: number }>;
+  fingerprintLabel: string;
+}
+
+export interface LedgerIntegrityAuditResult {
+  orphanTransactions: OrphanTransactionIssue[];
+  duplicateIdGroups: DuplicateTransactionGroup[];
+  sameDayDuplicateGroups: DuplicateTransactionGroup[];
+  totalOrphans: number;
+  totalDuplicateIdRows: number;
+  totalSameDayDuplicateRows: number;
+  totalIssues: number;
+  isLedgerClean: boolean;
+}
+
+/**
+ * Memeriksa integritas referensi akun dan potensi data ganda di buku besar:
+ * 1) Transaksi non-penyesuaian tanpa accountId atau accountId tidak terdaftar di Master Akun.
+ * 2) ID transaksi yang muncul lebih dari satu kali.
+ * 3) Entri identik di hari yang sama (tanggal, akun, tipe, kategori, nominal, dan deskripsi sama).
+ */
+export function auditLedgerIntegrity(
+  transactions: Transaction[],
+  accounts: Account[]
+): LedgerIntegrityAuditResult {
+  const safeTxs = Array.isArray(transactions) ? transactions : [];
+  const safeAccounts = Array.isArray(accounts) ? accounts : [];
+  const validAccountIds = new Set(safeAccounts.filter((a) => a && a.id).map((a) => a.id));
+
+  const orphanTransactions: OrphanTransactionIssue[] = [];
+  const byId = new Map<string, Array<{ transaction: Transaction; index: number }>>();
+  const bySameDaySignature = new Map<string, Array<{ transaction: Transaction; index: number }>>();
+
+  safeTxs.forEach((tx, index) => {
+    if (!tx) return;
+
+    // 1. Cek referensi akun valid untuk seluruh transaksi selain jurnal penyesuaian non-kas
+    if (!tx.isAdjustment) {
+      const trimmedAccId = (tx.accountId || '').trim();
+      if (!trimmedAccId) {
+        orphanTransactions.push({
+          transaction: tx,
+          index,
+          reason: 'missing_account_id',
+        });
+      } else if (!validAccountIds.has(trimmedAccId)) {
+        orphanTransactions.push({
+          transaction: tx,
+          index,
+          reason: 'account_not_found',
+        });
+      }
+    }
+
+    // 2. Kumpulkan berdasarkan ID transaksi
+    const txId = (tx.id || '').trim();
+    if (txId) {
+      const arr = byId.get(txId) || [];
+      arr.push({ transaction: tx, index });
+      byId.set(txId, arr);
+    }
+
+    // 3. Kumpulkan berdasarkan sidik jari entri identik pada hari yang sama (normalisasi YYYY-MM-DD)
+    const rawDate = (tx.date || '').trim();
+    const datePart = /^\d{4}-\d{2}-\d{2}/.test(rawDate) ? rawDate.slice(0, 10) : rawDate;
+    const accPart = (tx.accountId || '').trim();
+    const typePart = tx.type || 'expense';
+    const catPart = (tx.category || '').trim().toLowerCase();
+    const amtPart = Math.round((Number(tx.amount) || 0) * 100);
+    const descPart = (tx.description || '').trim().toLowerCase();
+    const adjPart = tx.isAdjustment ? 'adj' : 'std';
+    const sig = `${datePart}|${accPart}|${typePart}|${catPart}|${amtPart}|${descPart}|${adjPart}`;
+    const sigArr = bySameDaySignature.get(sig) || [];
+    sigArr.push({ transaction: tx, index });
+    bySameDaySignature.set(sig, sigArr);
+  });
+
+  const duplicateIdGroups: DuplicateTransactionGroup[] = [];
+  const duplicateIdRowIndices = new Set<number>();
+
+  byId.forEach((items, id) => {
+    if (items.length > 1) {
+      const keepIndex = items[0].index;
+      const duplicateIndices = items.slice(1).map((it) => it.index);
+      duplicateIndices.forEach((idx) => duplicateIdRowIndices.add(idx));
+      const sample = items[0].transaction;
+      duplicateIdGroups.push({
+        groupKey: `dup-id-${id}`,
+        kind: 'duplicate_id',
+        keepIndex,
+        duplicateIndices,
+        items,
+        fingerprintLabel: `ID "${id}" · ${sample.date} · ${sample.description || sample.category}`,
+      });
+    }
+  });
+
+  const sameDayDuplicateGroups: DuplicateTransactionGroup[] = [];
+  bySameDaySignature.forEach((items, sig) => {
+    if (items.length > 1) {
+      // Hindari penghitungan ganda apabila salinan identik sudah ditandai sebagai ID duplikat
+      const nonIdDupItems = items.filter((it) => !duplicateIdRowIndices.has(it.index));
+      if (nonIdDupItems.length > 1) {
+        const keepIndex = nonIdDupItems[0].index;
+        const duplicateIndices = nonIdDupItems.slice(1).map((it) => it.index);
+        const sample = nonIdDupItems[0].transaction;
+        sameDayDuplicateGroups.push({
+          groupKey: `dup-sameday-${sig}`,
+          kind: 'same_day_identical',
+          keepIndex,
+          duplicateIndices,
+          items: nonIdDupItems,
+          fingerprintLabel: `${sample.date} · ${sample.category} · ${sample.description || sample.category}`,
+        });
+      }
+    }
+  });
+
+  const totalOrphans = orphanTransactions.length;
+  const totalDuplicateIdRows = duplicateIdGroups.reduce((s, g) => s + g.duplicateIndices.length, 0);
+  const totalSameDayDuplicateRows = sameDayDuplicateGroups.reduce((s, g) => s + g.duplicateIndices.length, 0);
+  const totalIssues = totalOrphans + totalDuplicateIdRows + totalSameDayDuplicateRows;
+
+  return {
+    orphanTransactions,
+    duplicateIdGroups,
+    sameDayDuplicateGroups,
+    totalOrphans,
+    totalDuplicateIdRows,
+    totalSameDayDuplicateRows,
+    totalIssues,
+    isLedgerClean: totalIssues === 0,
   };
 }
 
@@ -176,6 +441,90 @@ export function calculateAccountGLBalance(
     recordedBalance,
     difference,
     txCount,
+  };
+}
+
+/**
+ * Mengalihkan transaksi yatim ke rekening valid sekaligus menyinkronkan saldo rekening tujuan
+ * menggunakan getTransactionAccountDelta dan applyAccountBalanceChange.
+ */
+export function reassignOrphanTransactionWithBalanceSync(
+  transactions: Transaction[],
+  accounts: Account[],
+  txIndex: number,
+  targetAccountId: string
+): { updatedTransactions: Transaction[]; updatedAccounts: Account[]; changed: boolean } {
+  const safeTxs = Array.isArray(transactions) ? transactions : [];
+  const safeAccounts = Array.isArray(accounts) ? accounts : [];
+  const targetTx = safeTxs[txIndex];
+  const targetAcc = safeAccounts.find((a) => a.id === targetAccountId);
+
+  if (!targetTx || !targetAcc || targetTx.accountId === targetAccountId) {
+    return { updatedTransactions: safeTxs, updatedAccounts: safeAccounts, changed: false };
+  }
+
+  const updatedTransactions = safeTxs.map((tx, idx) =>
+    idx === txIndex ? { ...tx, accountId: targetAccountId } : tx
+  );
+
+  const delta = getTransactionAccountDelta(targetTx);
+  if (delta === 0) {
+    return { updatedTransactions, updatedAccounts: safeAccounts, changed: true };
+  }
+
+  const updatedAccounts = safeAccounts.map((acc) => {
+    if (acc.id !== targetAccountId) return acc;
+    return applyAccountBalanceChange(acc, delta);
+  });
+
+  return { updatedTransactions, updatedAccounts, changed: true };
+}
+
+/**
+ * Menghapus baris transaksi ganda pada indeks terpilih sekaligus membalikkan dampak saldonya
+ * secara aman hanya jika saldo rekening tercatat masih memuat dampak entri ganda tersebut.
+ */
+export function removeDuplicateTransactionsWithBalanceSync(
+  transactions: Transaction[],
+  accounts: Account[],
+  indicesToRemove: number[]
+): { updatedTransactions: Transaction[]; updatedAccounts: Account[]; removedCount: number } {
+  const safeTxs = Array.isArray(transactions) ? transactions : [];
+  const safeAccounts = Array.isArray(accounts) ? accounts : [];
+  const removeSet = new Set(indicesToRemove.filter((i) => i >= 0 && i < safeTxs.length));
+
+  if (removeSet.size === 0) {
+    return { updatedTransactions: safeTxs, updatedAccounts: safeAccounts, removedCount: 0 };
+  }
+
+  const removedTxs = safeTxs.filter((_, idx) => removeSet.has(idx));
+  const updatedTransactions = safeTxs.filter((_, idx) => !removeSet.has(idx));
+
+  const affectedAccountIds = new Set(
+    removedTxs
+      .filter((t) => t && !t.isAdjustment && t.accountId)
+      .map((t) => t.accountId)
+  );
+
+  const updatedAccounts = safeAccounts.map((acc) => {
+    if (!affectedAccountIds.has(acc.id)) return acc;
+    const glBefore = calculateAccountGLBalance(acc, safeTxs);
+    const glAfter = calculateAccountGLBalance(acc, updatedTransactions);
+
+    // Jika saldo tercatat sebelumnya sudah mengecualikan baris duplikat, jangan kurangi lagi
+    if (Math.abs((acc.currentBalance || 0) - glAfter.glCalculatedBalance) < 1) {
+      return acc;
+    }
+
+    const revertDelta = glAfter.glCalculatedBalance - glBefore.glCalculatedBalance;
+    if (revertDelta === 0) return acc;
+    return applyAccountBalanceChange(acc, revertDelta);
+  });
+
+  return {
+    updatedTransactions,
+    updatedAccounts,
+    removedCount: removedTxs.length,
   };
 }
 

@@ -29,7 +29,13 @@ import {
   FileCheck2,
 } from 'lucide-react';
 
-import { calculateAccountGLBalance, isCreditAccount } from '../utils/accountingEngine';
+import {
+  auditLedgerIntegrity,
+  calculateAccountGLBalance,
+  reassignOrphanTransactionWithBalanceSync,
+  removeDuplicateTransactionsWithBalanceSync,
+  setAccountTargetBalance,
+} from '../utils/accountingEngine';
 import { formatterIDR } from '../utils/formatters';
 
 export type DiscrepancySeverity = 'critical' | 'warning' | 'info';
@@ -48,7 +54,13 @@ export interface DiscrepancyItem {
   actualValue?: string | number;
   variance?: number;
   autoFixable?: boolean;
-  fixType?: 'reconcile-account' | 'remove-orphan-tx' | 'add-missing-cat' | 'reconcile-investment' | 'link-coa';
+  fixType?:
+    | 'reconcile-account'
+    | 'remove-orphan-tx'
+    | 'remove-duplicate-tx'
+    | 'add-missing-cat'
+    | 'reconcile-investment'
+    | 'link-coa';
   payload?: any;
 }
 
@@ -88,6 +100,7 @@ export const IntegrityReport: React.FC<IntegrityReportProps> = ({
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [isScanning, setIsScanning] = useState<boolean>(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [orphanReassignTargets, setOrphanReassignTargets] = useState<Record<number, string>>({});
 
   const showToast = useCallback((msg: string) => {
     setToastMessage(msg);
@@ -187,28 +200,71 @@ export const IntegrityReport: React.FC<IntegrityReportProps> = ({
       }
     });
 
-    // 2. TRANSACTION DATASET CHECKS
+    // 2. TRANSACTION DATASET CHECKS (Orphan Account References & Duplicate Ledger Entries via accountingEngine)
+    const ledgerAudit = auditLedgerIntegrity(safeTransactions, safeAccounts);
+    ledgerAudit.orphanTransactions.forEach((orphan) => {
+      const tx = orphan.transaction;
+      list.push({
+        id: `disc-tx-orphan-${orphan.index}-${tx.id || 'noid'}`,
+        category: 'transactions',
+        severity: 'critical',
+        title:
+          orphan.reason === 'missing_account_id'
+            ? 'Transaksi Tanpa Referensi Akun'
+            : 'Transaksi Yatim - Akun Tidak Ditemukan',
+        description:
+          orphan.reason === 'missing_account_id'
+            ? `Transaksi "${tx.description || tx.category || 'Tanpa Keterangan'}" (${tx.date}, ${formatterIDR.format(tx.amount)}) tidak memiliki ID rekening yang valid.`
+            : `Transaksi "${tx.description || tx.category || 'Tanpa Keterangan'}" (${tx.date}, ${formatterIDR.format(tx.amount)}) mereferensikan Account ID "${tx.accountId}" yang tidak ada di sistem.`,
+        affectedRecordName: tx.description || tx.category || tx.id || 'Transaksi Yatim',
+        affectedRecordId: tx.id,
+        expectedValue: 'Account ID Valid',
+        actualValue: tx.accountId || '(Kosong)',
+        autoFixable: true,
+        fixType: 'remove-orphan-tx',
+        payload: { transactionId: tx.id, txIndex: orphan.index, reason: orphan.reason },
+      });
+    });
+
+    ledgerAudit.duplicateIdGroups.forEach((grp) => {
+      const sample = grp.items[0]?.transaction;
+      list.push({
+        id: `disc-tx-dup-id-${grp.groupKey}`,
+        category: 'transactions',
+        severity: 'critical',
+        title: `ID Transaksi Duplikat di Buku Besar (${grp.items.length}x)`,
+        description: `${grp.fingerprintLabel} · Nominal ${formatterIDR.format(sample?.amount || 0)} muncul ${grp.items.length} kali dengan ID yang sama.`,
+        affectedRecordName: sample?.description || sample?.category || sample?.id || 'ID Duplikat',
+        affectedRecordId: sample?.id,
+        expectedValue: '1 Entri Unik',
+        actualValue: `${grp.items.length} Entri Identik`,
+        autoFixable: true,
+        fixType: 'remove-duplicate-tx',
+        payload: { duplicateIndices: grp.duplicateIndices, kind: grp.kind },
+      });
+    });
+
+    ledgerAudit.sameDayDuplicateGroups.forEach((grp) => {
+      const sample = grp.items[0]?.transaction;
+      list.push({
+        id: `disc-tx-dup-sameday-${grp.groupKey}`,
+        category: 'transactions',
+        severity: 'warning',
+        title: `Potensi Entri Identik di Hari Sama (${grp.items.length}x)`,
+        description: `${grp.fingerprintLabel} · Nominal ${formatterIDR.format(sample?.amount || 0)} tercatat ${grp.items.length} kali pada tanggal yang sama.`,
+        affectedRecordName: sample?.description || sample?.category || sample?.id || 'Entri Ganda',
+        affectedRecordId: sample?.id,
+        expectedValue: '1 Entri per Kejadian',
+        actualValue: `${grp.items.length} Entri Identik`,
+        autoFixable: true,
+        fixType: 'remove-duplicate-tx',
+        payload: { duplicateIndices: grp.duplicateIndices, kind: grp.kind },
+      });
+    });
+
     const missingCategoriesSeen = new Set<string>();
     safeTransactions.forEach((tx) => {
       if (!tx) return;
-
-      // Check Orphan Transaction (skip non-cash adjusting entries)
-      if (!tx.isAdjustment && tx.accountId && !accountMap.has(tx.accountId)) {
-        list.push({
-          id: `disc-tx-orphan-${tx.id}`,
-          category: 'transactions',
-          severity: 'critical',
-          title: `Transaksi Yatim - Akun Tidak Ditemukan`,
-          description: `Transaksi "${tx.description || tx.category || 'Tanpa Keterangan'}" (${tx.date}) mereferensikan Account ID "${tx.accountId}" yang tidak ada di sistem.`,
-          affectedRecordName: tx.description || tx.category || tx.id,
-          affectedRecordId: tx.id,
-          expectedValue: 'Account ID Valid',
-          actualValue: tx.accountId,
-          autoFixable: true,
-          fixType: 'remove-orphan-tx',
-          payload: { transactionId: tx.id },
-        });
-      }
 
       // Check Unmapped Category
       const catName = (tx.category || '').trim();
@@ -401,31 +457,67 @@ export const IntegrityReport: React.FC<IntegrityReportProps> = ({
     };
   }, [discrepancies, accounts.length, transactions.length, investments.length, debts.length]);
 
+  // Single Orphan Reassignment Handler
+  const handleReassignOrphanTx = (item: DiscrepancyItem) => {
+    const txIndex = item.payload?.txIndex;
+    if (typeof txIndex !== 'number' || !onUpdateTransactions) return;
+    const defaultTarget =
+      accounts.find((a) => a.type === 'bank' || a.type === 'cash' || a.type === 'e-wallet')?.id ||
+      accounts[0]?.id ||
+      '';
+    const targetAccId = orphanReassignTargets[txIndex] || defaultTarget;
+    if (!targetAccId) return;
+
+    const { updatedTransactions, updatedAccounts, changed } = reassignOrphanTransactionWithBalanceSync(
+      transactions,
+      accounts,
+      txIndex,
+      targetAccId
+    );
+    if (!changed) return;
+
+    onUpdateTransactions(updatedTransactions);
+    if (onUpdateAccounts) {
+      onUpdateAccounts(updatedAccounts);
+    }
+    const targetAccName = accounts.find((a) => a.id === targetAccId)?.name || targetAccId;
+    showToast(`Transaksi "${item.affectedRecordName}" dialihkan ke rekening "${targetAccName}" dan saldo disinkronkan.`);
+  };
+
   // Single Discrepancy Auto-Fix Handler
   const handleFixSingleDiscrepancy = (item: DiscrepancyItem) => {
     if (!item.autoFixable || !item.fixType) return;
 
     if (item.fixType === 'reconcile-account' && item.payload?.accountId && onUpdateAccounts) {
       const { accountId, targetBalance } = item.payload;
-      const updated = accounts.map((acc) => {
-        if (acc.id !== accountId) return acc;
-        if (isCreditAccount(acc)) {
-          const limit = acc.creditLimit ?? acc.startingBalance ?? 0;
-          return {
-            ...acc,
-            currentBalance: targetBalance,
-            usedLimit: Math.max(0, limit - targetBalance),
-          };
-        }
-        return { ...acc, currentBalance: targetBalance };
-      });
+      const updated = accounts.map((acc) =>
+        acc.id === accountId ? setAccountTargetBalance(acc, targetBalance) : acc
+      );
       onUpdateAccounts(updated);
       showToast(`Berhasil merekonsiliasi saldo akun "${item.affectedRecordName}" ke ${formatterIDR.format(targetBalance)}!`);
-    } else if (item.fixType === 'remove-orphan-tx' && item.payload?.transactionId && onUpdateTransactions) {
-      const { transactionId } = item.payload;
-      const updated = transactions.filter((t) => t.id !== transactionId);
+    } else if (item.fixType === 'remove-orphan-tx' && onUpdateTransactions) {
+      const { txIndex, transactionId } = item.payload || {};
+      const updated =
+        typeof txIndex === 'number'
+          ? transactions.filter((_, idx) => idx !== txIndex)
+          : transactions.filter((t) => t.id !== transactionId);
       onUpdateTransactions(updated);
       showToast(`Berhasil menghapus transaksi yatim "${item.affectedRecordName}"!`);
+    } else if (
+      item.fixType === 'remove-duplicate-tx' &&
+      Array.isArray(item.payload?.duplicateIndices) &&
+      onUpdateTransactions
+    ) {
+      const { updatedTransactions, updatedAccounts, removedCount } = removeDuplicateTransactionsWithBalanceSync(
+        transactions,
+        accounts,
+        item.payload.duplicateIndices
+      );
+      onUpdateTransactions(updatedTransactions);
+      if (onUpdateAccounts) {
+        onUpdateAccounts(updatedAccounts);
+      }
+      showToast(`Berhasil menghapus ${removedCount} salinan duplikat dan menyinkronkan saldo rekening.`);
     } else if (item.fixType === 'add-missing-cat' && item.payload?.categoryName && onHarmonizeCategories) {
       onHarmonizeCategories([item.payload.categoryName]);
       showToast(`Berhasil menambahkan kategori "${item.payload.categoryName}" ke Master Category Hierarchy!`);
@@ -465,25 +557,37 @@ export const IntegrityReport: React.FC<IntegrityReportProps> = ({
     let updatedTransactions = [...transactions];
     let updatedInvestments = [...investments];
     const missingCatsToAdd: string[] = [];
+    const duplicateIndicesToRemove: number[] = [];
+    const orphanIndicesToRemove: number[] = [];
 
     const currentCoasList = getStoredCoaList();
 
     fixableItems.forEach((item) => {
+      if (item.fixType === 'remove-duplicate-tx' && Array.isArray(item.payload?.duplicateIndices)) {
+        duplicateIndicesToRemove.push(...item.payload.duplicateIndices);
+      } else if (item.fixType === 'remove-orphan-tx' && typeof item.payload?.txIndex === 'number') {
+        orphanIndicesToRemove.push(item.payload.txIndex);
+      }
+    });
+
+    const allRemovedTxIndices = Array.from(new Set([...duplicateIndicesToRemove, ...orphanIndicesToRemove]));
+    if (allRemovedTxIndices.length > 0) {
+      const dedupRes = removeDuplicateTransactionsWithBalanceSync(
+        updatedTransactions,
+        updatedAccounts,
+        allRemovedTxIndices
+      );
+      updatedTransactions = dedupRes.updatedTransactions;
+      updatedAccounts = dedupRes.updatedAccounts;
+    }
+
+    fixableItems.forEach((item) => {
       if (item.fixType === 'reconcile-account' && item.payload?.accountId) {
-        updatedAccounts = updatedAccounts.map((acc) => {
-          if (acc.id !== item.payload.accountId) return acc;
-          if (isCreditAccount(acc)) {
-            const limit = acc.creditLimit ?? acc.startingBalance ?? 0;
-            return {
-              ...acc,
-              currentBalance: item.payload.targetBalance,
-              usedLimit: Math.max(0, limit - item.payload.targetBalance),
-            };
-          }
-          return { ...acc, currentBalance: item.payload.targetBalance };
-        });
-      } else if (item.fixType === 'remove-orphan-tx' && item.payload?.transactionId) {
-        updatedTransactions = updatedTransactions.filter((t) => t.id !== item.payload.transactionId);
+        updatedAccounts = updatedAccounts.map((acc) =>
+          acc.id === item.payload.accountId
+            ? setAccountTargetBalance(acc, item.payload.targetBalance)
+            : acc
+        );
       } else if (item.fixType === 'add-missing-cat' && item.payload?.categoryName) {
         missingCatsToAdd.push(item.payload.categoryName);
       } else if (item.fixType === 'reconcile-investment' && item.payload?.investmentId) {
@@ -855,15 +959,59 @@ export const IntegrityReport: React.FC<IntegrityReportProps> = ({
               </div>
 
               {/* Action Buttons */}
-              <div className="flex items-center gap-2 shrink-0 self-end md:self-center">
+              <div className="flex flex-wrap items-center gap-2 shrink-0 self-end md:self-center">
+                {item.fixType === 'remove-orphan-tx' &&
+                  typeof item.payload?.txIndex === 'number' &&
+                  accounts.length > 0 &&
+                  onUpdateTransactions && (
+                    <>
+                      <select
+                        value={
+                          orphanReassignTargets[item.payload.txIndex] ||
+                          accounts.find((a) => a.type === 'bank' || a.type === 'cash' || a.type === 'e-wallet')?.id ||
+                          accounts[0]?.id ||
+                          ''
+                        }
+                        onChange={(e) => {
+                          const txIdx = item.payload.txIndex as number;
+                          const val = e.target.value;
+                          setOrphanReassignTargets((prev) => ({ ...prev, [txIdx]: val }));
+                        }}
+                        className="px-2.5 py-1.5 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl text-xs font-semibold text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      >
+                        {accounts.map((acc) => (
+                          <option key={acc.id} value={acc.id}>
+                            {acc.name}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        onClick={() => handleReassignOrphanTx(item)}
+                        className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-extrabold rounded-xl shadow-xs transition cursor-pointer whitespace-nowrap"
+                      >
+                        Alihkan Akun
+                      </button>
+                    </>
+                  )}
                 {item.autoFixable && (
                   <button
                     type="button"
                     onClick={() => handleFixSingleDiscrepancy(item)}
-                    className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-extrabold rounded-xl shadow-xs transition cursor-pointer flex items-center gap-1.5"
+                    className={`px-3.5 py-1.5 text-white text-xs font-extrabold rounded-xl shadow-xs transition cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
+                      item.fixType === 'remove-orphan-tx' || item.fixType === 'remove-duplicate-tx'
+                        ? 'bg-rose-600 hover:bg-rose-700'
+                        : 'bg-emerald-600 hover:bg-emerald-500'
+                    }`}
                   >
                     <Wand2 className="h-3.5 w-3.5" />
-                    <span>Auto-Fix</span>
+                    <span>
+                      {item.fixType === 'remove-orphan-tx'
+                        ? 'Hapus'
+                        : item.fixType === 'remove-duplicate-tx'
+                        ? 'Hapus Salinan'
+                        : 'Auto-Fix'}
+                    </span>
                   </button>
                 )}
               </div>

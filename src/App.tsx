@@ -7,11 +7,15 @@ import { showToast } from './utils/toast';
 import { formatCurrencyIDR } from './utils/formatters';
 import {
   applyAccountBalanceChange,
+  applyCreditBillPayment,
+  applyTransactionsToAccounts,
   calculateTotalEmergencyFund,
   calculateTotalLiquidCash,
+  createAccountRecord,
   getAccountCreditBill,
   getLiquidAccounts,
   getTransactionAccountDelta,
+  updateAccountMetadataAndStartingBalance,
 } from './utils/accountingEngine';
 import { secureStorage } from './utils/secureStorage';
 import { useState, useEffect, useRef } from 'react';
@@ -449,18 +453,22 @@ export default function App() {
   const [isResettingData, setIsResettingData] = useState<boolean>(false);
   const [showBackupModal, setShowBackupModal] = useState<boolean>(false);
   const [showIntegrityModal, setShowIntegrityModal] = useState<boolean>(false);
+  const startupIntegrityCheckedUserRef = useRef<string | null>(null);
 
   // --- AUTOMATIC DATA INTEGRITY VALIDATION ON APPLICATION LOAD ---
   useEffect(() => {
-    if (!currentUser || accounts.length === 0) return;
-    const coaList = getStoredCoaList();
-    const result = validateMasterIntegrityOnLoad(accounts, coaList);
+    if (!currentUser || (accounts.length === 0 && transactions.length === 0)) return;
+    if (startupIntegrityCheckedUserRef.current === currentUser.username) return;
+    startupIntegrityCheckedUserRef.current = currentUser.username;
 
-    // If orphaned accounts or unlinked COA anomalies exist, prompt user directly by opening the Integrity Modal
+    const coaList = getStoredCoaList();
+    const result = validateMasterIntegrityOnLoad(accounts, coaList, transactions);
+
+    // If orphaned accounts, unlinked COAs, orphaned transactions, or duplicate ledger entries exist, prompt user
     if (!result.isValid || result.totalIssuesCount > 0) {
       setShowIntegrityModal(true);
     }
-  }, [currentUser, accounts]);
+  }, [currentUser, accounts, transactions]);
 
   const handleRestoreData = (restoredData: any) => {
     if (!currentUser) return;
@@ -818,7 +826,7 @@ export default function App() {
           });
           return false;
         }
-        const currentDebtBal = targetDebtAcc.usedLimit || 0;
+        const currentDebtBal = getAccountCreditBill(targetDebtAcc);
         if (newTx.amount > currentDebtBal) {
           showToast({
             type: 'warning',
@@ -958,7 +966,7 @@ export default function App() {
         setAccounts((prevAccounts) =>
           prevAccounts.map((acc) => {
             if (acc.id === targetAccId) {
-              return applyAccountBalanceChange(acc, tx.amount);
+              return applyCreditBillPayment(acc, tx.amount, 'pay');
             }
             return acc;
           })
@@ -1192,7 +1200,7 @@ export default function App() {
         setAccounts((prevAccounts) =>
           prevAccounts.map((acc) => {
             if (acc.id === targetAccId) {
-              return applyAccountBalanceChange(acc, -targetTx.amount);
+              return applyCreditBillPayment(acc, targetTx.amount, 'revert');
             }
             return acc;
           })
@@ -1333,17 +1341,7 @@ export default function App() {
 
     setTransactions((prev) => [outTx, inTx, ...prev]);
 
-    setAccounts((prevAccounts) =>
-      prevAccounts.map((acc) => {
-        if (acc.id === fromAccountId) {
-          return applyAccountBalanceChange(acc, -amount);
-        }
-        if (acc.id === toAccountId) {
-          return applyAccountBalanceChange(acc, amount);
-        }
-        return acc;
-      })
-    );
+    setAccounts((prevAccounts) => applyTransactionsToAccounts(prevAccounts, [outTx, inTx], 'apply'));
   };
 
   // Handlers for Recurring Transactions
@@ -1419,25 +1417,14 @@ export default function App() {
     );
   };
 
-  // Update Account details
+  // Update Account details via centralized accounting engine
   const handleUpdateAccountBalance = (accountId: string, newStartingBalance: number, newName?: string) => {
     setAccounts((prev) =>
-      prev.map((acc) => {
-        if (acc.id === accountId) {
-          const isCreditOrPaylater = acc.type === 'credit-card' || acc.type === 'paylater';
-          const diff = newStartingBalance - acc.startingBalance;
-          const nextBalance = acc.currentBalance + diff;
-          return {
-            ...acc,
-            name: newName !== undefined ? newName : acc.name,
-            startingBalance: newStartingBalance,
-            currentBalance: nextBalance,
-            creditLimit: isCreditOrPaylater ? newStartingBalance : acc.creditLimit,
-            usedLimit: isCreditOrPaylater ? (newStartingBalance - nextBalance) : acc.usedLimit,
-          };
-        }
-        return acc;
-      })
+      prev.map((acc) =>
+        acc.id === accountId
+          ? updateAccountMetadataAndStartingBalance(acc, newStartingBalance, newName)
+          : acc
+      )
     );
   };
 
@@ -1451,25 +1438,17 @@ export default function App() {
     interestRate?: number,
     minPayment?: number
   ) => {
-    const isCreditOrPaylater = type === 'credit-card' || type === 'paylater';
-    const limit = isCreditOrPaylater ? startingBalance : undefined;
-    const debt = isCreditOrPaylater ? initialDebt : undefined;
-    const currentBal = isCreditOrPaylater ? startingBalance - initialDebt : startingBalance;
-
-    const newAcc: Account = {
+    const newAcc = createAccountRecord({
       id: `acc-${Date.now()}`,
       name,
       type,
       startingBalance,
-      currentBalance: currentBal,
       accountNumber,
-      creditLimit: limit,
-      usedLimit: debt,
-      initialDebt: debt,
-      dueDay: isCreditOrPaylater ? dueDay : undefined,
-      interestRate: isCreditOrPaylater ? interestRate : undefined,
-      minPayment: isCreditOrPaylater ? minPayment : undefined,
-    };
+      initialDebt,
+      dueDay,
+      interestRate,
+      minPayment,
+    });
     setAccounts((prev) => [...prev, newAcc]);
   };
 
@@ -1731,22 +1710,8 @@ export default function App() {
         }
 
         setTransactions((prev) => [...generatedTxs, ...prev]);
-        const primaryBalanceDiff = resolvedTxType === 'expense' ? -newDebt.balance : newDebt.balance;
-        const netBalanceDiff = primaryBalanceDiff - totalInitialCashOutflow;
-
         setAccounts((prevAccounts) =>
-          prevAccounts.map((acc) => {
-            if (acc.id === targetAcc.id) {
-              const nextBalance = acc.currentBalance + netBalanceDiff;
-              const isCreditOrPaylater = acc.type === 'credit-card' || acc.type === 'paylater';
-              return {
-                ...acc,
-                currentBalance: nextBalance,
-                usedLimit: isCreditOrPaylater ? (acc.creditLimit || 0) - nextBalance : acc.usedLimit,
-              };
-            }
-            return acc;
-          })
+          applyTransactionsToAccounts(prevAccounts, generatedTxs, 'apply')
         );
 
         const initialFeeNote =
@@ -2143,6 +2108,7 @@ export default function App() {
         logoutGoogleSheets();
       } catch {}
     }
+    startupIntegrityCheckedUserRef.current = null;
     setCurrentUser(null);
     secureStorage.removeItem('fin_current_user');
     setTransactions([]);
@@ -2829,6 +2795,12 @@ export default function App() {
               secureStorage.setItem(`fin_${currentUser.username}_accounts`, JSON.stringify(updatedAccs));
             }
           }}
+          onUpdateTransactions={(updatedTxs) => {
+            setTransactions(updatedTxs);
+            if (currentUser) {
+              secureStorage.setItem(`fin_${currentUser.username}_transactions`, JSON.stringify(updatedTxs));
+            }
+          }}
           onHarmonize={(updatedAccs, missingCategories) => {
             if (missingCategories.length > 0) {
               const updatedTree = JSON.parse(JSON.stringify(masterCategories)) as CategoryNode[];
@@ -2869,19 +2841,9 @@ export default function App() {
             setTransactions(updatedTxList);
 
             // Update account current balances & credit card usedLimit consistently
-            const updatedAccs = accounts.map((acc) => {
-              const matchedEntries = newTransactions.filter((t) => t.accountId === acc.id);
-              if (matchedEntries.length === 0) return acc;
-
-              const delta = matchedEntries.reduce(
-                (sum, t) => sum + getTransactionAccountDelta(t),
-                0
-              );
-
-              return applyAccountBalanceChange(acc, delta);
-            });
-
-            setAccounts(updatedAccs);
+            setAccounts((prevAccounts) =>
+              applyTransactionsToAccounts(prevAccounts, newTransactions, 'apply')
+            );
           }}
         />
 

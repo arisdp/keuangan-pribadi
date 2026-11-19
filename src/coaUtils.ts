@@ -1,4 +1,5 @@
 import { Account, Transaction } from './types';
+import { auditLedgerIntegrity, DuplicateTransactionGroup } from './utils/accountingEngine';
 import { secureStorage } from './utils/secureStorage';
 import { logger } from './utils/logger';
 
@@ -218,23 +219,30 @@ export interface MasterIntegrityReport {
   isValid: boolean;
   totalIssuesCount: number;
   issues: Array<{
-    type: 'ORPHANED_COA_LINK' | 'UNMAPPED_ACCOUNT' | 'MISSING_BASE_COA';
+    type:
+      | 'ORPHANED_COA_LINK'
+      | 'UNMAPPED_ACCOUNT'
+      | 'MISSING_BASE_COA'
+      | 'ORPHAN_TRANSACTION'
+      | 'DUPLICATE_TRANSACTION';
     title: string;
     description: string;
     accountId?: string;
     accountName?: string;
     missingCode?: string;
+    transactionId?: string;
   }>;
   checkedAt: string;
 }
 
 /**
- * Validasi integritas master data saat aplikasi dimuat.
- * Menemukan jika ada akun yang merujuk pada COA yang sudah dihapus atau tidak terhubung.
+ * Validasi integritas master data & buku besar saat aplikasi dimuat.
+ * Menemukan akun dengan COA terhapus, transaksi tanpa referensi akun valid, serta data ganda di buku besar.
  */
 export const validateMasterIntegrityOnLoad = (
   accounts: Account[],
-  customCoaList?: AccountCOA[]
+  customCoaList?: AccountCOA[],
+  transactions?: Transaction[]
 ): MasterIntegrityReport => {
   const coaList = customCoaList && customCoaList.length > 0 ? customCoaList : getStoredCoaList();
   const issues: MasterIntegrityReport['issues'] = [];
@@ -267,6 +275,45 @@ export const validateMasterIntegrityOnLoad = (
       });
     }
   });
+
+  // Check 3 & 4: Transaksi tanpa referensi akun valid & data ganda di buku besar
+  if (Array.isArray(transactions) && transactions.length > 0) {
+    const ledgerAudit = auditLedgerIntegrity(transactions, accounts);
+
+    ledgerAudit.orphanTransactions.forEach((orphan) => {
+      issues.push({
+        type: 'ORPHAN_TRANSACTION',
+        title:
+          orphan.reason === 'missing_account_id'
+            ? `Transaksi "${orphan.transaction.description || orphan.transaction.category}" Tanpa Akun`
+            : `Transaksi Yatim Merujuk Akun "${orphan.transaction.accountId}"`,
+        description:
+          orphan.reason === 'missing_account_id'
+            ? `Entri pada ${orphan.transaction.date} tidak memiliki referensi akun valid.`
+            : `Entri pada ${orphan.transaction.date} mereferensikan akun yang tidak ditemukan di Master Akun.`,
+        accountId: orphan.transaction.accountId,
+        transactionId: orphan.transaction.id,
+      });
+    });
+
+    ledgerAudit.duplicateIdGroups.forEach((grp) => {
+      issues.push({
+        type: 'DUPLICATE_TRANSACTION',
+        title: `ID Transaksi Duplikat Ditemukan (${grp.items.length}x)`,
+        description: `${grp.fingerprintLabel} terduplikasi di buku besar akuntansi.`,
+        transactionId: grp.items[0]?.transaction.id,
+      });
+    });
+
+    ledgerAudit.sameDayDuplicateGroups.forEach((grp) => {
+      issues.push({
+        type: 'DUPLICATE_TRANSACTION',
+        title: `Potensi Entri Identik di Hari Sama (${grp.items.length}x)`,
+        description: `${grp.fingerprintLabel} tercatat lebih dari sekali pada tanggal yang sama.`,
+        transactionId: grp.items[0]?.transaction.id,
+      });
+    });
+  }
 
   return {
     isValid: issues.length === 0,
@@ -368,8 +415,11 @@ export interface CoaScanResult {
   duplicateCodes: Array<{ code: string; items: AccountCOA[] }>;
   duplicateNames: Array<{ normalizedName: string; items: AccountCOA[] }>;
   unusedCoas: AccountCOA[];
+  ledgerDuplicateIdGroups: DuplicateTransactionGroup[];
+  ledgerSameDayDuplicateGroups: DuplicateTransactionGroup[];
   totalDuplicates: number;
   totalUnused: number;
+  totalLedgerDuplicates: number;
 }
 
 export const scanCoaDuplicatesAndUnused = (
@@ -428,12 +478,18 @@ export const scanCoaDuplicatesAndUnused = (
     return true;
   });
 
+  // 4. Check duplicate ledger entries (duplicate IDs & identical same-day transactions)
+  const ledgerAudit = auditLedgerIntegrity(transactions, accounts);
+
   return {
     duplicateCodes,
     duplicateNames,
     unusedCoas,
+    ledgerDuplicateIdGroups: ledgerAudit.duplicateIdGroups,
+    ledgerSameDayDuplicateGroups: ledgerAudit.sameDayDuplicateGroups,
     totalDuplicates: duplicateCodes.reduce((acc, d) => acc + d.items.length - 1, 0) + duplicateNames.reduce((acc, d) => acc + d.items.length - 1, 0),
     totalUnused: unusedCoas.length,
+    totalLedgerDuplicates: ledgerAudit.totalDuplicateIdRows + ledgerAudit.totalSameDayDuplicateRows,
   };
 };
 

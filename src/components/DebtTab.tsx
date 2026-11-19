@@ -9,6 +9,12 @@ import {
   resolveEffectiveKprCoaMapping,
 } from '../utils/kprPresets';
 import {
+  applyAccountBalanceChange,
+  getAccountCreditBill,
+  getTransactionAccountDelta,
+  isCreditAccount,
+} from '../utils/accountingEngine';
+import {
   Calculator,
   ListOrdered,
   AlertCircle,
@@ -216,18 +222,18 @@ export const DebtTab: React.FC<DebtTabProps> = ({
 
   // Extract credit cards and paylaters into virtual debts
   const accountDebts = accounts
-    .filter(acc => acc.type === 'credit-card' || acc.type === 'paylater')
-    .map(acc => {
+    .filter((acc) => isCreditAccount(acc))
+    .map((acc) => {
       const defaultAPR = acc.type === 'credit-card' ? 21 : 24;
       const rate = acc.interestRate !== undefined ? acc.interestRate : defaultAPR;
-      
-      const calculatedMin = Math.max((acc.usedLimit || 0) * 0.1, (acc.usedLimit && acc.usedLimit > 0) ? 50000 : 0);
+      const bill = getAccountCreditBill(acc);
+      const calculatedMin = Math.max(bill * 0.1, bill > 0 ? 50000 : 0);
       const min = acc.minPayment !== undefined ? acc.minPayment : calculatedMin;
 
       return {
         id: acc.id,
         name: acc.name,
-        balance: acc.usedLimit || 0,
+        balance: bill,
         interestRate: rate,
         minPayment: min,
         purpose: 'consumptive' as const,
@@ -1814,10 +1820,11 @@ export const DebtTab: React.FC<DebtTabProps> = ({
                         const selectedAcc = liquidAccounts.find((a) => a.id === addDisburseAccountId);
                         const parsedBal = parseFloat(balance) || 0;
                         if (!selectedAcc) return null;
-                        const projectedBankBal =
-                          bankLinkTxType === 'expense'
-                            ? selectedAcc.currentBalance - parsedBal
-                            : selectedAcc.currentBalance + parsedBal;
+                        const delta = getTransactionAccountDelta({
+                          type: bankLinkTxType,
+                          amount: parsedBal,
+                        });
+                        const projectedBankBal = applyAccountBalanceChange(selectedAcc, delta).currentBalance;
                         return (
                           <div className="bg-white border border-blue-100 rounded-xl p-2.5 text-[10px] space-y-1">
                             <div className="flex justify-between gap-2">
