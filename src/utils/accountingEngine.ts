@@ -511,6 +511,81 @@ export function createAccountRecord(params: {
   return baseAccount;
 }
 
+function pad2(n: number): string {
+  return String(n).padStart(2, '0');
+}
+
+function formatValidDateParts(year: number, month: number, day: number): string | null {
+  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) {
+    return null;
+  }
+  if (year < 1900 || year > 2100 || month < 1 || month > 12 || day < 1 || day > 31) {
+    return null;
+  }
+  const probe = new Date(Date.UTC(year, month - 1, day));
+  if (
+    probe.getUTCFullYear() !== year ||
+    probe.getUTCMonth() + 1 !== month ||
+    probe.getUTCDate() !== day
+  ) {
+    return null;
+  }
+  return `${year}-${pad2(month)}-${pad2(day)}`;
+}
+
+/**
+ * Menormalkan berbagai format tanggal transaksi (ISO timestamp, YYYY-MM-DD,
+ * YYYY/MM/DD, DD/MM/YYYY, dan DD-MM-YYYY) menjadi format kanonis YYYY-MM-DD.
+ */
+export function normalizeLedgerDateYYYYMMDD(rawDate: unknown): string {
+  if (typeof rawDate !== 'string') return '';
+  const trimmed = rawDate.trim();
+  if (!trimmed) return '';
+
+  // 1. YYYY-MM-DD atau ISO 8601 (2026-11-18T10:30:00Z)
+  const isoMatch = trimmed.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:$|T|\s)/);
+  if (isoMatch) {
+    const formatted = formatValidDateParts(
+      Number(isoMatch[1]),
+      Number(isoMatch[2]),
+      Number(isoMatch[3])
+    );
+    if (formatted) return formatted;
+  }
+
+  // 2. YYYY/MM/DD atau YYYY/M/D (termasuk opsional waktu)
+  const slashYearFirstMatch = trimmed.match(/^(\d{4})\/(\d{1,2})\/(\d{1,2})(?:$|T|\s)/);
+  if (slashYearFirstMatch) {
+    const formatted = formatValidDateParts(
+      Number(slashYearFirstMatch[1]),
+      Number(slashYearFirstMatch[2]),
+      Number(slashYearFirstMatch[3])
+    );
+    if (formatted) return formatted;
+  }
+
+  // 3. DD/MM/YYYY atau DD-MM-YYYY (termasuk D/M/YYYY, D-M-YYYY, dan opsional waktu)
+  const dayFirstMatch = trimmed.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})(?:$|T|\s)/);
+  if (dayFirstMatch) {
+    const formatted = formatValidDateParts(
+      Number(dayFirstMatch[3]),
+      Number(dayFirstMatch[2]),
+      Number(dayFirstMatch[1])
+    );
+    if (formatted) return formatted;
+  }
+
+  // 4. Fallback parser standar Date jika format teks lain valid
+  const parsedMs = Date.parse(trimmed);
+  if (!Number.isNaN(parsedMs)) {
+    const dt = new Date(parsedMs);
+    const formatted = formatValidDateParts(dt.getFullYear(), dt.getMonth() + 1, dt.getDate());
+    if (formatted) return formatted;
+  }
+
+  return trimmed;
+}
+
 export interface OrphanTransactionIssue {
   transaction: Transaction;
   index: number;
@@ -541,7 +616,7 @@ export interface LedgerIntegrityAuditResult {
  * Memeriksa integritas referensi akun dan potensi data ganda di buku besar:
  * 1) Transaksi non-penyesuaian tanpa accountId atau accountId tidak terdaftar di Master Akun.
  * 2) ID transaksi yang muncul lebih dari satu kali.
- * 3) Entri identik di hari yang sama (tanggal, akun, tipe, kategori, nominal, dan deskripsi sama).
+ * 3) Entri identik di hari yang sama (tanggal dinormalisasi YYYY-MM-DD, akun, tipe, kategori, nominal, dan deskripsi sama).
  */
 export function auditLedgerIntegrity(
   transactions: Transaction[],
@@ -585,13 +660,12 @@ export function auditLedgerIntegrity(
     }
 
     // 3. Kumpulkan berdasarkan sidik jari entri identik pada hari yang sama (normalisasi YYYY-MM-DD)
-    const rawDate = (tx.date || '').trim();
-    const datePart = /^\d{4}-\d{2}-\d{2}/.test(rawDate) ? rawDate.slice(0, 10) : rawDate;
+    const datePart = normalizeLedgerDateYYYYMMDD(tx.date);
     const accPart = (tx.accountId || '').trim();
     const typePart = tx.type || 'expense';
-    const catPart = (tx.category || '').trim().toLowerCase();
+    const catPart = (tx.category || '').trim().replace(/\s+/g, ' ').toLowerCase();
     const amtPart = Math.round(normalizeAbsAmount(tx.amount) * 100);
-    const descPart = (tx.description || '').trim().toLowerCase();
+    const descPart = (tx.description || '').trim().replace(/\s+/g, ' ').toLowerCase();
     const adjPart = tx.isAdjustment ? 'adj' : 'std';
     const sig = `${datePart}|${accPart}|${typePart}|${catPart}|${amtPart}|${descPart}|${adjPart}`;
     const sigArr = bySameDaySignature.get(sig) || [];
@@ -608,13 +682,14 @@ export function auditLedgerIntegrity(
       const duplicateIndices = items.slice(1).map((it) => it.index);
       duplicateIndices.forEach((idx) => duplicateIdRowIndices.add(idx));
       const sample = items[0].transaction;
+      const normalizedSampleDate = normalizeLedgerDateYYYYMMDD(sample.date) || sample.date;
       duplicateIdGroups.push({
         groupKey: `dup-id-${id}`,
         kind: 'duplicate_id',
         keepIndex,
         duplicateIndices,
         items,
-        fingerprintLabel: `ID "${id}" · ${sample.date} · ${sample.description || sample.category}`,
+        fingerprintLabel: `ID "${id}" · ${normalizedSampleDate} · ${sample.description || sample.category}`,
       });
     }
   });
@@ -628,13 +703,14 @@ export function auditLedgerIntegrity(
         const keepIndex = nonIdDupItems[0].index;
         const duplicateIndices = nonIdDupItems.slice(1).map((it) => it.index);
         const sample = nonIdDupItems[0].transaction;
+        const normalizedSampleDate = normalizeLedgerDateYYYYMMDD(sample.date) || sample.date;
         sameDayDuplicateGroups.push({
           groupKey: `dup-sameday-${sig}`,
           kind: 'same_day_identical',
           keepIndex,
           duplicateIndices,
           items: nonIdDupItems,
-          fingerprintLabel: `${sample.date} · ${sample.category} · ${sample.description || sample.category}`,
+          fingerprintLabel: `${normalizedSampleDate} · ${sample.category} · ${sample.description || sample.category}`,
         });
       }
     }

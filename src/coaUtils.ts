@@ -2,6 +2,7 @@ import { Account, Transaction } from './types';
 import {
   auditLedgerIntegrity,
   DuplicateTransactionGroup,
+  normalizeLedgerDateYYYYMMDD,
   OrphanTransactionIssue,
 } from './utils/accountingEngine';
 import { secureStorage } from './utils/secureStorage';
@@ -419,6 +420,7 @@ export interface ScannedLedgerAnomalyRow {
   rowKey: string;
   txIndex: number;
   transaction: Transaction;
+  normalizedDate: string;
   kind: 'duplicate_id' | 'same_day_identical' | 'orphan_transaction';
   groupKey?: string;
   groupSize?: number;
@@ -440,6 +442,7 @@ export interface CoaScanResult {
   totalLedgerDuplicates: number;
   totalLedgerOrphans: number;
   totalLedgerAnomalies: number;
+  scannedAt: string;
 }
 
 export const scanCoaDuplicatesAndUnused = (
@@ -511,6 +514,7 @@ export const scanCoaDuplicatesAndUnused = (
         rowKey: `dup-id-${grp.groupKey}-${dupIdx}`,
         txIndex: dupIdx,
         transaction: tx,
+        normalizedDate: normalizeLedgerDateYYYYMMDD(tx.date),
         kind: 'duplicate_id',
         groupKey: grp.groupKey,
         groupSize: grp.items.length,
@@ -524,15 +528,17 @@ export const scanCoaDuplicatesAndUnused = (
     grp.duplicateIndices.forEach((dupIdx) => {
       const tx = transactions[dupIdx];
       if (!tx) return;
+      const normalizedDate = normalizeLedgerDateYYYYMMDD(tx.date);
       ledgerAnomalies.push({
         rowKey: `dup-day-${grp.groupKey}-${dupIdx}`,
         txIndex: dupIdx,
         transaction: tx,
+        normalizedDate,
         kind: 'same_day_identical',
         groupKey: grp.groupKey,
         groupSize: grp.items.length,
         keepTxIndex: grp.keepIndex,
-        issueSummary: `Identik hari sama (${grp.items.length}x) · Entri asli #${grp.keepIndex + 1} dipertahankan`,
+        issueSummary: `Identik hari sama (${normalizedDate || tx.date || '-'}, ${grp.items.length}x) · Entri asli #${grp.keepIndex + 1} dipertahankan`,
       });
     });
   });
@@ -542,6 +548,7 @@ export const scanCoaDuplicatesAndUnused = (
       rowKey: `orphan-${orphan.index}-${orphan.transaction.id || 'noid'}`,
       txIndex: orphan.index,
       transaction: orphan.transaction,
+      normalizedDate: normalizeLedgerDateYYYYMMDD(orphan.transaction.date),
       kind: 'orphan_transaction',
       orphanReason: orphan.reason,
       issueSummary:
@@ -552,7 +559,9 @@ export const scanCoaDuplicatesAndUnused = (
   });
 
   ledgerAnomalies.sort((a, b) => {
-    const dateCmp = (b.transaction.date || '').localeCompare(a.transaction.date || '');
+    const aDate = a.normalizedDate || a.transaction.date || '';
+    const bDate = b.normalizedDate || b.transaction.date || '';
+    const dateCmp = bDate.localeCompare(aDate);
     if (dateCmp !== 0) return dateCmp;
     return a.txIndex - b.txIndex;
   });
@@ -572,6 +581,7 @@ export const scanCoaDuplicatesAndUnused = (
     totalLedgerDuplicates: ledgerAudit.totalDuplicateIdRows + ledgerAudit.totalSameDayDuplicateRows,
     totalLedgerOrphans: ledgerAudit.totalOrphans,
     totalLedgerAnomalies: ledgerAnomalies.length,
+    scannedAt: new Date().toLocaleTimeString('id-ID', { hour12: false }),
   };
 };
 

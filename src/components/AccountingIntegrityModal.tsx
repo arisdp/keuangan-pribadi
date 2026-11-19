@@ -11,6 +11,7 @@ import {
   autoMergeAndCleanupCoas,
   MasterChangeLog,
   AccountCOA,
+  CoaScanResult,
   ScannedLedgerAnomalyRow,
 } from '../coaUtils';
 import {
@@ -485,10 +486,31 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
     setTimeout(() => setManualSyncMessage(null), 5000);
   };
 
-  // Scan for duplicate and unused COA nodes + ledger anomalies (duplicate IDs, same-day identical, & orphans)
-  const scanResult = useMemo(() => {
-    return scanCoaDuplicatesAndUnused(activeCoaList, accounts, transactions);
-  }, [activeCoaList, accounts, transactions]);
+  // State hasil pemindaian COA & anomali buku besar (auto-sync saat buka modal / perubahan data + manual Pindai Ulang)
+  const [scanResult, setScanResult] = useState<CoaScanResult>(() =>
+    scanCoaDuplicatesAndUnused(getStoredCoaList(), accounts, transactions)
+  );
+  const [lastScannedAt, setLastScannedAt] = useState<string>(() => scanResult.scannedAt || '');
+  const [isRescanning, setIsRescanning] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const effectiveCoas = activeCoaList.length > 0 ? activeCoaList : getStoredCoaList();
+    const nextScan = scanCoaDuplicatesAndUnused(effectiveCoas, accounts, transactions);
+    setScanResult(nextScan);
+    setLastScannedAt(nextScan.scannedAt);
+  }, [isOpen, activeCoaList, accounts, transactions]);
+
+  const handleManualRescan = () => {
+    setIsRescanning(true);
+    const freshCoas = getStoredCoaList();
+    setActiveCoaList(freshCoas);
+    const nextScan = scanCoaDuplicatesAndUnused(freshCoas, accounts, transactions);
+    setScanResult(nextScan);
+    setLastScannedAt(nextScan.scannedAt);
+    setShowCleanupConfirm(false);
+    setTimeout(() => setIsRescanning(false), 350);
+  };
 
   const fallbackValidAccountId =
     accounts.find((a) => a.type === 'bank' || a.type === 'cash' || a.type === 'e-wallet')?.id ||
@@ -699,33 +721,43 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
             <p className="text-[11px] text-slate-500 dark:text-slate-400 font-mono tabular-nums">
               {transactions.length} entri dipindai · {scanResult.ledgerDuplicateIdGroups.length} grup ID duplikat ·{' '}
               {scanResult.ledgerSameDayDuplicateGroups.length} grup identik hari sama · {scanResult.totalLedgerOrphans}{' '}
-              transaksi yatim
+              transaksi yatim{lastScannedAt ? ` · Dipindai ${lastScannedAt}` : ''}
             </p>
           </div>
 
-          {scanResult.ledgerAnomalies.length > 0 && (
-            <div className="flex items-center gap-2 shrink-0">
-              <button
-                type="button"
-                onClick={toggleSelectAllFilteredAnomalies}
-                className="px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-[11px] font-bold text-slate-700 dark:text-slate-200 transition cursor-pointer whitespace-nowrap shrink-0"
-              >
-                {allVisibleSelected ? 'Batal Pilih Tampak' : `Pilih Semua (${filteredAnomalyRows.length})`}
-              </button>
-              {selectedAnomalyKeys.size > 0 && (
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={handleManualRescan}
+              className="px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 text-[11px] font-bold text-slate-700 dark:text-slate-200 transition cursor-pointer flex items-center gap-1.5 whitespace-nowrap shrink-0"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${isRescanning ? 'animate-spin' : ''}`} />
+              <span>Pindai Ulang</span>
+            </button>
+            {scanResult.ledgerAnomalies.length > 0 && (
+              <>
                 <button
                   type="button"
-                  onClick={() => {
-                    setSelectedAnomalyKeys(new Set());
-                    setShowCleanupConfirm(false);
-                  }}
-                  className="px-2.5 py-1.5 rounded-lg text-[11px] font-bold text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-100 transition cursor-pointer whitespace-nowrap shrink-0"
+                  onClick={toggleSelectAllFilteredAnomalies}
+                  className="px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-[11px] font-bold text-slate-700 dark:text-slate-200 transition cursor-pointer whitespace-nowrap shrink-0"
                 >
-                  Kosongkan ({selectedAnomalyKeys.size})
+                  {allVisibleSelected ? 'Batal Pilih Tampak' : `Pilih Semua (${filteredAnomalyRows.length})`}
                 </button>
-              )}
-            </div>
-          )}
+                {selectedAnomalyKeys.size > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedAnomalyKeys(new Set());
+                      setShowCleanupConfirm(false);
+                    }}
+                    className="px-2.5 py-1.5 rounded-lg text-[11px] font-bold text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-100 transition cursor-pointer whitespace-nowrap shrink-0"
+                  >
+                    Kosongkan ({selectedAnomalyKeys.size})
+                  </button>
+                )}
+              </>
+            )}
+          </div>
         </div>
 
         {/* Segmented Filter Controls */}
@@ -835,7 +867,12 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
                         />
                       </td>
                       <td className="py-2.5 px-3 font-mono tabular-nums text-[11px] text-slate-600 dark:text-slate-300 whitespace-nowrap align-top">
-                        {tx.date || '-'}
+                        <div>{row.normalizedDate || tx.date || '-'}</div>
+                        {tx.date && row.normalizedDate && tx.date.trim() !== row.normalizedDate && (
+                          <div className="text-[10px] text-slate-400 dark:text-slate-500">
+                            Asli: {tx.date}
+                          </div>
+                        )}
                       </td>
                       <td className="py-2.5 px-3 align-top min-w-[200px]">
                         <div className="font-bold text-slate-800 dark:text-slate-100">
@@ -1726,20 +1763,31 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
                         {scanResult.totalDuplicates === 0 && scanResult.totalUnused === 0
                           ? 'Tidak ditemukan duplikat atau COA yatim. Master COA Anda sangat bersih!'
                           : `Terdeteksi ${scanResult.totalDuplicates} COA duplikat dan ${scanResult.totalUnused} COA tidak terpakai.`}
+                        {lastScannedAt ? ` · Dipindai ${lastScannedAt}` : ''}
                       </p>
                     </div>
                   </div>
 
-                  {(scanResult.totalDuplicates > 0 || scanResult.totalUnused > 0) && (
+                  <div className="flex flex-wrap items-center gap-2 shrink-0">
                     <button
                       type="button"
-                      onClick={handleAutoMergeAndCleanup}
-                      className="px-4 py-2 bg-gradient-to-r from-purple-500 to-indigo-600 hover:from-purple-600 hover:to-indigo-700 text-white text-xs font-black rounded-xl shadow-md transition cursor-pointer flex items-center justify-center gap-2 shrink-0"
+                      onClick={handleManualRescan}
+                      className="px-3.5 py-2 bg-slate-800/80 hover:bg-slate-700/90 border border-purple-500/40 text-purple-100 text-xs font-bold rounded-xl transition cursor-pointer flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0"
                     >
-                      <RefreshCw className="h-4 w-4 animate-spin-slow" />
-                      <span>Gabung Duplikat & Bersihkan COA Otomatis</span>
+                      <RefreshCw className={`h-3.5 w-3.5 ${isRescanning ? 'animate-spin' : ''}`} />
+                      <span>Pindai Ulang</span>
                     </button>
-                  )}
+                    {(scanResult.totalDuplicates > 0 || scanResult.totalUnused > 0) && (
+                      <button
+                        type="button"
+                        onClick={handleAutoMergeAndCleanup}
+                        className="px-4 py-2 bg-gradient-to-r from-purple-500 to-indigo-600 hover:from-purple-600 hover:to-indigo-700 text-white text-xs font-black rounded-xl shadow-md transition cursor-pointer flex items-center justify-center gap-2 whitespace-nowrap shrink-0"
+                      >
+                        <RefreshCw className="h-4 w-4 animate-spin-slow" />
+                        <span>Gabung Duplikat & Bersihkan COA Otomatis</span>
+                      </button>
+                    )}
+                  </div>
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
