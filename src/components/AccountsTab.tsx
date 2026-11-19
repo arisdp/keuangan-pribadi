@@ -28,6 +28,10 @@ interface AccountsTabProps {
   ) => void;
   onDeleteAccount: (accountId: string) => void;
   onTransferFunds?: (amount: number, fromAccountId: string, toAccountId: string, description: string) => void;
+  onAddTransaction?: (tx: Omit<Transaction, 'id'> & {
+    linkedDebtId?: string;
+    linkedDebtAction?: 'pay' | 'create';
+  }) => boolean | void;
 }
 
 export const AccountsTab: React.FC<AccountsTabProps> = ({
@@ -37,6 +41,7 @@ export const AccountsTab: React.FC<AccountsTabProps> = ({
   onAddAccountWithNumber,
   onDeleteAccount,
   onTransferFunds,
+  onAddTransaction,
 }) => {
   // Selected Account to filter transactions
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
@@ -233,31 +238,50 @@ export const AccountsTab: React.FC<AccountsTabProps> = ({
       return;
     }
 
+    const executeCardPayment = () => {
+      if (onAddTransaction) {
+        const cardCoa = getAccountCoaMapping(card);
+        const srcCoa = getAccountCoaMapping(sourceAcc);
+        const ok = onAddTransaction({
+          date: new Date().toISOString().split('T')[0],
+          accountId: sourceAccountId,
+          type: 'expense',
+          category: 'Cicilan / Pelunasan Utang',
+          description: paymentDescription || `Pembayaran Tagihan ${card.name}`,
+          amount: amountVal,
+          linkedDebtId: `acc-debt-${card.id}`,
+          linkedDebtAction: 'pay',
+          coaDebitCode: cardCoa.code,
+          coaCreditCode: srcCoa.code,
+        });
+        if (ok === false) return;
+      } else if (onTransferFunds) {
+        onTransferFunds(amountVal, sourceAccountId, card.id, paymentDescription);
+        showAlert('Pembayaran Berhasil', `Pembayaran tagihan "${card.name}" sebesar ${formatterIDR.format(amountVal)} berhasil dicatat.`);
+      }
+      setPayingId(null);
+      setPaymentAmount('');
+      setSourceAccountId('');
+    };
+
     const usedLimitVal = getAccountCreditBill(card);
     if (amountVal > usedLimitVal) {
+      if (onAddTransaction) {
+        showAlert(
+          'Nominal Melebihi Sisa Tagihan',
+          `Jumlah pembayaran (${formatterIDR.format(amountVal)}) melebihi total tagihan "${card.name}" (${formatterIDR.format(usedLimitVal)}).`
+        );
+        return;
+      }
       showConfirm(
         'Konfirmasi Pembayaran Lebih',
-        `Jumlah pembayaran (${formatterIDR.format(amountVal)}) melebihi total tagihan Anda (${formatterIDR.format(usedLimitVal)}). Sisa lebih pembayaran akan menambah sisa limit Anda. Lanjutkan?`,
-        () => {
-          if (onTransferFunds) {
-            onTransferFunds(amountVal, sourceAccountId, card.id, paymentDescription);
-            setPayingId(null);
-            setPaymentAmount('');
-            setSourceAccountId('');
-            showAlert('Pembayaran Berhasil', `Pembayaran tagihan "${card.name}" sebesar ${formatterIDR.format(amountVal)} berhasil dicatat.`);
-          }
-        }
+        `Jumlah pembayaran (${formatterIDR.format(amountVal)}) melebihi total tagihan Anda (${formatterIDR.format(usedLimitVal)}). Lanjutkan pembayaran?`,
+        executeCardPayment
       );
       return;
     }
 
-    if (onTransferFunds) {
-      onTransferFunds(amountVal, sourceAccountId, card.id, paymentDescription);
-      setPayingId(null);
-      setPaymentAmount('');
-      setSourceAccountId('');
-      showAlert('Pembayaran Berhasil', `Pembayaran tagihan "${card.name}" sebesar ${formatterIDR.format(amountVal)} berhasil dicatat.`);
-    }
+    executeCardPayment();
   };
 
   return (

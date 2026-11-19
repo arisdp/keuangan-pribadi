@@ -11,6 +11,7 @@ import {
   autoMergeAndCleanupCoas,
   MasterChangeLog,
   AccountCOA,
+  ScannedLedgerAnomalyRow,
 } from '../coaUtils';
 import {
   ShieldCheck,
@@ -44,8 +45,7 @@ import {
 import {
   auditLedgerIntegrity,
   calculateAccountGLBalance,
-  reassignOrphanTransactionWithBalanceSync,
-  removeDuplicateTransactionsWithBalanceSync,
+  previewSafeAnomalyCleanupImpact,
 } from '../utils/accountingEngine';
 import { formatterIDR } from '../utils/formatters';
 import { showToast } from '../utils/toast';
@@ -79,6 +79,12 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
   const [customActualBalances, setCustomActualBalances] = useState<Record<string, number>>({});
   const [reconciliationSuccessMessage, setReconciliationSuccessMessage] = useState<string | null>(null);
   const [orphanTargetAccounts, setOrphanTargetAccounts] = useState<Record<number, string>>({});
+  const [orphanActionModes, setOrphanActionModes] = useState<Record<number, 'reassign' | 'delete'>>({});
+  const [selectedAnomalyKeys, setSelectedAnomalyKeys] = useState<Set<string>>(new Set());
+  const [anomalyFilterKind, setAnomalyFilterKind] = useState<
+    'all' | 'duplicate_id' | 'same_day_identical' | 'orphan_transaction'
+  >('all');
+  const [showCleanupConfirm, setShowCleanupConfirm] = useState<boolean>(false);
 
   // COA List state for manual reconciliation
   const [activeCoaList, setActiveCoaList] = useState<AccountCOA[]>([]);
@@ -456,10 +462,70 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
     setTimeout(() => setManualSyncMessage(null), 5000);
   };
 
-  // Scan for duplicate and unused COA nodes
+  // Scan for duplicate and unused COA nodes + ledger anomalies (duplicate IDs, same-day identical, & orphans)
   const scanResult = useMemo(() => {
     return scanCoaDuplicatesAndUnused(activeCoaList, accounts, transactions);
   }, [activeCoaList, accounts, transactions]);
+
+  const fallbackValidAccountId =
+    accounts.find((a) => a.type === 'bank' || a.type === 'cash' || a.type === 'e-wallet')?.id ||
+    accounts[0]?.id ||
+    '';
+
+  useEffect(() => {
+    const activeKeys = new Set(scanResult.ledgerAnomalies.map((row) => row.rowKey));
+    setSelectedAnomalyKeys((prev) => {
+      if (prev.size === 0) return prev;
+      const next = new Set<string>();
+      prev.forEach((k) => {
+        if (activeKeys.has(k)) next.add(k);
+      });
+      return next.size === prev.size ? prev : next;
+    });
+    setShowCleanupConfirm(false);
+  }, [scanResult.ledgerAnomalies]);
+
+  const filteredAnomalyRows = useMemo<ScannedLedgerAnomalyRow[]>(() => {
+    if (anomalyFilterKind === 'all') return scanResult.ledgerAnomalies;
+    return scanResult.ledgerAnomalies.filter((r) => r.kind === anomalyFilterKind);
+  }, [scanResult.ledgerAnomalies, anomalyFilterKind]);
+
+  const selectedAnomalyRows = useMemo<ScannedLedgerAnomalyRow[]>(() => {
+    return scanResult.ledgerAnomalies.filter((r) => selectedAnomalyKeys.has(r.rowKey));
+  }, [scanResult.ledgerAnomalies, selectedAnomalyKeys]);
+
+  const cleanupPreview = useMemo(() => {
+    const duplicateIndicesToRemove: number[] = [];
+    const orphanReassignments: Array<{ txIndex: number; targetAccountId: string }> = [];
+    const orphanIndicesToDelete: number[] = [];
+
+    selectedAnomalyRows.forEach((row) => {
+      if (row.kind === 'duplicate_id' || row.kind === 'same_day_identical') {
+        duplicateIndicesToRemove.push(row.txIndex);
+      } else if (row.kind === 'orphan_transaction') {
+        const mode = orphanActionModes[row.txIndex] || (accounts.length > 0 ? 'reassign' : 'delete');
+        const targetAccId = orphanTargetAccounts[row.txIndex] || fallbackValidAccountId;
+        if (mode === 'reassign' && targetAccId) {
+          orphanReassignments.push({ txIndex: row.txIndex, targetAccountId: targetAccId });
+        } else {
+          orphanIndicesToDelete.push(row.txIndex);
+        }
+      }
+    });
+
+    return previewSafeAnomalyCleanupImpact(transactions, accounts, {
+      duplicateIndicesToRemove,
+      orphanReassignments,
+      orphanIndicesToDelete,
+    });
+  }, [
+    selectedAnomalyRows,
+    orphanActionModes,
+    orphanTargetAccounts,
+    fallbackValidAccountId,
+    transactions,
+    accounts,
+  ]);
 
   // Filter change logs
   const filteredChangeLogs = useMemo(() => {
@@ -512,84 +578,409 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
     onHarmonize(accounts, missingNames);
   };
 
-  const defaultValidAccountId =
-    accounts.find((a) => a.type === 'bank' || a.type === 'cash' || a.type === 'e-wallet')?.id ||
-    accounts[0]?.id ||
-    '';
-
-  const handleReassignOrphan = (txIndex: number) => {
-    if (!onUpdateTransactions) return;
-    const targetAccountId = orphanTargetAccounts[txIndex] || defaultValidAccountId;
-    if (!targetAccountId) return;
-
-    const { updatedTransactions, updatedAccounts, changed } = reassignOrphanTransactionWithBalanceSync(
-      transactions,
-      accounts,
-      txIndex,
-      targetAccountId
-    );
-    if (!changed) return;
-
-    onUpdateTransactions(updatedTransactions);
-    if (onUpdateAccounts) {
-      onUpdateAccounts(updatedAccounts);
-    }
-    const targetAcc = accounts.find((a) => a.id === targetAccountId);
-    const tx = transactions[txIndex];
-    addMasterChangeLog(
-      'Account',
-      targetAcc?.name || targetAccountId,
-      'RECONCILE',
-      `Mengalihkan transaksi yatim "${tx?.description || tx?.category || txIndex}" (${formatterIDR.format(tx?.amount || 0)}) ke rekening "${targetAcc?.name || targetAccountId}".`,
-      'Audit Integritas'
-    );
-    setChangeLogs(getMasterChangeLogs());
-    setReconciliationSuccessMessage(
-      `Transaksi "${tx?.description || tx?.category}" dialihkan ke ${targetAcc?.name || targetAccountId} dan saldo telah disinkronkan.`
-    );
-    setTimeout(() => setReconciliationSuccessMessage(null), 5000);
+  const toggleAnomalyRow = (rowKey: string) => {
+    setSelectedAnomalyKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(rowKey)) next.delete(rowKey);
+      else next.add(rowKey);
+      return next;
+    });
+    setShowCleanupConfirm(false);
   };
 
-  const handleDeleteOrphan = (txIndex: number) => {
-    if (!onUpdateTransactions) return;
-    const tx = transactions[txIndex];
-    const updatedTransactions = transactions.filter((_, idx) => idx !== txIndex);
-    onUpdateTransactions(updatedTransactions);
-    addMasterChangeLog(
-      'Account',
-      tx?.description || tx?.category || 'Transaksi Yatim',
-      'DELETE',
-      `Menghapus transaksi tanpa referensi akun valid (${tx?.date || '-'} · ${formatterIDR.format(tx?.amount || 0)}).`,
-      'Audit Integritas'
-    );
-    setChangeLogs(getMasterChangeLogs());
-    setReconciliationSuccessMessage(`Transaksi yatim "${tx?.description || tx?.category}" berhasil dihapus dari buku besar.`);
-    setTimeout(() => setReconciliationSuccessMessage(null), 5000);
+  const toggleSelectAllFilteredAnomalies = () => {
+    const visibleKeys = filteredAnomalyRows.map((r) => r.rowKey);
+    const allVisibleSelected =
+      visibleKeys.length > 0 && visibleKeys.every((k) => selectedAnomalyKeys.has(k));
+
+    setSelectedAnomalyKeys((prev) => {
+      const next = new Set(prev);
+      if (allVisibleSelected) {
+        visibleKeys.forEach((k) => next.delete(k));
+      } else {
+        visibleKeys.forEach((k) => next.add(k));
+      }
+      return next;
+    });
+    setShowCleanupConfirm(false);
   };
 
-  const handleRemoveDuplicates = (indicesToRemove: number[], label: string) => {
-    if (!onUpdateTransactions || indicesToRemove.length === 0) return;
-    const { updatedTransactions, updatedAccounts, removedCount } = removeDuplicateTransactionsWithBalanceSync(
-      transactions,
-      accounts,
-      indicesToRemove
-    );
-    if (removedCount === 0) return;
+  const handleExecuteSelectedAnomalyCleanup = () => {
+    if (!onUpdateTransactions || cleanupPreview.totalAffectedRows === 0) return;
 
-    onUpdateTransactions(updatedTransactions);
+    onUpdateTransactions(cleanupPreview.updatedTransactions);
     if (onUpdateAccounts) {
-      onUpdateAccounts(updatedAccounts);
+      onUpdateAccounts(cleanupPreview.updatedAccounts);
     }
+
+    const summaryParts: string[] = [];
+    if (cleanupPreview.removedDuplicateCount > 0) {
+      summaryParts.push(`${cleanupPreview.removedDuplicateCount} duplikat dihapus`);
+    }
+    if (cleanupPreview.reassignedOrphanCount > 0) {
+      summaryParts.push(`${cleanupPreview.reassignedOrphanCount} transaksi yatim dialihkan`);
+    }
+    if (cleanupPreview.deletedOrphanCount > 0) {
+      summaryParts.push(`${cleanupPreview.deletedOrphanCount} transaksi yatim dihapus`);
+    }
+
+    const impactDetail =
+      cleanupPreview.accountImpacts.length > 0
+        ? ` | Dampak saldo: ${cleanupPreview.accountImpacts
+            .map(
+              (imp) =>
+                `${imp.accountName} (${imp.netBalanceDelta >= 0 ? '+' : ''}${formatterIDR.format(
+                  imp.netBalanceDelta
+                )})`
+            )
+            .join(', ')}`
+        : '';
+
     addMasterChangeLog(
       'Account',
-      label,
+      'Pembersihan Anomali & Duplikat Selektif',
       'RECONCILE',
-      `Menghapus ${removedCount} entri duplikat di buku besar dan menyinkronkan saldo rekening terkait.`,
+      `${summaryParts.join(', ')}${impactDetail}`,
       'Audit Integritas'
     );
     setChangeLogs(getMasterChangeLogs());
-    setReconciliationSuccessMessage(`Berhasil membersihkan ${removedCount} entri ganda dan menyinkronkan saldo rekening.`);
-    setTimeout(() => setReconciliationSuccessMessage(null), 5000);
+
+    const msg = `Pembersihan aman selesai: ${summaryParts.join(', ')} dengan sinkronisasi saldo ${cleanupPreview.accountImpacts.length} rekening.`;
+    setSelectedAnomalyKeys(new Set());
+    setShowCleanupConfirm(false);
+    setReconciliationSuccessMessage(msg);
+    setManualSyncMessage(msg);
+    setTimeout(() => {
+      setReconciliationSuccessMessage(null);
+      setManualSyncMessage(null);
+    }, 6000);
+  };
+
+  const renderUnifiedAnomalyDetailPanel = (titleLabel: string) => {
+    const visibleKeys = filteredAnomalyRows.map((r) => r.rowKey);
+    const allVisibleSelected =
+      visibleKeys.length > 0 && visibleKeys.every((k) => selectedAnomalyKeys.has(k));
+
+    return (
+      <div className="p-4 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 dark:border-slate-800 pb-3">
+          <div className="space-y-0.5 min-w-0">
+            <h4 className="text-xs font-extrabold text-slate-800 dark:text-slate-100 flex items-center gap-2">
+              {scanResult.totalLedgerAnomalies === 0 ? (
+                <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0" />
+              ) : (
+                <AlertTriangle className="h-4 w-4 text-rose-600 shrink-0" />
+              )}
+              <span>{titleLabel}</span>
+            </h4>
+            <p className="text-[11px] text-slate-500 dark:text-slate-400 font-mono tabular-nums">
+              {transactions.length} entri dipindai · {scanResult.ledgerDuplicateIdGroups.length} grup ID duplikat ·{' '}
+              {scanResult.ledgerSameDayDuplicateGroups.length} grup identik hari sama · {scanResult.totalLedgerOrphans}{' '}
+              transaksi yatim
+            </p>
+          </div>
+
+          {scanResult.ledgerAnomalies.length > 0 && (
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={toggleSelectAllFilteredAnomalies}
+                className="px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-[11px] font-bold text-slate-700 dark:text-slate-200 transition cursor-pointer whitespace-nowrap shrink-0"
+              >
+                {allVisibleSelected ? 'Batal Pilih Tampak' : `Pilih Semua (${filteredAnomalyRows.length})`}
+              </button>
+              {selectedAnomalyKeys.size > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedAnomalyKeys(new Set());
+                    setShowCleanupConfirm(false);
+                  }}
+                  className="px-2.5 py-1.5 rounded-lg text-[11px] font-bold text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-100 transition cursor-pointer whitespace-nowrap shrink-0"
+                >
+                  Kosongkan ({selectedAnomalyKeys.size})
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Segmented Filter Controls */}
+        {scanResult.ledgerAnomalies.length > 0 && (
+          <div className="flex items-center gap-1 p-1 bg-slate-100 dark:bg-slate-800/80 rounded-lg overflow-x-auto">
+            {[
+              { id: 'all' as const, label: `Semua (${scanResult.totalLedgerAnomalies})` },
+              {
+                id: 'duplicate_id' as const,
+                label: `ID Duplikat (${scanResult.ledgerAnomalies.filter((r) => r.kind === 'duplicate_id').length})`,
+              },
+              {
+                id: 'same_day_identical' as const,
+                label: `Identik Harian (${
+                  scanResult.ledgerAnomalies.filter((r) => r.kind === 'same_day_identical').length
+                })`,
+              },
+              {
+                id: 'orphan_transaction' as const,
+                label: `Transaksi Yatim (${scanResult.totalLedgerOrphans})`,
+              },
+            ].map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setAnomalyFilterKind(tab.id)}
+                className={`px-3 py-1.5 rounded-md text-[11px] font-bold transition cursor-pointer whitespace-nowrap shrink-0 ${
+                  anomalyFilterKind === tab.id
+                    ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-2xs'
+                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {/* Populated vs Empty State */}
+        {scanResult.ledgerAnomalies.length === 0 ? (
+          <div className="py-5 px-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/40 text-xs text-slate-600 dark:text-slate-300 flex items-center gap-2.5">
+            <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0" />
+            <span>
+              Tidak ditemukan entri ID duplikat, duplikasi identik harian, maupun transaksi tanpa referensi akun valid.
+            </span>
+          </div>
+        ) : filteredAnomalyRows.length === 0 ? (
+          <div className="py-5 px-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/40 text-xs text-slate-500 dark:text-slate-400 text-center">
+            Tidak ada baris anomali pada kategori filter ini.
+          </div>
+        ) : (
+          <div className="overflow-x-auto border border-slate-200 dark:border-slate-800 rounded-xl">
+            <table className="w-full text-left text-xs">
+              <thead className="bg-slate-50 dark:bg-slate-800/80 border-b border-slate-200 dark:border-slate-800 text-[11px] font-bold text-slate-500 dark:text-slate-400">
+                <tr>
+                  <th className="py-2.5 px-3 w-9 text-center">
+                    <input
+                      type="checkbox"
+                      checked={allVisibleSelected}
+                      onChange={toggleSelectAllFilteredAnomalies}
+                      aria-label="Pilih semua baris anomali tampak"
+                      className="h-3.5 w-3.5 rounded border-slate-300 dark:border-slate-600 accent-blue-600 cursor-pointer"
+                    />
+                  </th>
+                  <th className="py-2.5 px-3 whitespace-nowrap">Tanggal</th>
+                  <th className="py-2.5 px-3">Transaksi &amp; Jenis Temuan</th>
+                  <th className="py-2.5 px-3">Rekening / Tindakan</th>
+                  <th className="py-2.5 px-3 text-right whitespace-nowrap">Nominal</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                {filteredAnomalyRows.map((row) => {
+                  const tx = row.transaction;
+                  const isChecked = selectedAnomalyKeys.has(row.rowKey);
+                  const accObj = accounts.find((a) => a.id === tx.accountId);
+                  const orphanMode = orphanActionModes[row.txIndex] || (accounts.length > 0 ? 'reassign' : 'delete');
+                  const targetAccId = orphanTargetAccounts[row.txIndex] || fallbackValidAccountId;
+                  const kindLabel =
+                    row.kind === 'duplicate_id'
+                      ? 'ID Duplikat'
+                      : row.kind === 'same_day_identical'
+                      ? 'Identik Harian'
+                      : 'Transaksi Yatim';
+                  const kindTextClass =
+                    row.kind === 'orphan_transaction'
+                      ? 'text-rose-600 dark:text-rose-400'
+                      : row.kind === 'duplicate_id'
+                      ? 'text-rose-600 dark:text-rose-400'
+                      : 'text-amber-700 dark:text-amber-400';
+
+                  return (
+                    <tr
+                      key={row.rowKey}
+                      className={`transition-colors ${
+                        isChecked
+                          ? 'bg-blue-50/70 dark:bg-blue-950/30'
+                          : 'hover:bg-slate-50 dark:hover:bg-slate-800/40'
+                      }`}
+                    >
+                      <td className="py-2.5 px-3 text-center align-top">
+                        <input
+                          type="checkbox"
+                          checked={isChecked}
+                          onChange={() => toggleAnomalyRow(row.rowKey)}
+                          aria-label={`Pilih baris ${tx.description || tx.category}`}
+                          className="mt-0.5 h-3.5 w-3.5 rounded border-slate-300 dark:border-slate-600 accent-blue-600 cursor-pointer"
+                        />
+                      </td>
+                      <td className="py-2.5 px-3 font-mono tabular-nums text-[11px] text-slate-600 dark:text-slate-300 whitespace-nowrap align-top">
+                        {tx.date || '-'}
+                      </td>
+                      <td className="py-2.5 px-3 align-top min-w-[200px]">
+                        <div className="font-bold text-slate-800 dark:text-slate-100">
+                          {tx.description || tx.category || 'Tanpa Keterangan'}
+                        </div>
+                        <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 flex flex-wrap items-center gap-x-1.5">
+                          <span className={`font-bold ${kindTextClass}`}>{kindLabel}</span>
+                          <span aria-hidden="true">·</span>
+                          <span>{tx.category}</span>
+                          <span aria-hidden="true">·</span>
+                          <span>{row.issueSummary}</span>
+                        </div>
+                      </td>
+                      <td className="py-2.5 px-3 align-top min-w-[210px]">
+                        {row.kind === 'orphan_transaction' ? (
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <select
+                              value={orphanMode}
+                              onChange={(e) => {
+                                const nextMode = e.target.value as 'reassign' | 'delete';
+                                setOrphanActionModes((prev) => ({ ...prev, [row.txIndex]: nextMode }));
+                                setShowCleanupConfirm(false);
+                              }}
+                              className="px-2 py-1 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-lg text-[11px] font-semibold text-slate-800 dark:text-slate-100"
+                            >
+                              {accounts.length > 0 && <option value="reassign">Alihkan</option>}
+                              <option value="delete">Hapus Baris</option>
+                            </select>
+                            {orphanMode === 'reassign' && accounts.length > 0 && (
+                              <select
+                                value={targetAccId}
+                                onChange={(e) => {
+                                  setOrphanTargetAccounts((prev) => ({
+                                    ...prev,
+                                    [row.txIndex]: e.target.value,
+                                  }));
+                                  setShowCleanupConfirm(false);
+                                }}
+                                className="px-2 py-1 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-lg text-[11px] font-semibold text-slate-800 dark:text-slate-100 max-w-[145px]"
+                              >
+                                {accounts.map((acc) => (
+                                  <option key={acc.id} value={acc.id}>
+                                    {acc.name}
+                                  </option>
+                                ))}
+                              </select>
+                            )}
+                          </div>
+                        ) : (
+                          <div className="text-[11px] text-slate-600 dark:text-slate-300">
+                            <div className="font-semibold text-slate-800 dark:text-slate-100">
+                              {accObj ? accObj.name : tx.accountId || '(Tanpa Rekening)'}
+                            </div>
+                            <div className="text-[10px] text-slate-500 dark:text-slate-400">
+                              Salinan dihapus aman · Baris asli tetap tersimpan
+                            </div>
+                          </div>
+                        )}
+                      </td>
+                      <td className="py-2.5 px-3 font-mono tabular-nums text-right font-bold text-slate-900 dark:text-slate-100 whitespace-nowrap align-top">
+                        <span className={tx.type === 'income' ? 'text-emerald-700 dark:text-emerald-400' : ''}>
+                          {tx.type === 'income' ? '+' : '-'}
+                          {formatterIDR.format(Math.abs(tx.amount || 0))}
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {/* Live Per-Account Balance Impact Preview & Safe Confirmation */}
+        {selectedAnomalyRows.length > 0 && onUpdateTransactions && (
+          <div className="p-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 space-y-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-200 dark:border-slate-700 pb-2.5">
+              <div>
+                <h5 className="text-xs font-extrabold text-slate-800 dark:text-slate-100">
+                  Pratinjau Dampak Saldo per Rekening ({selectedAnomalyRows.length} Baris Dipilih)
+                </h5>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                  {cleanupPreview.removedDuplicateCount} duplikat dihapus · {cleanupPreview.reassignedOrphanCount}{' '}
+                  yatim dialihkan · {cleanupPreview.deletedOrphanCount} yatim dihapus
+                </p>
+              </div>
+              {!showCleanupConfirm ? (
+                <button
+                  type="button"
+                  onClick={() => setShowCleanupConfirm(true)}
+                  className="px-4 py-2 bg-slate-900 dark:bg-blue-600 hover:bg-slate-800 dark:hover:bg-blue-700 text-white text-xs font-bold rounded-lg transition cursor-pointer whitespace-nowrap shrink-0"
+                >
+                  Bersihkan Aman ({selectedAnomalyRows.length} Baris)
+                </button>
+              ) : (
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setShowCleanupConfirm(false)}
+                    className="px-3 py-1.5 border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 hover:bg-slate-100 text-slate-700 dark:text-slate-200 text-xs font-bold rounded-lg transition cursor-pointer whitespace-nowrap shrink-0"
+                  >
+                    Batal
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleExecuteSelectedAnomalyCleanup}
+                    className="px-4 py-1.5 bg-rose-600 hover:bg-rose-700 text-white text-xs font-extrabold rounded-lg transition cursor-pointer whitespace-nowrap shrink-0"
+                  >
+                    Konfirmasi &amp; Sinkron Saldo
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {cleanupPreview.accountImpacts.length > 0 ? (
+              <div className="overflow-x-auto border border-slate-200 dark:border-slate-700 rounded-lg bg-white dark:bg-slate-900">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-slate-100/80 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 text-[10px] font-bold text-slate-500 uppercase">
+                    <tr>
+                      <th className="py-2 px-3">Rekening Terdampak</th>
+                      <th className="py-2 px-3 text-right">Saldo Saat Ini</th>
+                      <th className="py-2 px-3 text-right">Koreksi Bersih</th>
+                      <th className="py-2 px-3 text-right">Proyeksi Saldo Akhir</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                    {cleanupPreview.accountImpacts.map((imp) => (
+                      <tr key={imp.accountId}>
+                        <td className="py-2 px-3">
+                          <div className="font-bold text-slate-800 dark:text-slate-100">{imp.accountName}</div>
+                          <div className="text-[10px] text-slate-500 dark:text-slate-400">
+                            {imp.affectedRowCount} baris dipilih
+                            {imp.glAlreadyExcludedCount > 0 &&
+                              ` · ${imp.glAlreadyExcludedCount} duplikat sudah tidak terhitung di saldo`}
+                          </div>
+                        </td>
+                        <td className="py-2 px-3 text-right font-mono tabular-nums text-slate-600 dark:text-slate-300 whitespace-nowrap">
+                          {formatterIDR.format(imp.currentBalance)}
+                        </td>
+                        <td
+                          className={`py-2 px-3 text-right font-mono tabular-nums font-bold whitespace-nowrap ${
+                            imp.netBalanceDelta > 0
+                              ? 'text-emerald-600 dark:text-emerald-400'
+                              : imp.netBalanceDelta < 0
+                              ? 'text-rose-600 dark:text-rose-400'
+                              : 'text-slate-500 dark:text-slate-400'
+                          }`}
+                        >
+                          {imp.netBalanceDelta > 0 ? '+' : ''}
+                          {formatterIDR.format(imp.netBalanceDelta)}
+                        </td>
+                        <td className="py-2 px-3 text-right font-mono tabular-nums font-extrabold text-slate-900 dark:text-white whitespace-nowrap">
+                          {formatterIDR.format(imp.projectedBalance)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p className="text-[11px] text-slate-600 dark:text-slate-300">
+                Baris terpilih tidak memengaruhi saldo rekening aktif saat ini (entri yatim tanpa rekening valid atau sudah tersinkron di GL).
+              </p>
+            )}
+          </div>
+        )}
+      </div>
+    );
   };
 
   const handleExecuteAutoReconciliation = () => {
@@ -1009,185 +1400,8 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
                 </div>
               )}
 
-              {/* Ledger Reference & Duplicate Audit Panel */}
-              <div className="p-4 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 space-y-4">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 dark:border-slate-800 pb-3">
-                  <div className="space-y-0.5">
-                    <h4 className="text-xs font-extrabold uppercase tracking-wider text-slate-800 dark:text-slate-100 flex items-center gap-2">
-                      {ledgerAudit.isLedgerClean ? (
-                        <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0" />
-                      ) : (
-                        <AlertTriangle className="h-4 w-4 text-rose-600 shrink-0" />
-                      )}
-                      <span>Validasi Referensi Akun &amp; Duplikasi Buku Besar</span>
-                    </h4>
-                    <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                      {transactions.length} entri buku besar dipindai · {ledgerAudit.totalOrphans} transaksi yatim ·{' '}
-                      {ledgerAudit.totalDuplicateIdRows} ID duplikat · {ledgerAudit.totalSameDayDuplicateRows} entri identik di hari sama
-                    </p>
-                  </div>
-
-                  {!ledgerAudit.isLedgerClean &&
-                    (ledgerAudit.totalDuplicateIdRows > 0 || ledgerAudit.totalSameDayDuplicateRows > 0) &&
-                    onUpdateTransactions && (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          handleRemoveDuplicates(
-                            [
-                              ...ledgerAudit.duplicateIdGroups.flatMap((g) => g.duplicateIndices),
-                              ...ledgerAudit.sameDayDuplicateGroups.flatMap((g) => g.duplicateIndices),
-                            ],
-                            'Pembersihan Semua Duplikat Buku Besar'
-                          )
-                        }
-                        className="px-3.5 py-2 bg-rose-600 hover:bg-rose-700 text-white text-xs font-extrabold rounded-xl transition cursor-pointer shrink-0 whitespace-nowrap"
-                      >
-                        Bersihkan Semua Duplikat ({ledgerAudit.totalDuplicateIdRows + ledgerAudit.totalSameDayDuplicateRows})
-                      </button>
-                    )}
-                </div>
-
-                {ledgerAudit.isLedgerClean ? (
-                  <p className="text-xs text-emerald-700 dark:text-emerald-300 font-medium">
-                    Seluruh transaksi non-penyesuaian terhubung ke rekening valid dan tidak ditemukan data ganda di buku besar.
-                  </p>
-                ) : (
-                  <div className="space-y-4">
-                    {/* Orphan Transactions */}
-                    {ledgerAudit.orphanTransactions.length > 0 && (
-                      <div className="space-y-2">
-                        <div className="text-[11px] font-extrabold text-rose-700 dark:text-rose-300">
-                          Transaksi Tanpa Referensi Akun Valid ({ledgerAudit.orphanTransactions.length})
-                        </div>
-                        <div className="overflow-x-auto border border-slate-200 dark:border-slate-800 rounded-xl">
-                          <table className="w-full text-left text-xs">
-                            <thead className="bg-slate-50 dark:bg-slate-800/80 border-b border-slate-200 dark:border-slate-800 text-[10px] font-extrabold text-slate-500 uppercase">
-                              <tr>
-                                <th className="py-2 px-3">Tanggal</th>
-                                <th className="py-2 px-3">Transaksi</th>
-                                <th className="py-2 px-3">Akun Bermasalah</th>
-                                <th className="py-2 px-3 text-right">Nominal</th>
-                                <th className="py-2 px-3 text-right">Perbaikan</th>
-                              </tr>
-                            </thead>
-                            <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                              {ledgerAudit.orphanTransactions.map((orphan) => {
-                                const tx = orphan.transaction;
-                                const selectedAcc = orphanTargetAccounts[orphan.index] || defaultValidAccountId;
-                                return (
-                                  <tr key={`${orphan.index}-${tx.id}`}>
-                                    <td className="py-2 px-3 font-mono tabular-nums text-slate-600 dark:text-slate-300 whitespace-nowrap">
-                                      {tx.date}
-                                    </td>
-                                    <td className="py-2 px-3">
-                                      <div className="font-bold text-slate-800 dark:text-slate-100">
-                                        {tx.description || tx.category}
-                                      </div>
-                                      <div className="text-[10px] text-slate-500">
-                                        {tx.category} · {tx.type}
-                                      </div>
-                                    </td>
-                                    <td className="py-2 px-3 font-mono text-[11px] text-rose-600 dark:text-rose-400">
-                                      {orphan.reason === 'missing_account_id' ? '(Kosong)' : tx.accountId}
-                                    </td>
-                                    <td className="py-2 px-3 font-mono tabular-nums text-right font-bold text-slate-900 dark:text-slate-100 whitespace-nowrap">
-                                      {formatterIDR.format(tx.amount)}
-                                    </td>
-                                    <td className="py-2 px-3">
-                                      {onUpdateTransactions && (
-                                        <div className="flex items-center justify-end gap-1.5">
-                                          {accounts.length > 0 && (
-                                            <>
-                                              <select
-                                                value={selectedAcc}
-                                                onChange={(e) =>
-                                                  setOrphanTargetAccounts((prev) => ({
-                                                    ...prev,
-                                                    [orphan.index]: e.target.value,
-                                                  }))
-                                                }
-                                                className="px-2 py-1 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-lg text-[11px] font-semibold text-slate-800 dark:text-slate-100 max-w-[140px]"
-                                              >
-                                                {accounts.map((acc) => (
-                                                  <option key={acc.id} value={acc.id}>
-                                                    {acc.name}
-                                                  </option>
-                                                ))}
-                                              </select>
-                                              <button
-                                                type="button"
-                                                onClick={() => handleReassignOrphan(orphan.index)}
-                                                className="px-2.5 py-1 bg-blue-600 hover:bg-blue-700 text-white text-[11px] font-bold rounded-lg transition cursor-pointer whitespace-nowrap"
-                                              >
-                                                Alihkan
-                                              </button>
-                                            </>
-                                          )}
-                                          <button
-                                            type="button"
-                                            onClick={() => handleDeleteOrphan(orphan.index)}
-                                            className="px-2.5 py-1 bg-rose-600 hover:bg-rose-700 text-white text-[11px] font-bold rounded-lg transition cursor-pointer whitespace-nowrap"
-                                          >
-                                            Hapus
-                                          </button>
-                                        </div>
-                                      )}
-                                    </td>
-                                  </tr>
-                                );
-                              })}
-                            </tbody>
-                          </table>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Duplicate Groups (ID Duplicates + Same-Day Identical) */}
-                    {(ledgerAudit.duplicateIdGroups.length > 0 || ledgerAudit.sameDayDuplicateGroups.length > 0) && (
-                      <div className="space-y-2">
-                        <div className="text-[11px] font-extrabold text-amber-800 dark:text-amber-300">
-                          Potensi Data Ganda di Buku Besar (
-                          {ledgerAudit.duplicateIdGroups.length + ledgerAudit.sameDayDuplicateGroups.length} Kelompok)
-                        </div>
-                        <div className="divide-y divide-slate-100 dark:divide-slate-800 border border-slate-200 dark:border-slate-800 rounded-xl">
-                          {[...ledgerAudit.duplicateIdGroups, ...ledgerAudit.sameDayDuplicateGroups].map((grp) => {
-                            const sample = grp.items[0]?.transaction;
-                            return (
-                              <div
-                                key={grp.groupKey}
-                                className="p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
-                              >
-                                <div className="space-y-0.5 min-w-0">
-                                  <div className="font-bold text-slate-900 dark:text-slate-100 truncate">
-                                    {grp.kind === 'duplicate_id' ? 'ID Duplikat' : 'Entri Identik Hari Sama'} ·{' '}
-                                    {sample?.description || sample?.category}
-                                  </div>
-                                  <div className="text-[11px] text-slate-500 dark:text-slate-400 font-mono tabular-nums">
-                                    {sample?.date} · {grp.items.length}x tercatat ·{' '}
-                                    {formatterIDR.format(sample?.amount || 0)}
-                                  </div>
-                                </div>
-                                {onUpdateTransactions && (
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      handleRemoveDuplicates(grp.duplicateIndices, grp.fingerprintLabel)
-                                    }
-                                    className="px-3 py-1.5 bg-rose-600 hover:bg-rose-700 text-white text-[11px] font-extrabold rounded-lg transition cursor-pointer shrink-0 whitespace-nowrap"
-                                  >
-                                    Hapus {grp.duplicateIndices.length} Salinan
-                                  </button>
-                                )}
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
+              {/* Unified Ledger Reference & Duplicate Audit Panel (Per-Row Selection & Balance Preview) */}
+              {renderUnifiedAnomalyDetailPanel('Validasi Referensi Akun & Duplikasi Buku Besar')}
 
               {/* Account Balances Ledger Table */}
               <div className="space-y-3">
@@ -1482,40 +1696,43 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
 
                   <div className="p-3 bg-slate-800/60 rounded-xl border border-slate-700/60 space-y-1.5">
                     <div className="flex items-center justify-between">
-                      <span className="font-bold text-slate-300">Duplikat Buku Besar:</span>
+                      <span className="font-bold text-slate-300">Anomali Buku Besar:</span>
                       <span className={`px-2 py-0.5 rounded-full text-[10px] font-black uppercase ${
-                        scanResult.totalLedgerDuplicates > 0 ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30' : 'bg-emerald-500/20 text-emerald-300'
+                        scanResult.totalLedgerAnomalies > 0 ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30' : 'bg-emerald-500/20 text-emerald-300'
                       }`}>
-                        {scanResult.totalLedgerDuplicates} Entri
+                        {scanResult.totalLedgerAnomalies} Baris
                       </span>
                     </div>
-                    {scanResult.totalLedgerDuplicates > 0 ? (
+                    {scanResult.totalLedgerAnomalies > 0 ? (
                       <div className="space-y-2">
                         <p className="text-[11px] text-rose-200">
-                          {scanResult.ledgerDuplicateIdGroups.length} grup ID duplikat · {scanResult.ledgerSameDayDuplicateGroups.length} grup identik hari sama.
+                          {scanResult.totalLedgerDuplicates} duplikat · {scanResult.totalLedgerOrphans} transaksi yatim siap diseleksi di bawah.
                         </p>
-                        {onUpdateTransactions && (
+                        {scanResult.totalLedgerDuplicates > 0 && onUpdateTransactions && (
                           <button
                             type="button"
                             onClick={() => {
-                              const allDupIndices = [
-                                ...scanResult.ledgerDuplicateIdGroups.flatMap((g) => g.duplicateIndices),
-                                ...scanResult.ledgerSameDayDuplicateGroups.flatMap((g) => g.duplicateIndices),
-                              ];
-                              handleRemoveDuplicates(allDupIndices, 'Pembersihan Duplikat Buku Besar (COA Scanner)');
+                              const dupKeys = scanResult.ledgerAnomalies
+                                .filter((r) => r.kind === 'duplicate_id' || r.kind === 'same_day_identical')
+                                .map((r) => r.rowKey);
+                              setSelectedAnomalyKeys(new Set(dupKeys));
+                              setShowCleanupConfirm(true);
                             }}
-                            className="px-2.5 py-1 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-[10px] font-bold transition cursor-pointer"
+                            className="px-2.5 py-1 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-[10px] font-bold transition cursor-pointer whitespace-nowrap"
                           >
-                            Bersihkan Aman Saldo
+                            Pilih &amp; Pratinjau Duplikat
                           </button>
                         )}
                       </div>
                     ) : (
-                      <p className="text-[11px] text-slate-400">Tidak ada ID ganda atau entri identik harian.</p>
+                      <p className="text-[11px] text-slate-400">Tidak ada ID ganda, identik harian, maupun yatim.</p>
                     )}
                   </div>
                 </div>
               </div>
+
+              {/* Detail Panel Seleksi Per Baris Hasil Pemindaian scanCoaDuplicatesAndUnused */}
+              {renderUnifiedAnomalyDetailPanel('Detail Anomali & Duplikat Hasil Pemindaian COA & Buku Besar')}
 
               {manualSyncMessage && (
                 <div className="p-3.5 bg-emerald-500 text-white rounded-xl text-xs font-bold flex items-center justify-between shadow-sm animate-fadeIn">

@@ -155,7 +155,7 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
         break;
       case 'pivot-tree':
       default:
-        exportIncomeStatementToCSV(filteredTxs, periodFilter);
+        exportIncomeStatementToCSV(filteredTxs, periodFilter, kprCoaMapping);
         break;
     }
   };
@@ -194,8 +194,8 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
 
   // --- 1. CASHFLOW STATEMENT CALCULATIONS (Standardized 3-Activity Engine) ---
   const cashflowData = useMemo(() => {
-    return calculateCashFlowStatement(filteredTxs);
-  }, [filteredTxs]);
+    return calculateCashFlowStatement(filteredTxs, accounts);
+  }, [filteredTxs, accounts]);
 
   // --- 2. BALANCE SHEET CALCULATIONS ---
   const balanceSheetData = useMemo(() => {
@@ -674,6 +674,7 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
         <HierarchicalPivotReport
           transactions={transactions}
           masterCategories={masterCategories}
+          kprCoaMapping={kprCoaMapping}
         />
       )}
 
@@ -1079,6 +1080,23 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
                   </div>
                 </div>
               </div>
+
+              {/* NON-CASH CREDIT USAGE DISCLOSURE */}
+              {cashflowData.nonCashCreditOutflows > 0 && (
+                <div className="p-4 bg-slate-50/70 flex justify-between items-center text-slate-600">
+                  <div>
+                    <span className="font-semibold text-slate-700 block">
+                      Belanja Non-Kas via Kartu Kredit / PayLater (Terpisah dari Arus Kas Keluar Tunai)
+                    </span>
+                    <span className="text-[11px] text-slate-500">
+                      Beban diakui di Laba Rugi; arus kas keluar dicatat saat pelunasan tagihan kartu.
+                    </span>
+                  </div>
+                  <span className="font-mono font-bold text-slate-700">
+                    {formatterIDR.format(cashflowData.nonCashCreditOutflows)}
+                  </span>
+                </div>
+              )}
 
               {/* TOTAL NET CASH FLOW */}
               <div className="p-4 bg-blue-50/80 border-t-2 border-blue-200 flex justify-between items-center font-extrabold text-sm text-slate-900">

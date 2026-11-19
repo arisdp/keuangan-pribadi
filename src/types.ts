@@ -29,6 +29,9 @@ export interface Transaction {
   linkedKprBreakdown?: {
     principalPart?: number;
     interestPart?: number;
+    principalCoaCode?: string;
+    interestCoaCode?: string;
+    interestCategory?: string;
   };
 }
 

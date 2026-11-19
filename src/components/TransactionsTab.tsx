@@ -9,6 +9,7 @@ import { DEFAULT_KPR_COA_MAPPING, resolveEffectiveKprCoaMapping, resolveTransact
 import { showToast } from '../utils/toast';
 import {
   applyAccountBalanceChange,
+  calculateKprInstallmentBreakdown,
   getAccountCreditBill,
   getTransactionAccountDelta,
   isCreditAccount,
@@ -93,10 +94,11 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
         purpose: 'consumptive' as const,
         category: a.type === 'credit-card' ? 'Kartu Kredit' : 'PayLater / Fintech',
         dueDay: a.dueDay,
+        isAccount: true as const,
       };
     });
 
-  const allDebts = [...debts, ...accountDebts];
+  const allDebts = [...debts.map(d => ({ ...d, isAccount: false as const })), ...accountDebts];
 
   // Helper function: Calculate days until due for recurring transactions
   const getDaysUntilDue = (dayOfMonth: number) => {
@@ -593,6 +595,22 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
 
   // Linked Features Form States
   const [linkedDebtId, setLinkedDebtId] = useState<string>('');
+  const [splitPrincipalInterest, setSplitPrincipalInterest] = useState<boolean>(true);
+  const [interestPortion, setInterestPortion] = useState<string>('0');
+
+  const estimateMonthlyDebtInterest = (
+    debt?: { balance: number; interestRate?: number; isAccount?: boolean; [key: string]: any },
+    payAmt?: number
+  ) => {
+    if (!debt || debt.isAccount || !debt.interestRate || debt.interestRate <= 0 || debt.balance <= 0) return 0;
+    const split = calculateKprInstallmentBreakdown({
+      debt: debt as Debt,
+      paymentAmount: payAmt && payAmt > 0 ? payAmt : (debt.minPayment || debt.balance || 0),
+      paymentDate: date,
+      baseCoaMapping: kprCoaMapping,
+    });
+    return split.interestPart;
+  };
 
   const activateDebtPaymentMode = (targetDebtId?: string) => {
     setType('expense');
@@ -617,7 +635,11 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
       if (matched) {
         const defaultAmt =
           matched.minPayment > 0 ? Math.min(matched.minPayment, matched.balance) : matched.balance;
-        setAmount(String(Math.round(defaultAmt)));
+        const roundedAmt = Math.round(defaultAmt);
+        setAmount(String(roundedAmt));
+        const hasRate = !matched.isAccount && (matched.interestRate || 0) > 0;
+        setSplitPrincipalInterest(hasRate);
+        setInterestPortion(String(estimateMonthlyDebtInterest(matched, roundedAmt)));
         const isKpr = matched.category === 'KPR / Properti' || Boolean((matched as Debt).kprScheme);
         if (isKpr) {
           setCategory(kprCoaMapping.principalPaymentCategory || 'Cicilan KPR');
@@ -929,11 +951,22 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
         return;
       }
 
-      if (parsedAmount > targetDebt.balance) {
+      const activeDebtTarget = targetDebt;
+      const isLoanBreakdownActive =
+        !activeDebtTarget.isAccount &&
+        splitPrincipalInterest &&
+        (activeDebtTarget.interestRate || 0) > 0;
+      const rawInt = isLoanBreakdownActive ? Math.max(0, parseFloat(interestPortion) || 0) : 0;
+      const cappedInt = Math.min(parsedAmount, rawInt);
+      const effectivePrincipalPay = isLoanBreakdownActive
+        ? Math.max(0, parsedAmount - cappedInt)
+        : parsedAmount;
+
+      if (effectivePrincipalPay > activeDebtTarget.balance) {
         showToast({
           type: 'warning',
-          title: 'Nominal Melebihi Sisa Pokok',
-          message: `Nominal pembayaran (${formatterIDR.format(parsedAmount)}) melebihi sisa saldo "${targetDebt.name}" (${formatterIDR.format(targetDebt.balance)}).`,
+          title: 'Pokok Melebihi Sisa Hutang',
+          message: `Porsi pokok pembayaran (${formatterIDR.format(effectivePrincipalPay)}) melebihi sisa pokok "${activeDebtTarget.name}" (${formatterIDR.format(activeDebtTarget.balance)}).`,
           duration: 5000,
         });
         return;
@@ -1023,6 +1056,39 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
       }
     }
 
+    let resolvedKprBreakdown: Transaction['linkedKprBreakdown'] | undefined;
+    if (isDebtPay && linkedDebtId) {
+      const targetDebt = allDebts.find((d) => d.id === linkedDebtId);
+      if (targetDebt && !targetDebt.isAccount) {
+        const splitInfo = calculateKprInstallmentBreakdown({
+          debt: targetDebt as Debt,
+          paymentAmount: parsedAmount,
+          paymentDate: date,
+          baseCoaMapping: kprCoaMapping,
+          creditAccountCoaCode: sourceAccCoa.code,
+        });
+        if (splitPrincipalInterest && (targetDebt.interestRate || 0) > 0) {
+          const interestAmt = Math.min(parsedAmount, Math.max(0, parseFloat(interestPortion) || 0));
+          const principalAmt = Math.max(0, parsedAmount - interestAmt);
+          resolvedKprBreakdown = {
+            principalPart: principalAmt,
+            interestPart: interestAmt,
+            principalCoaCode: splitInfo.principalDebitCode,
+            interestCoaCode: splitInfo.interestExpenseCode,
+            interestCategory: splitInfo.interestExpenseCategory,
+          };
+        } else if (splitInfo.isKpr || (targetDebt.interestRate || 0) > 0) {
+          resolvedKprBreakdown = {
+            principalPart: parsedAmount,
+            interestPart: 0,
+            principalCoaCode: splitInfo.principalDebitCode,
+            interestCoaCode: splitInfo.interestExpenseCode,
+            interestCategory: splitInfo.interestExpenseCategory,
+          };
+        }
+      }
+    }
+
     const didSave = onAddTransaction({
       date,
       accountId,
@@ -1032,6 +1098,7 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
       amount: parsedAmount,
       coaDebitCode: resolvedCoaDebitCode,
       coaCreditCode: resolvedCoaCreditCode,
+      linkedKprBreakdown: resolvedKprBreakdown,
       unitPrice: isInvestmentContext ? effectiveUnitPrice : undefined,
       units: isInvestmentContext ? effectiveUnits : undefined,
       unitName: isInvestmentContext ? effectiveUnitName : undefined,
@@ -1717,8 +1784,16 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
               const selectedDebtObj = activeDebtsList.find((d) => d.id === linkedDebtId);
               const sourceAccObj = accounts.find((a) => a.id === accountId);
               const parsedPayAmt = parseFloat(amount) || 0;
+              const canSplitLoan = Boolean(
+                selectedDebtObj && !selectedDebtObj.isAccount && (selectedDebtObj.interestRate || 0) > 0
+              );
+              const activeInterestAmt =
+                canSplitLoan && splitPrincipalInterest
+                  ? Math.min(parsedPayAmt, Math.max(0, parseFloat(interestPortion) || 0))
+                  : 0;
+              const effectivePrincipalPay = Math.max(0, parsedPayAmt - activeInterestAmt);
               const isInsufficientSource = Boolean(sourceAccObj && parsedPayAmt > 0 && sourceAccObj.currentBalance < parsedPayAmt);
-              const isOverDebtBalance = Boolean(selectedDebtObj && parsedPayAmt > selectedDebtObj.balance);
+              const isOverDebtBalance = Boolean(selectedDebtObj && effectivePrincipalPay > selectedDebtObj.balance);
               const isSameCardAccount = Boolean(linkedDebtId && linkedDebtId === `acc-debt-${accountId}`);
 
               return (
@@ -1754,7 +1829,11 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
                           if (picked) {
                             const suggested =
                               picked.minPayment > 0 ? Math.min(picked.minPayment, picked.balance) : picked.balance;
-                            setAmount(String(Math.round(suggested)));
+                            const roundedSuggested = Math.round(suggested);
+                            setAmount(String(roundedSuggested));
+                            const hasRate = !picked.isAccount && (picked.interestRate || 0) > 0;
+                            setSplitPrincipalInterest(hasRate);
+                            setInterestPortion(String(estimateMonthlyDebtInterest(picked, roundedSuggested)));
                             const isKpr =
                               picked.category === 'KPR / Properti' || Boolean((picked as Debt).kprScheme);
                             if (isKpr) {
@@ -1804,9 +1883,21 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
                       {(selectedDebtObj.category === 'KPR / Properti' || Boolean((selectedDebtObj as Debt).kprScheme)) && (() => {
                         const effCoa = resolveEffectiveKprCoaMapping(kprCoaMapping, (selectedDebtObj as Debt).kprCoaSnapshot);
                         const srcCoa = sourceAccObj ? getAccountCoaMapping(sourceAccObj, storedCoaList) : { code: '1200', name: 'Bank' };
+                        const schemePreview = calculateKprInstallmentBreakdown({
+                          debt: selectedDebtObj as Debt,
+                          paymentAmount: parsedPayAmt > 0 ? parsedPayAmt : (selectedDebtObj.minPayment || selectedDebtObj.balance || 0),
+                          paymentDate: date,
+                          baseCoaMapping: kprCoaMapping,
+                          creditAccountCoaCode: srcCoa.code,
+                        });
                         return (
-                          <div className="text-[10px] font-mono tabular-nums text-indigo-700 bg-indigo-50/70 border border-indigo-100 rounded-lg px-2.5 py-1.5">
-                            COA Jurnal Pokok: Dr {effCoa.principalLiabilityCode} · Cr {srcCoa.code}
+                          <div className="text-[10px] font-mono tabular-nums text-indigo-700 bg-indigo-50/70 border border-indigo-100 rounded-lg px-2.5 py-1.5 space-y-0.5">
+                            <div>
+                              Skema KPR: <strong>{schemePreview.phaseLabel} ({schemePreview.activeAnnualRate}%/thn)</strong> · Bulan ke-{schemePreview.elapsedMonths}
+                            </div>
+                            <div>
+                              COA Pokok: Dr {effCoa.principalLiabilityCode} · COA Bunga L/R: Dr {effCoa.interestExpenseCode} ({effCoa.interestExpenseCategory}) · Cr {srcCoa.code}
+                            </div>
                           </div>
                         );
                       })()}
@@ -1833,6 +1924,9 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
                             onClick={() => {
                               const cicilan = Math.round(Math.min(selectedDebtObj.minPayment, selectedDebtObj.balance));
                               setAmount(String(cicilan));
+                              const hasRate = !selectedDebtObj.isAccount && (selectedDebtObj.interestRate || 0) > 0;
+                              setSplitPrincipalInterest(hasRate);
+                              setInterestPortion(String(estimateMonthlyDebtInterest(selectedDebtObj, cicilan)));
                               const isKpr =
                                 selectedDebtObj.category === 'KPR / Properti' ||
                                 Boolean((selectedDebtObj as Debt).kprScheme);
@@ -1850,7 +1944,10 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
                         <button
                           type="button"
                           onClick={() => {
-                            setAmount(String(Math.round(selectedDebtObj.balance)));
+                            const payoff = Math.round(selectedDebtObj.balance);
+                            setAmount(String(payoff));
+                            setSplitPrincipalInterest(false);
+                            setInterestPortion('0');
                             const isKpr =
                               selectedDebtObj.category === 'KPR / Properti' ||
                               Boolean((selectedDebtObj as Debt).kprScheme);
@@ -1865,6 +1962,68 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
                           Lunasi Penuh ({formatterIDR.format(selectedDebtObj.balance)})
                         </button>
                       </div>
+
+                      {canSplitLoan && (
+                        <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-lg space-y-2 text-[10px]">
+                          <div className="flex items-center justify-between gap-2">
+                            <label className="flex items-center gap-2 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={splitPrincipalInterest}
+                                onChange={(e) => {
+                                  const checked = e.target.checked;
+                                  setSplitPrincipalInterest(checked);
+                                  if (checked) {
+                                    setInterestPortion(
+                                      String(estimateMonthlyDebtInterest(selectedDebtObj, parsedPayAmt))
+                                    );
+                                  } else {
+                                    setInterestPortion('0');
+                                  }
+                                }}
+                                className="h-3.5 w-3.5 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                              />
+                              <span className="font-bold text-slate-700">
+                                Pisahkan Pokok &amp; Bunga ke Laba Rugi
+                              </span>
+                            </label>
+                            {splitPrincipalInterest && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setInterestPortion(String(estimateMonthlyDebtInterest(selectedDebtObj, parsedPayAmt)))
+                                }
+                                className="px-2 py-0.5 rounded bg-white border border-slate-200 hover:bg-slate-100 text-[10px] font-bold text-indigo-700 transition cursor-pointer whitespace-nowrap shrink-0"
+                              >
+                                Hitung Otomatis
+                              </button>
+                            )}
+                          </div>
+                          {splitPrincipalInterest && (
+                            <div className="grid grid-cols-2 gap-2 pt-1 border-t border-slate-200/80">
+                              <div>
+                                <span className="text-slate-500 block font-semibold mb-1">
+                                  Porsi Bunga (Beban Laba Rugi)
+                                </span>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  max={Math.max(0, parsedPayAmt)}
+                                  value={interestPortion}
+                                  onChange={(e) => setInterestPortion(e.target.value)}
+                                  className="w-full bg-white border border-slate-200 rounded px-2 py-1 font-mono tabular-nums font-bold text-slate-800"
+                                />
+                              </div>
+                              <div className="flex flex-col justify-between bg-white border border-slate-200 rounded px-2 py-1">
+                                <span className="text-slate-500 font-semibold">Porsi Pokok (- Utang)</span>
+                                <span className="font-mono tabular-nums font-bold text-emerald-700">
+                                  {formatterIDR.format(effectivePrincipalPay)}
+                                </span>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
 
                       {parsedPayAmt > 0 && (
                         <div className="pt-2 border-t border-slate-100 space-y-1 text-[10px]">
@@ -1886,10 +2045,10 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
                             <span className="text-slate-500 font-semibold">Sisa Pokok Setelah Bayar:</span>
                             <span className={`font-mono font-bold ${isOverDebtBalance ? 'text-rose-600' : 'text-emerald-700'}`}>
                               {isOverDebtBalance
-                                ? 'Melebihi sisa hutang!'
-                                : selectedDebtObj.balance - parsedPayAmt <= 0
+                                ? 'Porsi pokok melebihi sisa utang!'
+                                : selectedDebtObj.balance - effectivePrincipalPay <= 0
                                 ? 'Rp 0 (LUNAS!)'
-                                : formatterIDR.format(selectedDebtObj.balance - parsedPayAmt)}
+                                : formatterIDR.format(selectedDebtObj.balance - effectivePrincipalPay)}
                             </span>
                           </div>
                         </div>
@@ -1903,7 +2062,7 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
                               ? 'Tidak dapat membayar tagihan kartu/paylater menggunakan rekening tagihan yang sama.'
                               : isInsufficientSource
                               ? `Saldo ${sourceAccObj?.name} tidak mencukupi untuk nominal cicilan ini.`
-                              : `Nominal bayar melebihi sisa pokok hutang (${formatterIDR.format(selectedDebtObj.balance)}).`}
+                              : `Porsi pokok pembayaran (${formatterIDR.format(effectivePrincipalPay)}) melebihi sisa pokok hutang (${formatterIDR.format(selectedDebtObj.balance)}).`}
                           </span>
                         </div>
                       )}

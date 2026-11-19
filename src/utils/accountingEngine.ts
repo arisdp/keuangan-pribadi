@@ -4,8 +4,246 @@ import {
   Debt,
   EmergencyFundTransaction,
   InvestmentAsset,
+  KprCoaMappingConfig,
   Transaction,
 } from '../types';
+
+export const ENGINE_DEFAULT_KPR_COA_MAPPING: KprCoaMappingConfig = {
+  propertyAssetCode: '1600',
+  principalLiabilityCode: '2310',
+  interestExpenseCode: '5810',
+  accruedInterestCode: '2390',
+  provisiAdminLegalCode: '5820',
+  taxInsuranceCode: '5830',
+  disbursementIncomeCategory: 'Pencairan KPR',
+  principalPaymentCategory: 'Cicilan KPR',
+  interestExpenseCategory: 'Beban Bunga KPR',
+};
+
+export function resolveEffectiveKprCoaForEngine(
+  baseMapping?: Partial<KprCoaMappingConfig>,
+  debtSnapshot?: Partial<KprCoaMappingConfig>
+): KprCoaMappingConfig {
+  const base: KprCoaMappingConfig = {
+    ...ENGINE_DEFAULT_KPR_COA_MAPPING,
+    ...(baseMapping || {}),
+  };
+  if (!debtSnapshot) return base;
+  return {
+    propertyAssetCode: debtSnapshot.propertyAssetCode || base.propertyAssetCode,
+    principalLiabilityCode: debtSnapshot.principalLiabilityCode || base.principalLiabilityCode,
+    interestExpenseCode: debtSnapshot.interestExpenseCode || base.interestExpenseCode,
+    accruedInterestCode: debtSnapshot.accruedInterestCode || base.accruedInterestCode,
+    provisiAdminLegalCode: debtSnapshot.provisiAdminLegalCode || base.provisiAdminLegalCode,
+    taxInsuranceCode: debtSnapshot.taxInsuranceCode || base.taxInsuranceCode,
+    disbursementIncomeCategory: debtSnapshot.disbursementIncomeCategory || base.disbursementIncomeCategory,
+    principalPaymentCategory: debtSnapshot.principalPaymentCategory || base.principalPaymentCategory,
+    interestExpenseCategory: debtSnapshot.interestExpenseCategory || base.interestExpenseCategory,
+  };
+}
+
+export interface KprInstallmentSplitResult {
+  isKpr: boolean;
+  scheme: 'annuity' | 'tiered' | 'flat';
+  activeAnnualRate: number;
+  phaseLabel: 'Fixed' | 'Floating' | 'Flat' | 'Anuitas';
+  elapsedMonths: number;
+  paymentAmount: number;
+  principalPart: number;
+  interestPart: number;
+  remainingBalanceAfter: number;
+  effectiveCoa: KprCoaMappingConfig;
+  principalDebitCode: string;
+  interestExpenseCode: string;
+  interestExpenseCategory: string;
+  creditAccountCoaCode?: string;
+}
+
+/**
+ * Menghitung porsi pokok & bunga cicilan KPR/pinjaman secara otomatis berdasarkan
+ * skema bunga (tiered fixed/floating, annuity, flat), umur pinjaman, dan mapping COA efektif.
+ */
+export function calculateKprInstallmentBreakdown(params: {
+  debt: Pick<
+    Debt,
+    | 'name'
+    | 'category'
+    | 'balance'
+    | 'interestRate'
+    | 'startDate'
+    | 'kprScheme'
+    | 'propertyPrice'
+    | 'downPayment'
+    | 'fixedRate'
+    | 'fixedYears'
+    | 'floatingRate'
+    | 'kprCoaSnapshot'
+  >;
+  paymentAmount: number;
+  paymentDate?: string;
+  baseCoaMapping?: Partial<KprCoaMappingConfig>;
+  creditAccountCoaCode?: string;
+}): KprInstallmentSplitResult {
+  const { debt, paymentAmount, paymentDate, baseCoaMapping, creditAccountCoaCode } = params;
+  const effectiveCoa = resolveEffectiveKprCoaForEngine(baseCoaMapping, debt.kprCoaSnapshot);
+  const isKpr =
+    debt.category === 'KPR / Properti' ||
+    Boolean(debt.kprScheme) ||
+    /\bkpr\b/i.test(debt.name || '');
+
+  const scheme: 'annuity' | 'tiered' | 'flat' = debt.kprScheme || 'annuity';
+  const remBalance = Math.max(0, Number(debt.balance) || 0);
+  const safePay = Math.max(0, Number(paymentAmount) || 0);
+
+  let elapsedMonths = 1;
+  const payDateStr = (paymentDate || new Date().toISOString().split('T')[0]).slice(0, 10);
+  const startStr = (debt.startDate || '').slice(0, 10);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(startStr) && /^\d{4}-\d{2}-\d{2}$/.test(payDateStr)) {
+    const [sy, sm] = startStr.split('-').map(Number);
+    const [py, pm] = payDateStr.split('-').map(Number);
+    elapsedMonths = Math.max(1, (py - sy) * 12 + (pm - sm) + 1);
+  }
+
+  let activeAnnualRate = Math.max(0, Number(debt.interestRate) || 0);
+  let phaseLabel: 'Fixed' | 'Floating' | 'Flat' | 'Anuitas' = 'Anuitas';
+
+  if (scheme === 'tiered') {
+    const fixedMonths = Math.max(0, Math.round((debt.fixedYears || 0) * 12));
+    if (fixedMonths > 0 && elapsedMonths <= fixedMonths) {
+      activeAnnualRate = Math.max(0, Number(debt.fixedRate ?? debt.interestRate) || 0);
+      phaseLabel = 'Fixed';
+    } else {
+      activeAnnualRate = Math.max(0, Number(debt.floatingRate ?? debt.interestRate) || 0);
+      phaseLabel = 'Floating';
+    }
+  } else if (scheme === 'flat') {
+    activeAnnualRate = Math.max(0, Number(debt.interestRate ?? debt.fixedRate) || 0);
+    phaseLabel = 'Flat';
+  } else {
+    activeAnnualRate = Math.max(0, Number(debt.interestRate ?? debt.fixedRate) || 0);
+    phaseLabel = 'Anuitas';
+  }
+
+  let rawMonthlyInterest = 0;
+  if (remBalance > 0 && activeAnnualRate > 0) {
+    if (scheme === 'flat' && debt.propertyPrice && debt.downPayment !== undefined) {
+      const initialPrincipal = Math.max(remBalance, debt.propertyPrice - debt.downPayment);
+      rawMonthlyInterest = Math.round(initialPrincipal * (activeAnnualRate / 100 / 12));
+    } else {
+      rawMonthlyInterest = Math.round(remBalance * (activeAnnualRate / 100 / 12));
+    }
+  }
+
+  const interestPart = safePay > 0 ? Math.min(safePay, Math.max(0, rawMonthlyInterest)) : 0;
+  const principalPart = Math.min(remBalance, Math.max(0, safePay - interestPart));
+  const remainingBalanceAfter = Math.max(0, remBalance - principalPart);
+
+  return {
+    isKpr,
+    scheme,
+    activeAnnualRate,
+    phaseLabel,
+    elapsedMonths,
+    paymentAmount: safePay,
+    principalPart,
+    interestPart,
+    remainingBalanceAfter,
+    effectiveCoa,
+    principalDebitCode: isKpr ? effectiveCoa.principalLiabilityCode : '2300',
+    interestExpenseCode: isKpr ? effectiveCoa.interestExpenseCode : '5810',
+    interestExpenseCategory: isKpr ? effectiveCoa.interestExpenseCategory : 'Beban Bunga Pinjaman / KPR',
+    creditAccountCoaCode,
+  };
+}
+
+/**
+ * Menyelaraskan rincian pokok/bunga & kode COA efektif pada transaksi cicilan utang/KPR
+ * sebelum dicatat ke Jurnal Transaksi.
+ */
+export function resolveDebtInstallmentAccounting(params: {
+  tx: Pick<
+    Transaction,
+    'amount' | 'date' | 'coaDebitCode' | 'coaCreditCode' | 'linkedKprBreakdown'
+  >;
+  debt: Debt;
+  baseCoaMapping?: Partial<KprCoaMappingConfig>;
+  sourceAccountCoaCode: string;
+}): {
+  linkedKprBreakdown?: Transaction['linkedKprBreakdown'];
+  coaDebitCode?: string;
+  coaCreditCode?: string;
+  principalPayAmount: number;
+  interestExpenseAmount: number;
+} {
+  const { tx, debt, baseCoaMapping, sourceAccountCoaCode } = params;
+  const safeAmt = Math.abs(Number(tx.amount) || 0);
+  const effectiveCoa = resolveEffectiveKprCoaForEngine(baseCoaMapping, debt.kprCoaSnapshot);
+  const isKpr =
+    debt.category === 'KPR / Properti' ||
+    Boolean(debt.kprScheme) ||
+    /\bkpr\b/i.test(debt.name || '');
+
+  const principalCoaCode = isKpr ? effectiveCoa.principalLiabilityCode : '2300';
+  const interestCoaCode = isKpr ? effectiveCoa.interestExpenseCode : '5810';
+  const interestCategory = isKpr ? effectiveCoa.interestExpenseCategory : 'Beban Bunga Pinjaman / KPR';
+
+  if (tx.linkedKprBreakdown) {
+    const interestPart = Math.min(safeAmt, Math.max(0, Number(tx.linkedKprBreakdown.interestPart) || 0));
+    const principalPart = Math.max(
+      0,
+      tx.linkedKprBreakdown.principalPart !== undefined
+        ? Number(tx.linkedKprBreakdown.principalPart) || 0
+        : safeAmt - interestPart
+    );
+    return {
+      linkedKprBreakdown: {
+        principalPart,
+        interestPart,
+        principalCoaCode: tx.linkedKprBreakdown.principalCoaCode || principalCoaCode,
+        interestCoaCode: tx.linkedKprBreakdown.interestCoaCode || interestCoaCode,
+        interestCategory: tx.linkedKprBreakdown.interestCategory || interestCategory,
+      },
+      coaDebitCode: tx.coaDebitCode || (isKpr ? effectiveCoa.principalLiabilityCode : undefined),
+      coaCreditCode: tx.coaCreditCode || (isKpr ? sourceAccountCoaCode : undefined),
+      principalPayAmount: principalPart,
+      interestExpenseAmount: interestPart,
+    };
+  }
+
+  // Hitung otomatis dari skema pinjaman KPR / berbunga
+  const split = calculateKprInstallmentBreakdown({
+    debt,
+    paymentAmount: safeAmt,
+    paymentDate: tx.date,
+    baseCoaMapping,
+    creditAccountCoaCode: sourceAccountCoaCode,
+  });
+
+  // Jika pelunasan persis sama dengan sisa pokok dan bukan angsuran berulang dengan bunga, tetap hormati jika >0 rate -> split otomatis
+  const shouldAttachBreakdown = isKpr || (debt.interestRate || 0) > 0;
+  if (!shouldAttachBreakdown) {
+    return {
+      coaDebitCode: tx.coaDebitCode,
+      coaCreditCode: tx.coaCreditCode,
+      principalPayAmount: safeAmt,
+      interestExpenseAmount: 0,
+    };
+  }
+
+  return {
+    linkedKprBreakdown: {
+      principalPart: split.principalPart,
+      interestPart: split.interestPart,
+      principalCoaCode: split.principalDebitCode,
+      interestCoaCode: split.interestExpenseCode,
+      interestCategory: split.interestExpenseCategory,
+    },
+    coaDebitCode: tx.coaDebitCode || (isKpr ? split.principalDebitCode : undefined),
+    coaCreditCode: tx.coaCreditCode || (isKpr ? sourceAccountCoaCode : undefined),
+    principalPayAmount: split.principalPart,
+    interestExpenseAmount: split.interestPart,
+  };
+}
 
 /**
  * Klasifikasi sifat akuntansi transaksi agar Laba Rugi Operasional terpisah
@@ -421,9 +659,17 @@ export function calculateAccountGLBalance(
   let txCount = 0;
 
   (transactions || []).forEach((tx) => {
-    if (tx && !tx.isAdjustment && tx.accountId === acc.id) {
+    if (!tx || tx.isAdjustment) return;
+    if (tx.accountId === acc.id) {
       txCount += 1;
       calculatedDelta += getTransactionAccountDelta(tx);
+    } else if (
+      isCreditAccount(acc) &&
+      tx.linkedDebtAction === 'pay' &&
+      tx.linkedDebtId === `acc-debt-${acc.id}`
+    ) {
+      txCount += 1;
+      calculatedDelta += Math.abs(Number(tx.amount) || 0);
     }
   });
 
@@ -528,6 +774,161 @@ export function removeDuplicateTransactionsWithBalanceSync(
   };
 }
 
+export interface AccountCleanupImpactPreview {
+  accountId: string;
+  accountName: string;
+  accountType: AccountType;
+  currentBalance: number;
+  netBalanceDelta: number;
+  projectedBalance: number;
+  affectedRowCount: number;
+  glAlreadyExcludedCount: number;
+}
+
+export interface AnomalyCleanupPreviewResult {
+  updatedTransactions: Transaction[];
+  updatedAccounts: Account[];
+  accountImpacts: AccountCleanupImpactPreview[];
+  removedDuplicateCount: number;
+  reassignedOrphanCount: number;
+  deletedOrphanCount: number;
+  totalAffectedRows: number;
+}
+
+/**
+ * Mensimulasikan sekaligus mengeksekusi pembersihan baris duplikat dan perbaikan transaksi yatim
+ * secara aman, menghasilkan pratinjau total dampak saldo per rekening sebelum eksekusi.
+ */
+export function previewSafeAnomalyCleanupImpact(
+  transactions: Transaction[],
+  accounts: Account[],
+  params: {
+    duplicateIndicesToRemove?: number[];
+    orphanReassignments?: Array<{ txIndex: number; targetAccountId: string }>;
+    orphanIndicesToDelete?: number[];
+  }
+): AnomalyCleanupPreviewResult {
+  const safeTxs = Array.isArray(transactions) ? transactions : [];
+  const safeAccounts = Array.isArray(accounts) ? accounts : [];
+
+  const dupSet = new Set(
+    (params.duplicateIndicesToRemove || []).filter((i) => i >= 0 && i < safeTxs.length)
+  );
+  const delOrphanSet = new Set(
+    (params.orphanIndicesToDelete || []).filter((i) => i >= 0 && i < safeTxs.length && !dupSet.has(i))
+  );
+  const reassignMap = new Map<number, string>();
+  (params.orphanReassignments || []).forEach(({ txIndex, targetAccountId }) => {
+    if (
+      txIndex >= 0 &&
+      txIndex < safeTxs.length &&
+      !dupSet.has(txIndex) &&
+      !delOrphanSet.has(txIndex) &&
+      safeAccounts.some((a) => a.id === targetAccountId)
+    ) {
+      reassignMap.set(txIndex, targetAccountId);
+    }
+  });
+
+  const removeCombinedSet = new Set<number>([...dupSet, ...delOrphanSet]);
+
+  // 1. Terapkan pengalihan transaksi yatim ke daftar transaksi kerja & hitung delta pengalihan
+  const orphanDeltaByAccount = new Map<string, number>();
+  const touchedCountByAccount = new Map<string, number>();
+
+  const txsWithReassign = safeTxs.map((tx, idx) => {
+    const newAccId = reassignMap.get(idx);
+    if (!newAccId || !tx || tx.accountId === newAccId) return tx;
+    const delta = getTransactionAccountDelta(tx);
+    if (delta !== 0) {
+      orphanDeltaByAccount.set(newAccId, (orphanDeltaByAccount.get(newAccId) || 0) + delta);
+    }
+    touchedCountByAccount.set(newAccId, (touchedCountByAccount.get(newAccId) || 0) + 1);
+    return { ...tx, accountId: newAccId };
+  });
+
+  // 2. Hitung dampak penghapusan baris duplikat (dan orphan yang dihapus jika sempat merujuk akun)
+  const finalTransactions = txsWithReassign.filter((_, idx) => !removeCombinedSet.has(idx));
+  const duplicateRowCountByAccount = new Map<string, number>();
+
+  safeTxs.forEach((tx, idx) => {
+    if (!tx || tx.isAdjustment || !tx.accountId) return;
+    if (dupSet.has(idx)) {
+      duplicateRowCountByAccount.set(
+        tx.accountId,
+        (duplicateRowCountByAccount.get(tx.accountId) || 0) + 1
+      );
+      touchedCountByAccount.set(
+        tx.accountId,
+        (touchedCountByAccount.get(tx.accountId) || 0) + 1
+      );
+    }
+  });
+
+  // 3. Simulasikan saldo akhir setiap rekening dengan aturan proteksi GL aman
+  const accountImpacts: AccountCleanupImpactPreview[] = [];
+  const updatedAccounts = safeAccounts.map((acc) => {
+    const orphanDelta = orphanDeltaByAccount.get(acc.id) || 0;
+    const hasDupRemoval = duplicateRowCountByAccount.has(acc.id);
+    const hasOrphanChange = orphanDelta !== 0 || touchedCountByAccount.has(acc.id);
+
+    if (!hasDupRemoval && !hasOrphanChange) return acc;
+
+    let workingAcc = acc;
+    let glAlreadyExcludedCount = 0;
+
+    if (hasDupRemoval) {
+      // Gunakan perbandingan GL pada baseline transaksi sebelum pengalihan agar akurat
+      const glBefore = calculateAccountGLBalance(acc, safeTxs);
+      const txsAfterDupRemovalOnly = safeTxs.filter((_, idx) => !dupSet.has(idx));
+      const glAfterDupOnly = calculateAccountGLBalance(acc, txsAfterDupRemovalOnly);
+
+      if (Math.abs((acc.currentBalance || 0) - glAfterDupOnly.glCalculatedBalance) < 1) {
+        glAlreadyExcludedCount = duplicateRowCountByAccount.get(acc.id) || 0;
+      } else {
+        const revertDelta = glAfterDupOnly.glCalculatedBalance - glBefore.glCalculatedBalance;
+        if (revertDelta !== 0) {
+          workingAcc = applyAccountBalanceChange(workingAcc, revertDelta);
+        }
+      }
+    }
+
+    if (orphanDelta !== 0) {
+      workingAcc = applyAccountBalanceChange(workingAcc, orphanDelta);
+    }
+
+    const currentBalance = acc.currentBalance || 0;
+    const projectedBalance = workingAcc.currentBalance || 0;
+    const netBalanceDelta = projectedBalance - currentBalance;
+    const affectedRowCount = touchedCountByAccount.get(acc.id) || 0;
+
+    if (affectedRowCount > 0 || netBalanceDelta !== 0) {
+      accountImpacts.push({
+        accountId: acc.id,
+        accountName: acc.name,
+        accountType: acc.type,
+        currentBalance,
+        netBalanceDelta,
+        projectedBalance,
+        affectedRowCount,
+        glAlreadyExcludedCount,
+      });
+    }
+
+    return workingAcc;
+  });
+
+  return {
+    updatedTransactions: finalTransactions,
+    updatedAccounts,
+    accountImpacts,
+    removedDuplicateCount: dupSet.size,
+    reassignedOrphanCount: reassignMap.size,
+    deletedOrphanCount: delOrphanSet.size,
+    totalAffectedRows: dupSet.size + reassignMap.size + delOrphanSet.size,
+  };
+}
+
 export function classifyTransaction(
   tx: Pick<
     Transaction,
@@ -603,6 +1004,7 @@ export interface IncomeStatementSummary {
   emergencyAdditions: number;
   emergencyWithdrawals: number;
   nonCashAdjustments: number;
+  kprInterestExpense: number;
 }
 
 export function calculateIncomeStatementSummary(
@@ -618,6 +1020,7 @@ export function calculateIncomeStatementSummary(
   let emergencyAdditions = 0;
   let emergencyWithdrawals = 0;
   let nonCashAdjustments = 0;
+  let kprInterestExpense = 0;
 
   (transactions || []).forEach((tx) => {
     const amt = Math.abs(tx.amount || 0);
@@ -630,7 +1033,20 @@ export function calculateIncomeStatementSummary(
         operatingExpense += amt;
         break;
       case 'debt_principal_pay':
-        debtPrincipalPayments += amt;
+        if (tx.linkedKprBreakdown) {
+          const interestPart = Math.max(0, Number(tx.linkedKprBreakdown.interestPart) || 0);
+          const principalPart = Math.max(
+            0,
+            tx.linkedKprBreakdown.principalPart !== undefined
+              ? Number(tx.linkedKprBreakdown.principalPart) || 0
+              : Math.max(0, amt - interestPart)
+          );
+          operatingExpense += interestPart;
+          kprInterestExpense += interestPart;
+          debtPrincipalPayments += principalPart;
+        } else {
+          debtPrincipalPayments += amt;
+        }
         break;
       case 'debt_proceeds':
         if (tx.type === 'income') debtProceedsIn += amt;
@@ -666,6 +1082,7 @@ export function calculateIncomeStatementSummary(
     emergencyAdditions,
     emergencyWithdrawals,
     nonCashAdjustments,
+    kprInterestExpense,
   };
 }
 
@@ -682,34 +1099,88 @@ export interface CashFlowSummary {
   financingOutflows: number;
   debtPaymentOutflows: number;
   debtProceedsInflows: number;
+  nonCashCreditOutflows: number;
   netFinancing: number;
   netCashChange: number;
 }
 
 export function calculateCashFlowStatement(
-  transactions: Transaction[]
+  transactions: Transaction[],
+  accounts: Account[] = []
 ): CashFlowSummary {
-  const inc = calculateIncomeStatementSummary(transactions);
+  const creditAccountIds = new Set(getCreditAccounts(accounts).map((a) => a.id));
 
-  const operatingInflows = inc.operatingIncome;
-  const operatingOutflows = inc.operatingExpense;
+  let operatingInflows = 0;
+  let operatingOutflows = 0;
+  let investmentInflows = 0;
+  let investmentOutflows = 0;
+  let savingInflows = 0;
+  let savingOutflows = 0;
+  let debtProceedsInflows = 0;
+  let debtPaymentOutflows = 0;
+  let nonCashCreditOutflows = 0;
+
+  (transactions || []).forEach((tx) => {
+    const amt = Math.abs(tx.amount || 0);
+    const nature = classifyTransaction(tx);
+    const isCreditCharge = Boolean(tx.accountId && creditAccountIds.has(tx.accountId));
+
+    switch (nature) {
+      case 'operating_income':
+        if (!isCreditCharge) operatingInflows += amt;
+        break;
+      case 'operating_expense':
+        if (isCreditCharge) nonCashCreditOutflows += amt;
+        else operatingOutflows += amt;
+        break;
+      case 'debt_principal_pay':
+        if (tx.linkedKprBreakdown) {
+          const interestPart = Math.max(0, Number(tx.linkedKprBreakdown.interestPart) || 0);
+          const principalPart = Math.max(
+            0,
+            Number(tx.linkedKprBreakdown.principalPart) || Math.max(0, amt - interestPart)
+          );
+          if (isCreditCharge) {
+            nonCashCreditOutflows += amt;
+          } else {
+            operatingOutflows += interestPart;
+            debtPaymentOutflows += principalPart;
+          }
+        } else {
+          if (isCreditCharge) nonCashCreditOutflows += amt;
+          else debtPaymentOutflows += amt;
+        }
+        break;
+      case 'debt_proceeds':
+        if (tx.type === 'income') debtProceedsInflows += amt;
+        else if (!isCreditCharge) debtPaymentOutflows += amt;
+        break;
+      case 'investment_buy':
+        if (isCreditCharge) nonCashCreditOutflows += amt;
+        else investmentOutflows += amt;
+        break;
+      case 'investment_sell':
+        if (!isCreditCharge) investmentInflows += amt;
+        break;
+      case 'emergency_fund_transfer':
+        if (tx.type === 'income') {
+          if (!isCreditCharge) savingInflows += amt;
+        } else {
+          if (isCreditCharge) nonCashCreditOutflows += amt;
+          else savingOutflows += amt;
+        }
+        break;
+      default:
+        break;
+    }
+  });
+
   const netOperating = operatingInflows - operatingOutflows;
-
-  // Aktivitas Investasi & Cadangan Aset (Investasi + Dana Darurat)
-  const investmentInflows = inc.investmentSales;
-  const investmentOutflows = inc.investmentPurchases;
-  const savingInflows = inc.emergencyWithdrawals;
-  const savingOutflows = inc.emergencyAdditions;
   const netInvesting =
     investmentInflows + savingInflows - (investmentOutflows + savingOutflows);
-
-  // Aktivitas Pendanaan (Pencairan Pinjaman Baru & Pembayaran Pokok Utang/KPR)
-  const debtProceedsInflows = inc.debtProceedsIn;
-  const debtPaymentOutflows = inc.debtPrincipalPayments + inc.debtProceedsOut;
   const financingInflows = debtProceedsInflows;
   const financingOutflows = debtPaymentOutflows;
   const netFinancing = financingInflows - financingOutflows;
-
   const netCashChange = netOperating + netInvesting + netFinancing;
 
   return {
@@ -725,6 +1196,7 @@ export function calculateCashFlowStatement(
     financingOutflows,
     debtPaymentOutflows,
     debtProceedsInflows,
+    nonCashCreditOutflows,
     netFinancing,
     netCashChange,
   };
@@ -834,11 +1306,15 @@ export function calculateNetWorthHistory30Days(
             rolledAssets += amt;
           }
           break;
-        case 'debt_principal_pay':
-          // Membayar pokok utang mengurangi kas & mengurangi utang secara bersamaan -> netral terhadap Net Worth
+        case 'debt_principal_pay': {
+          // Membayar pokok utang mengurangi kas & mengurangi pokok utang; porsi bunga mengurangi kas/Net Worth
+          const principalPart = tx.linkedKprBreakdown
+            ? Math.max(0, Number(tx.linkedKprBreakdown.principalPart) || 0)
+            : amt;
           rolledAssets += amt;
-          rolledDebts += amt;
+          rolledDebts += principalPart;
           break;
+        }
         case 'debt_proceeds':
           if (tx.type === 'income') {
             rolledAssets -= amt;
@@ -850,9 +1326,11 @@ export function calculateNetWorthHistory30Days(
           break;
         case 'internal_transfer':
           if (onCreditCard && tx.type === 'income') {
-            // Transfer pembayaran ke CC menurunkan utang CC & menurunkan aset likuid -> netral
+            // Transfer pembayaran ke CC menurunkan utang CC & menurunkan kas bank -> netral terhadap Net Worth
+            rolledAssets += amt;
             rolledDebts += amt;
           } else if (onCreditCard && tx.type === 'expense') {
+            rolledAssets -= amt;
             rolledDebts -= amt;
           }
           // Transfer antar akun likuid berdampak 0 pada total aset & utang

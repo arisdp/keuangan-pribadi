@@ -1,5 +1,9 @@
 import { Account, Transaction } from './types';
-import { auditLedgerIntegrity, DuplicateTransactionGroup } from './utils/accountingEngine';
+import {
+  auditLedgerIntegrity,
+  DuplicateTransactionGroup,
+  OrphanTransactionIssue,
+} from './utils/accountingEngine';
 import { secureStorage } from './utils/secureStorage';
 import { logger } from './utils/logger';
 
@@ -411,15 +415,31 @@ export const synchronizeAccountsAndCOA = (
    PEMINDAIAN DUPILKAT & COA TIDAK TERPAKAI
    ========================================================================= */
 
+export interface ScannedLedgerAnomalyRow {
+  rowKey: string;
+  txIndex: number;
+  transaction: Transaction;
+  kind: 'duplicate_id' | 'same_day_identical' | 'orphan_transaction';
+  groupKey?: string;
+  groupSize?: number;
+  keepTxIndex?: number;
+  orphanReason?: 'missing_account_id' | 'account_not_found';
+  issueSummary: string;
+}
+
 export interface CoaScanResult {
   duplicateCodes: Array<{ code: string; items: AccountCOA[] }>;
   duplicateNames: Array<{ normalizedName: string; items: AccountCOA[] }>;
   unusedCoas: AccountCOA[];
   ledgerDuplicateIdGroups: DuplicateTransactionGroup[];
   ledgerSameDayDuplicateGroups: DuplicateTransactionGroup[];
+  ledgerOrphanTransactions: OrphanTransactionIssue[];
+  ledgerAnomalies: ScannedLedgerAnomalyRow[];
   totalDuplicates: number;
   totalUnused: number;
   totalLedgerDuplicates: number;
+  totalLedgerOrphans: number;
+  totalLedgerAnomalies: number;
 }
 
 export const scanCoaDuplicatesAndUnused = (
@@ -478,8 +498,64 @@ export const scanCoaDuplicatesAndUnused = (
     return true;
   });
 
-  // 4. Check duplicate ledger entries (duplicate IDs & identical same-day transactions)
+  // 4. Check duplicate & orphan ledger entries (duplicate IDs, same-day identical, & missing/invalid accountId)
   const ledgerAudit = auditLedgerIntegrity(transactions, accounts);
+
+  const ledgerAnomalies: ScannedLedgerAnomalyRow[] = [];
+
+  ledgerAudit.duplicateIdGroups.forEach((grp) => {
+    grp.duplicateIndices.forEach((dupIdx) => {
+      const tx = transactions[dupIdx];
+      if (!tx) return;
+      ledgerAnomalies.push({
+        rowKey: `dup-id-${grp.groupKey}-${dupIdx}`,
+        txIndex: dupIdx,
+        transaction: tx,
+        kind: 'duplicate_id',
+        groupKey: grp.groupKey,
+        groupSize: grp.items.length,
+        keepTxIndex: grp.keepIndex,
+        issueSummary: `ID duplikat (${grp.items.length}x) · Entri asli #${grp.keepIndex + 1} dipertahankan`,
+      });
+    });
+  });
+
+  ledgerAudit.sameDayDuplicateGroups.forEach((grp) => {
+    grp.duplicateIndices.forEach((dupIdx) => {
+      const tx = transactions[dupIdx];
+      if (!tx) return;
+      ledgerAnomalies.push({
+        rowKey: `dup-day-${grp.groupKey}-${dupIdx}`,
+        txIndex: dupIdx,
+        transaction: tx,
+        kind: 'same_day_identical',
+        groupKey: grp.groupKey,
+        groupSize: grp.items.length,
+        keepTxIndex: grp.keepIndex,
+        issueSummary: `Identik hari sama (${grp.items.length}x) · Entri asli #${grp.keepIndex + 1} dipertahankan`,
+      });
+    });
+  });
+
+  ledgerAudit.orphanTransactions.forEach((orphan) => {
+    ledgerAnomalies.push({
+      rowKey: `orphan-${orphan.index}-${orphan.transaction.id || 'noid'}`,
+      txIndex: orphan.index,
+      transaction: orphan.transaction,
+      kind: 'orphan_transaction',
+      orphanReason: orphan.reason,
+      issueSummary:
+        orphan.reason === 'missing_account_id'
+          ? 'Referensi rekening kosong'
+          : `Rekening "${orphan.transaction.accountId}" tidak terdaftar`,
+    });
+  });
+
+  ledgerAnomalies.sort((a, b) => {
+    const dateCmp = (b.transaction.date || '').localeCompare(a.transaction.date || '');
+    if (dateCmp !== 0) return dateCmp;
+    return a.txIndex - b.txIndex;
+  });
 
   return {
     duplicateCodes,
@@ -487,9 +563,15 @@ export const scanCoaDuplicatesAndUnused = (
     unusedCoas,
     ledgerDuplicateIdGroups: ledgerAudit.duplicateIdGroups,
     ledgerSameDayDuplicateGroups: ledgerAudit.sameDayDuplicateGroups,
-    totalDuplicates: duplicateCodes.reduce((acc, d) => acc + d.items.length - 1, 0) + duplicateNames.reduce((acc, d) => acc + d.items.length - 1, 0),
+    ledgerOrphanTransactions: ledgerAudit.orphanTransactions,
+    ledgerAnomalies,
+    totalDuplicates:
+      duplicateCodes.reduce((acc, d) => acc + d.items.length - 1, 0) +
+      duplicateNames.reduce((acc, d) => acc + d.items.length - 1, 0),
     totalUnused: unusedCoas.length,
     totalLedgerDuplicates: ledgerAudit.totalDuplicateIdRows + ledgerAudit.totalSameDayDuplicateRows,
+    totalLedgerOrphans: ledgerAudit.totalOrphans,
+    totalLedgerAnomalies: ledgerAnomalies.length,
   };
 };
 

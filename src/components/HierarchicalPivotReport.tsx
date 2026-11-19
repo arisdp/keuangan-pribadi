@@ -1,7 +1,8 @@
 import React, { useState, useMemo } from 'react';
-import { Transaction } from '../types';
+import { KprCoaMappingConfig, Transaction } from '../types';
 import { CategoryNode } from '../categoryHierarchy';
-import { calculateIncomeStatementSummary, isInternalTransfer } from '../utils/accountingEngine';
+import { calculateIncomeStatementSummary, classifyTransaction, isInternalTransfer } from '../utils/accountingEngine';
+import { DEFAULT_KPR_COA_MAPPING } from '../utils/kprPresets';
 import { formatterIDR } from '../utils/formatters';
 import {
   ChevronRight,
@@ -17,6 +18,7 @@ import {
 interface HierarchicalPivotReportProps {
   transactions: Transaction[];
   masterCategories: CategoryNode[];
+  kprCoaMapping?: KprCoaMappingConfig;
 }
 
 interface MonthColumn {
@@ -28,6 +30,7 @@ interface MonthColumn {
 export const HierarchicalPivotReport: React.FC<HierarchicalPivotReportProps> = ({
   transactions,
   masterCategories,
+  kprCoaMapping = DEFAULT_KPR_COA_MAPPING,
 }) => {
   // Filter Year State
   const [selectedYear, setSelectedYear] = useState<string>('all');
@@ -129,11 +132,47 @@ export const HierarchicalPivotReport: React.FC<HierarchicalPivotReportProps> = (
   // Build Transaction Amount Map per category name/id and per month (excluding internal transfers)
   const categoryMonthAmountMap = useMemo(() => {
     const map: Record<string, number> = {};
+    const leafNames = new Set<string>();
+    const collectLeafNames = (nodes: CategoryNode[]) => {
+      nodes.forEach((n) => {
+        if (!n.children || n.children.length === 0) {
+          leafNames.add(n.name.toLowerCase().trim());
+        } else {
+          collectLeafNames(n.children);
+        }
+      });
+    };
+    collectLeafNames(masterCategories);
 
     transactions.forEach((tx) => {
       if (!tx.date || !tx.amount || isInternalTransfer(tx)) return;
       const ym = tx.date.substring(0, 7);
       if (selectedYear !== 'all' && !ym.startsWith(selectedYear)) return;
+
+      const nature = classifyTransaction(tx);
+      if (nature === 'debt_principal_pay' && tx.linkedKprBreakdown) {
+        const interestPart = Math.max(0, Number(tx.linkedKprBreakdown.interestPart) || 0);
+        if (interestPart > 0) {
+          const rawInterestCat = (
+            tx.linkedKprBreakdown.interestCategory ||
+            kprCoaMapping.interestExpenseCategory ||
+            'Beban Bunga KPR'
+          )
+            .toLowerCase()
+            .trim();
+          const defaultKprInterestCat = (kprCoaMapping.interestExpenseCategory || 'Beban Bunga KPR')
+            .toLowerCase()
+            .trim();
+          const targetCatKey = leafNames.has(rawInterestCat)
+            ? rawInterestCat
+            : leafNames.has(defaultKprInterestCat)
+            ? defaultKprInterestCat
+            : 'beban bunga kpr';
+          const compositeKey = `${targetCatKey}_${ym}`;
+          map[compositeKey] = (map[compositeKey] || 0) + interestPart;
+        }
+        return;
+      }
 
       const catKey = tx.category.toLowerCase().trim();
       const compositeKey = `${catKey}_${ym}`;
@@ -141,7 +180,7 @@ export const HierarchicalPivotReport: React.FC<HierarchicalPivotReportProps> = (
     });
 
     return map;
-  }, [transactions, selectedYear]);
+  }, [transactions, selectedYear, masterCategories, kprCoaMapping]);
 
   // Calculate values for a category node (recursive aggregation)
   const getNodeValues = (node: CategoryNode): { monthValues: Record<string, number>; totalOverall: number } => {

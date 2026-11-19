@@ -1,8 +1,8 @@
 import React from 'react';
-import { InvestmentAsset, Transaction } from '../types';
+import { Account, InvestmentAsset, Transaction } from '../types';
 import { FormattedNumberInput } from './FormattedNumberInput';
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip, AreaChart, Area, LineChart, Line, XAxis, YAxis, CartesianGrid, Legend, BarChart, Bar } from 'recharts';
-import { TrendingUp, Wallet, ArrowUpRight, ArrowDownLeft, Info, Activity, Landmark, Edit2, Check, X, BarChart2, Layers, Plus, Calculator, RefreshCw, Coins, Sparkles, History, FileSpreadsheet, FileText, Download, DollarSign, Percent, Gift, Target } from 'lucide-react';
+import { TrendingUp, Wallet, ArrowUpRight, ArrowDownLeft, Info, Activity, Landmark, Edit2, Check, X, BarChart2, Layers, Plus, Calculator, RefreshCw, Coins, Sparkles, History, FileSpreadsheet, FileText, Download, DollarSign, Percent, Gift, Target, AlertTriangle } from 'lucide-react';
 import { AIDiversificationModal } from './AIDiversificationModal';
 import { PriceHistoryModal } from './PriceHistoryModal';
 import { InvestmentSimulationCalculator } from './InvestmentSimulationCalculator';
@@ -10,17 +10,36 @@ import { InvestmentGoalSection } from './InvestmentGoalSection';
 import { InflationPurchasingPowerCalculator } from './InflationPurchasingPowerCalculator';
 import { InvestmentRoiD3Chart } from './InvestmentRoiD3Chart';
 import { exportInvestmentsToCSV, exportInvestmentsToPDF } from '../utils/exportInvestment';
+import { applyAccountBalanceChange, getLiquidAccounts, getTransactionAccountDelta } from '../utils/accountingEngine';
+import { showToast } from '../utils/toast';
 
 interface InvestmentTabProps {
   investments: InvestmentAsset[];
   transactions: Transaction[];
+  accounts?: Account[];
   onUpdateInvestment?: (id: string, updatedFields: Partial<InvestmentAsset>) => void;
+  onAddTransaction?: (tx: Omit<Transaction, 'id'> & {
+    linkedInvestmentId?: string;
+    linkedInvestmentAction?: 'buy' | 'sell';
+    unitPrice?: number;
+    units?: number;
+    unitName?: string;
+    newInvestmentDetails?: {
+      name: string;
+      category: string;
+      unitPrice?: number;
+      units?: number;
+      unitName?: string;
+    };
+  }) => boolean | void;
 }
 
 export const InvestmentTab: React.FC<InvestmentTabProps> = ({
   investments = [],
   transactions = [],
+  accounts = [],
   onUpdateInvestment,
+  onAddTransaction,
 }) => {
   const formatterIDR = new Intl.NumberFormat('id-ID', {
     style: 'currency',
@@ -54,6 +73,7 @@ export const InvestmentTab: React.FC<InvestmentTabProps> = ({
   const [logDividendAssetId, setLogDividendAssetId] = React.useState<string | null>(null);
   const [logDividendAmount, setLogDividendAmount] = React.useState<number>(0);
   const [logDividendNote, setLogDividendNote] = React.useState<string>('Bagi Hasil / Dividen');
+  const [logDividendAccountId, setLogDividendAccountId] = React.useState<string>('');
 
   // Selected asset for Price History Line Chart
   const [selectedPriceChartAssetId, setSelectedPriceChartAssetId] = React.useState<string>('all');
@@ -63,6 +83,9 @@ export const InvestmentTab: React.FC<InvestmentTabProps> = ({
   const [topUpAssetId, setTopUpAssetId] = React.useState<string | null>(null);
   const [topUpUnits, setTopUpUnits] = React.useState<number>(1);
   const [topUpUnitPrice, setTopUpUnitPrice] = React.useState<number>(0);
+  const [topUpAccountId, setTopUpAccountId] = React.useState<string>('');
+
+  const liquidCashAccounts = React.useMemo(() => getLiquidAccounts(accounts), [accounts]);
 
   // Helper function to get default unit name by category
   const getDefaultUnitName = (cat: string) => {
@@ -410,47 +433,147 @@ export const InvestmentTab: React.FC<InvestmentTabProps> = ({
     setTopUpAssetId(inv.id);
     setTopUpUnits(1);
     setTopUpUnitPrice(currPrice);
+    const defaultAcc = liquidCashAccounts.find((a) => a.type === 'bank' && a.currentBalance > 0) || liquidCashAccounts[0];
+    setTopUpAccountId(defaultAcc?.id || '');
   };
 
   const saveTopUp = () => {
-    if (topUpAssetId && onUpdateInvestment) {
-      const inv = investments.find(i => i.id === topUpAssetId);
-      if (inv) {
-        const oldUnits = inv.quantity ?? inv.units ?? 1;
-        const initialCap = inv.initialCapital !== undefined ? inv.initialCapital : inv.balance;
-        const oldAvgBuyPrice = inv.purchaseUnitPrice || (initialCap / oldUnits);
-        const currPrice = inv.unitPrice ?? inv.currentUnitPrice ?? (inv.balance / oldUnits);
+    if (!topUpAssetId) return;
+    const inv = investments.find(i => i.id === topUpAssetId);
+    if (!inv) return;
 
-        // Weighted Average Buy Price Calculation
-        const newTotalUnits = oldUnits + topUpUnits;
-        const newWeightedAvgBuyPrice = ((oldUnits * oldAvgBuyPrice) + (topUpUnits * topUpUnitPrice)) / newTotalUnits;
-        const newTotalInitialCapital = newTotalUnits * newWeightedAvgBuyPrice;
-        const newTotalBalance = newTotalUnits * currPrice;
+    const totalCost = Math.round((topUpUnits || 0) * (topUpUnitPrice || 0));
+    if (topUpUnits <= 0 || topUpUnitPrice <= 0 || totalCost <= 0) {
+      showToast({
+        type: 'warning',
+        title: 'Input Top Up Tidak Valid',
+        message: 'Jumlah unit dan harga satuan beli harus lebih besar dari Rp 0.',
+      });
+      return;
+    }
 
-        onUpdateInvestment(topUpAssetId, {
-          quantity: newTotalUnits,
-          units: newTotalUnits,
-          purchaseUnitPrice: newWeightedAvgBuyPrice,
-          initialCapital: newTotalInitialCapital,
-          balance: newTotalBalance,
+    if (onAddTransaction) {
+      if (!topUpAccountId) {
+        showToast({
+          type: 'warning',
+          title: 'Pilih Rekening Sumber Kas',
+          message: 'Silakan pilih rekening bank/kas sumber dana pembelian aset ini.',
         });
+        return;
       }
+      const sourceAcc = liquidCashAccounts.find((a) => a.id === topUpAccountId);
+      if (!sourceAcc || sourceAcc.currentBalance < totalCost) {
+        showToast({
+          type: 'error',
+          title: 'Saldo Kas Tidak Mencukupi',
+          message: `Saldo ${sourceAcc?.name || 'rekening'} tidak cukup untuk Top Up senilai ${formatterIDR.format(totalCost)}.`,
+        });
+        return;
+      }
+
+      const unitNameVal = inv.unitName || getDefaultUnitName(inv.category);
+      const ok = onAddTransaction({
+        date: new Date().toISOString().split('T')[0],
+        accountId: topUpAccountId,
+        type: 'investment',
+        category: 'Investasi',
+        description: `Top Up DCA ${inv.name} (${topUpUnits} ${unitNameVal})`,
+        amount: totalCost,
+        linkedInvestmentId: inv.id,
+        linkedInvestmentAction: 'buy',
+        unitPrice: topUpUnitPrice,
+        units: topUpUnits,
+        unitName: unitNameVal,
+        newInvestmentDetails: {
+          name: inv.name,
+          category: inv.category,
+          unitPrice: topUpUnitPrice,
+          units: topUpUnits,
+          unitName: unitNameVal,
+        },
+      });
+      if (ok === false) return;
+      showToast({
+        type: 'success',
+        title: 'Top Up Investasi Tercatat',
+        message: `Pembelian ${topUpUnits} ${unitNameVal} ${inv.name} (${formatterIDR.format(totalCost)}) berhasil diposting ke Jurnal dan memotong saldo ${sourceAcc.name}.`,
+      });
+      setTopUpAssetId(null);
+      return;
+    }
+
+    if (onUpdateInvestment) {
+      const oldUnits = inv.quantity ?? inv.units ?? 1;
+      const initialCap = inv.initialCapital !== undefined ? inv.initialCapital : inv.balance;
+      const oldAvgBuyPrice = inv.purchaseUnitPrice || (initialCap / oldUnits);
+      const currPrice = inv.unitPrice ?? inv.currentUnitPrice ?? (inv.balance / oldUnits);
+
+      const newTotalUnits = oldUnits + topUpUnits;
+      const newWeightedAvgBuyPrice = ((oldUnits * oldAvgBuyPrice) + (topUpUnits * topUpUnitPrice)) / newTotalUnits;
+      const newTotalInitialCapital = newTotalUnits * newWeightedAvgBuyPrice;
+      const newTotalBalance = newTotalUnits * currPrice;
+
+      onUpdateInvestment(topUpAssetId, {
+        quantity: newTotalUnits,
+        units: newTotalUnits,
+        purchaseUnitPrice: newWeightedAvgBuyPrice,
+        initialCapital: newTotalInitialCapital,
+        balance: newTotalBalance,
+      });
       setTopUpAssetId(null);
     }
   };
 
   // Save Log Dividend / Interest
   const saveLogDividend = () => {
-    if (logDividendAssetId && onUpdateInvestment) {
-      const inv = investments.find(i => i.id === logDividendAssetId);
-      if (inv) {
-        const currentDividends = inv.dividendsOrInterest || 0;
-        const newDividendsTotal = currentDividends + logDividendAmount;
-        
-        onUpdateInvestment(logDividendAssetId, {
-          dividendsOrInterest: newDividendsTotal
+    if (!logDividendAssetId) return;
+    const inv = investments.find(i => i.id === logDividendAssetId);
+    if (!inv) return;
+
+    if (!logDividendAmount || logDividendAmount <= 0) {
+      showToast({
+        type: 'warning',
+        title: 'Nominal Dividen Tidak Valid',
+        message: 'Masukkan jumlah imbal hasil / dividen yang lebih besar dari Rp 0.',
+      });
+      return;
+    }
+
+    if (onAddTransaction) {
+      if (!logDividendAccountId) {
+        showToast({
+          type: 'warning',
+          title: 'Pilih Rekening Tujuan Kas',
+          message: 'Silakan pilih rekening bank/kas penerima dana dividen ini.',
         });
+        return;
       }
+      const targetAcc = liquidCashAccounts.find((a) => a.id === logDividendAccountId);
+      const ok = onAddTransaction({
+        date: new Date().toISOString().split('T')[0],
+        accountId: logDividendAccountId,
+        type: 'income',
+        category: 'Hasil Investasi / Dividen',
+        description: `${logDividendNote || 'Dividen / Bagi Hasil'}: ${inv.name}`,
+        amount: logDividendAmount,
+        linkedInvestmentId: inv.id,
+      });
+      if (ok === false) return;
+      showToast({
+        type: 'success',
+        title: 'Dividen Tersinkronisasi ke Kas',
+        message: `Penerimaan dividen ${inv.name} sebesar ${formatterIDR.format(logDividendAmount)} masuk ke ${targetAcc?.name || 'rekening'} dan Jurnal Transaksi.`,
+      });
+      setLogDividendAssetId(null);
+      return;
+    }
+
+    if (onUpdateInvestment) {
+      const currentDividends = inv.dividendsOrInterest || 0;
+      const newDividendsTotal = currentDividends + logDividendAmount;
+      onUpdateInvestment(logDividendAssetId, {
+        dividendsOrInterest: newDividendsTotal
+      });
       setLogDividendAssetId(null);
     }
   };
@@ -1413,6 +1536,8 @@ export const InvestmentTab: React.FC<InvestmentTabProps> = ({
                                 setLogDividendAssetId(inv.id);
                                 setLogDividendAmount(0);
                                 setLogDividendNote('Bagi Hasil / Dividen');
+                                const defaultAcc = liquidCashAccounts.find((a) => a.type === 'bank') || liquidCashAccounts[0];
+                                setLogDividendAccountId(defaultAcc?.id || '');
                               }}
                               className="bg-blue-600 hover:bg-blue-700 text-white text-[10px] font-bold px-2.5 py-1 rounded-lg transition cursor-pointer flex items-center gap-1 shadow-xs"
                               title="Catat Pendapatan Dividen/Bunga"
@@ -1792,6 +1917,53 @@ export const InvestmentTab: React.FC<InvestmentTabProps> = ({
                     </div>
                   </div>
 
+                  {/* Rekening Sumber Kas Wajib untuk Posting Jurnal Otomatis */}
+                  {onAddTransaction && (() => {
+                    const selectedTopUpAcc = liquidCashAccounts.find((a) => a.id === topUpAccountId);
+                    const isInsufficient = Boolean(selectedTopUpAcc && newTopUpCost > selectedTopUpAcc.currentBalance);
+                    const projectedBal = selectedTopUpAcc
+                      ? applyAccountBalanceChange(
+                          selectedTopUpAcc,
+                          getTransactionAccountDelta({ type: 'investment', amount: newTopUpCost })
+                        ).currentBalance
+                      : 0;
+                    return (
+                      <div className="space-y-2">
+                        <div>
+                          <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
+                            Rekening Sumber Dana (Wajib Sinkron Jurnal & Kas)
+                          </label>
+                          <select
+                            value={topUpAccountId}
+                            onChange={(e) => setTopUpAccountId(e.target.value)}
+                            className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                          >
+                            <option value="">-- Pilih Rekening Kas / Bank --</option>
+                            {liquidCashAccounts.map((acc) => (
+                              <option key={acc.id} value={acc.id}>
+                                {acc.name} ({formatterIDR.format(acc.currentBalance)})
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        {selectedTopUpAcc && (
+                          <div className={`p-2.5 rounded-xl border text-[11px] font-mono tabular-nums flex justify-between ${isInsufficient ? 'bg-rose-50 border-rose-200 text-rose-700' : 'bg-slate-50 border-slate-200 text-slate-700'}`}>
+                            <span>Saldo {selectedTopUpAcc.name}:</span>
+                            <span className="font-bold">
+                              {formatterIDR.format(selectedTopUpAcc.currentBalance)} &rarr; {formatterIDR.format(projectedBal)}
+                            </span>
+                          </div>
+                        )}
+                        {isInsufficient && (
+                          <p className="text-[11px] font-bold text-rose-600 flex items-center gap-1">
+                            <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                            Saldo rekening tidak mencukupi untuk pembelian tambahan ini.
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })()}
+
                   {/* Calculated Average Result Box */}
                   <div className="p-3 bg-emerald-50/80 border border-emerald-200 rounded-xl space-y-1.5 font-mono text-[11px]">
                     <span className="text-[10px] font-bold text-emerald-800 uppercase block mb-1">
@@ -1827,9 +1999,13 @@ export const InvestmentTab: React.FC<InvestmentTabProps> = ({
               </button>
               <button
                 onClick={saveTopUp}
-                className="px-4 py-2 rounded-lg text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer transition flex items-center gap-1 shadow-sm"
+                disabled={Boolean(onAddTransaction && (!topUpAccountId || (() => {
+                  const acc = liquidCashAccounts.find((a) => a.id === topUpAccountId);
+                  return !acc || acc.currentBalance < Math.round((topUpUnits || 0) * (topUpUnitPrice || 0));
+                })()))}
+                className="px-4 py-2 rounded-lg text-xs font-bold bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed text-white cursor-pointer transition flex items-center gap-1 shadow-sm"
               >
-                <Check className="h-3.5 w-3.5" /> Simpan Pembelian Tambahan
+                <Check className="h-3.5 w-3.5" /> Simpan &amp; Posting Jurnal
               </button>
             </div>
           </div>
@@ -1880,6 +2056,45 @@ export const InvestmentTab: React.FC<InvestmentTabProps> = ({
                     />
                   </div>
 
+                  {onAddTransaction && (() => {
+                    const selectedDivAcc = liquidCashAccounts.find((a) => a.id === logDividendAccountId);
+                    const projectedDivBal = selectedDivAcc
+                      ? applyAccountBalanceChange(
+                          selectedDivAcc,
+                          getTransactionAccountDelta({ type: 'income', amount: logDividendAmount || 0 })
+                        ).currentBalance
+                      : 0;
+                    return (
+                      <div className="space-y-2">
+                        <div>
+                          <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
+                            Rekening Kas / Bank Penerima (Wajib Sinkron Jurnal)
+                          </label>
+                          <select
+                            value={logDividendAccountId}
+                            onChange={(e) => setLogDividendAccountId(e.target.value)}
+                            className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          >
+                            <option value="">-- Pilih Rekening Kas / Bank --</option>
+                            {liquidCashAccounts.map((acc) => (
+                              <option key={acc.id} value={acc.id}>
+                                {acc.name} ({formatterIDR.format(acc.currentBalance)})
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        {selectedDivAcc && (
+                          <div className="p-2.5 rounded-xl border border-slate-200 bg-slate-50 text-[11px] font-mono tabular-nums flex justify-between text-slate-700">
+                            <span>Saldo {selectedDivAcc.name}:</span>
+                            <span className="font-bold text-emerald-700">
+                              {formatterIDR.format(selectedDivAcc.currentBalance)} &rarr; {formatterIDR.format(projectedDivBal)}
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
+
                   <div className="p-3 bg-blue-50/70 border border-blue-100 rounded-xl space-y-1.5 font-mono text-[11px]">
                     <div className="flex justify-between">
                       <span className="text-slate-500">Imbal Hasil Sebelumnya:</span>
@@ -1907,9 +2122,10 @@ export const InvestmentTab: React.FC<InvestmentTabProps> = ({
               </button>
               <button
                 onClick={saveLogDividend}
-                className="px-4 py-2 rounded-lg text-xs font-bold bg-blue-600 hover:bg-blue-700 text-white cursor-pointer transition flex items-center gap-1 shadow-sm"
+                disabled={Boolean(onAddTransaction && (!logDividendAccountId || logDividendAmount <= 0))}
+                className="px-4 py-2 rounded-lg text-xs font-bold bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white cursor-pointer transition flex items-center gap-1 shadow-sm"
               >
-                <Check className="h-3.5 w-3.5" /> Simpan Dividen
+                <Check className="h-3.5 w-3.5" /> Simpan &amp; Posting Dividen
               </button>
             </div>
           </div>

@@ -1,7 +1,7 @@
 import jsPDF from 'jspdf';
 import html2canvas from 'html2canvas';
-import { Transaction, Account, Debt, InvestmentAsset } from '../types';
-import { isOperatingIncome, isOperatingExpense } from './accountingEngine';
+import { Transaction, Account, Debt, InvestmentAsset, KprCoaMappingConfig } from '../types';
+import { isOperatingIncome, isOperatingExpense, classifyTransaction } from './accountingEngine';
 import { showToast } from './toast';
 
 interface BalanceSheetExportData {
@@ -27,6 +27,7 @@ interface CashFlowExportData {
   savingOutflows: number;
   debtPaymentOutflows?: number;
   debtProceedsInflows?: number;
+  nonCashCreditOutflows?: number;
   netFinancing: number;
   netCashChange: number;
 }
@@ -43,7 +44,8 @@ interface BudgetRealizationExportData {
 // 1. Export Laba Rugi (Income Statement) to CSV
 export const exportIncomeStatementToCSV = (
   transactions: Transaction[],
-  periodTitle: string = 'Periode Berjalan'
+  periodTitle: string = 'Periode Berjalan',
+  kprCoaMapping?: KprCoaMappingConfig
 ) => {
   const incomeTxs = transactions.filter((t) => isOperatingIncome(t));
   const expenseTxs = transactions.filter((t) => isOperatingExpense(t));
@@ -57,6 +59,21 @@ export const exportIncomeStatementToCSV = (
   const expenseCategorySums: Record<string, number> = {};
   expenseTxs.forEach((t) => {
     expenseCategorySums[t.category] = (expenseCategorySums[t.category] || 0) + t.amount;
+  });
+  transactions.forEach((t) => {
+    if (classifyTransaction(t) === 'debt_principal_pay' && t.linkedKprBreakdown) {
+      const interestPart = Math.max(0, Number(t.linkedKprBreakdown.interestPart) || 0);
+      if (interestPart > 0) {
+        const coaCode =
+          t.linkedKprBreakdown.interestCoaCode || kprCoaMapping?.interestExpenseCode || '5810';
+        const baseCat =
+          t.linkedKprBreakdown.interestCategory ||
+          kprCoaMapping?.interestExpenseCategory ||
+          'Beban Bunga KPR';
+        const interestCat = `${baseCat} [${coaCode}]`;
+        expenseCategorySums[interestCat] = (expenseCategorySums[interestCat] || 0) + interestPart;
+      }
+    }
   });
 
   const totalIncome = Object.values(incomeCategorySums).reduce((a, b) => a + b, 0);
@@ -147,6 +164,9 @@ export const exportCashFlowToCSV = (data: CashFlowExportData) => {
   csv += `ARUS KAS BERSIH PENDANAAN,${data.netFinancing}\n\n`;
 
   csv += `PERUBAHAN BERSIH KAS (NET CASH CHANGE),${data.netCashChange}\n`;
+  if (data.nonCashCreditOutflows && data.nonCashCreditOutflows > 0) {
+    csv += `CATATAN NON-KAS: Belanja via Kartu Kredit / PayLater,${data.nonCashCreditOutflows}\n`;
+  }
 
   downloadBlob(csv, `Laporan_Arus_Kas_${new Date().toISOString().split('T')[0]}.csv`, 'text/csv;charset=utf-8;');
 };

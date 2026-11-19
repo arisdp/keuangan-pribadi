@@ -15,6 +15,7 @@ import {
   getAccountCreditBill,
   getLiquidAccounts,
   getTransactionAccountDelta,
+  resolveDebtInstallmentAccounting,
   updateAccountMetadataAndStartingBalance,
 } from './utils/accountingEngine';
 import { secureStorage } from './utils/secureStorage';
@@ -763,6 +764,7 @@ export default function App() {
     // Protection & validation for unified Debt / KPR installment payment or payoff
     let payTargetLabel = '';
     let isFullDebtPayoff = false;
+    let resolvedDebtAccounting: ReturnType<typeof resolveDebtInstallmentAccounting> | null = null;
     if (newTx.linkedDebtAction === 'pay') {
       if (!newTx.linkedDebtId) {
         showToast({
@@ -849,17 +851,31 @@ export default function App() {
           });
           return false;
         }
-        if (newTx.amount > matchedDebt.balance) {
+        const bankCoa = getAccountCoaMapping(paymentSource, getStoredCoaList());
+        resolvedDebtAccounting = resolveDebtInstallmentAccounting({
+          tx: {
+            amount: newTx.amount,
+            date: newTx.date,
+            coaDebitCode: newTx.coaDebitCode,
+            coaCreditCode: newTx.coaCreditCode,
+            linkedKprBreakdown: newTx.linkedKprBreakdown,
+          },
+          debt: matchedDebt,
+          baseCoaMapping: kprCoaMapping,
+          sourceAccountCoaCode: bankCoa.code,
+        });
+        const principalPayAmt = resolvedDebtAccounting.principalPayAmount;
+        if (principalPayAmt > matchedDebt.balance) {
           showToast({
             type: 'warning',
-            title: 'Nominal Melebihi Sisa Hutang',
-            message: `Nominal bayar (${formatCurrencyIDR(newTx.amount)}) melebihi sisa pokok "${matchedDebt.name}" (${formatCurrencyIDR(matchedDebt.balance)}).`,
+            title: 'Pokok Melebihi Sisa Hutang',
+            message: `Porsi pokok pembayaran (${formatCurrencyIDR(principalPayAmt)}) melebihi sisa pokok "${matchedDebt.name}" (${formatCurrencyIDR(matchedDebt.balance)}).`,
             duration: 5000,
           });
           return false;
         }
         payTargetLabel = matchedDebt.name;
-        isFullDebtPayoff = matchedDebt.balance - newTx.amount <= 0;
+        isFullDebtPayoff = matchedDebt.balance - principalPayAmt <= 0;
       }
     }
 
@@ -892,8 +908,8 @@ export default function App() {
         ? `etx-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
         : undefined;
 
-    let resolvedCoaDebitCode = newTx.coaDebitCode;
-    let resolvedCoaCreditCode = newTx.coaCreditCode;
+    let resolvedCoaDebitCode = resolvedDebtAccounting?.coaDebitCode || newTx.coaDebitCode;
+    let resolvedCoaCreditCode = resolvedDebtAccounting?.coaCreditCode || newTx.coaCreditCode;
     if ((!resolvedCoaDebitCode || !resolvedCoaCreditCode) && newTx.linkedDebtAction === 'pay' && resolvedDebtId && !resolvedDebtId.startsWith('acc-debt-')) {
       const targetDebt = debts.find((d) => d.id === resolvedDebtId);
       const isKprDebt = Boolean(targetDebt && (targetDebt.category === 'KPR / Properti' || Boolean(targetDebt.kprScheme)));
@@ -907,6 +923,8 @@ export default function App() {
       }
     }
 
+    const resolvedKprBreakdown = resolvedDebtAccounting?.linkedKprBreakdown ?? newTx.linkedKprBreakdown;
+
     const tx: Transaction = {
       id: txId,
       date: newTx.date,
@@ -917,7 +935,7 @@ export default function App() {
       amount: newTx.amount,
       ...(resolvedCoaDebitCode ? { coaDebitCode: resolvedCoaDebitCode } : {}),
       ...(resolvedCoaCreditCode ? { coaCreditCode: resolvedCoaCreditCode } : {}),
-      ...(newTx.linkedKprBreakdown ? { linkedKprBreakdown: newTx.linkedKprBreakdown } : {}),
+      ...(resolvedKprBreakdown ? { linkedKprBreakdown: resolvedKprBreakdown } : {}),
       linkedDebtId: resolvedDebtId,
       linkedDebtAction: newTx.linkedDebtAction,
       linkedInvestmentId: resolvedInvestmentId,
@@ -972,12 +990,15 @@ export default function App() {
           })
         );
       } else {
+        const principalPayAmt = tx.linkedKprBreakdown
+          ? Math.max(0, Number(tx.linkedKprBreakdown.principalPart) || 0)
+          : (resolvedDebtAccounting?.principalPayAmount ?? tx.amount);
         setDebts((prevDebts) =>
           prevDebts.map((d) => {
             if (d.id === resolvedDebtId) {
               return {
                 ...d,
-                balance: Math.max(0, d.balance - tx.amount),
+                balance: Math.max(0, d.balance - principalPayAmt),
               };
             }
             return d;
@@ -1109,6 +1130,14 @@ export default function App() {
           return inv;
         })
       );
+    } else if (tx.type === 'income' && resolvedInvestmentId && !newTx.linkedInvestmentAction) {
+      setInvestments((prevInv) =>
+        prevInv.map((inv) =>
+          inv.id === resolvedInvestmentId
+            ? { ...inv, dividendsOrInterest: (inv.dividendsOrInterest || 0) + tx.amount }
+            : inv
+        )
+      );
     }
 
     return true;
@@ -1206,12 +1235,15 @@ export default function App() {
           })
         );
       } else {
+        const principalPayAmt = targetTx.linkedKprBreakdown
+          ? Math.max(0, Number(targetTx.linkedKprBreakdown.principalPart) || 0)
+          : targetTx.amount;
         setDebts((prevDebts) =>
           prevDebts.map((d) => {
             if (d.id === targetTx.linkedDebtId) {
               return {
                 ...d,
-                balance: d.balance + targetTx.amount,
+                balance: d.balance + principalPayAmt,
               };
             }
             return d;
@@ -1298,6 +1330,21 @@ export default function App() {
           }
           return inv;
         })
+      );
+    } else if (
+      targetTx.type === 'income' &&
+      targetTx.linkedInvestmentId &&
+      !targetTx.linkedInvestmentAction
+    ) {
+      setInvestments((prevInv) =>
+        prevInv.map((inv) =>
+          inv.id === targetTx.linkedInvestmentId
+            ? {
+                ...inv,
+                dividendsOrInterest: Math.max(0, (inv.dividendsOrInterest || 0) - targetTx.amount),
+              }
+            : inv
+        )
       );
     }
   };
@@ -2492,6 +2539,7 @@ export default function App() {
                     onAddAccountWithNumber={handleAddAccount}
                     onDeleteAccount={handleDeleteAccount}
                     onTransferFunds={handleTransferFunds}
+                    onAddTransaction={handleAddTransaction}
                   />
                 )}
 
@@ -2542,7 +2590,9 @@ export default function App() {
                   <InvestmentTab
                     investments={investments}
                     transactions={transactions}
+                    accounts={accounts}
                     onUpdateInvestment={handleUpdateInvestment}
+                    onAddTransaction={handleAddTransaction}
                   />
                 )}
 

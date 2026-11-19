@@ -302,16 +302,21 @@ export const IntegrityReport: React.FC<IntegrityReportProps> = ({
         }
       }
 
-      // Check Broken Debt Links
-      if (tx.linkedDebtId && safeDebts.length > 0) {
-        const debtExists = safeDebts.some((d) => d.id === tx.linkedDebtId);
-        if (!debtExists) {
+      // Check Broken Debt Links (supports both loan/KPR debts and acc-debt-* credit/paylater accounts)
+      if (tx.linkedDebtId) {
+        const isAccountDebt = tx.linkedDebtId.startsWith('acc-debt-');
+        const targetExists = isAccountDebt
+          ? safeAccounts.some((a) => a.id === tx.linkedDebtId!.replace('acc-debt-', ''))
+          : safeDebts.length === 0 || safeDebts.some((d) => d.id === tx.linkedDebtId);
+        if (!targetExists) {
           list.push({
             id: `disc-tx-link-debt-${tx.id}`,
             category: 'transactions',
             severity: 'warning',
-            title: `Relasi Utang Putus pada Transaksi`,
-            description: `Transaksi "${tx.description || tx.id}" terhubung ke ID Utang "${tx.linkedDebtId}" yang telah dihapus.`,
+            title: isAccountDebt
+              ? 'Relasi Tagihan Kartu Kredit / PayLater Putus'
+              : 'Relasi Utang Putus pada Transaksi',
+            description: `Transaksi "${tx.description || tx.id}" terhubung ke ID Utang/Tagihan "${tx.linkedDebtId}" yang telah dihapus.`,
             affectedRecordName: tx.description || tx.id,
             affectedRecordId: tx.id,
           });
