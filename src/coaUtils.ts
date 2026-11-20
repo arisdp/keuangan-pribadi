@@ -25,6 +25,8 @@ export const DEFAULT_COA_LIST: AccountCOA[] = [
   { code: '1500', name: 'Portofolio Investasi (Saham/Emas/Reksadana)', category: 'Asset', normalBalance: 'Debet', description: 'Investasi pasar modal dan logam mulia' },
   { code: '1590', name: 'Akumulasi Penyesuaian Nilai Investasi', category: 'Asset', normalBalance: 'Kredit', description: 'Akun kontra untuk koreksi/depresiasi nilai aset investasi (non-kas)' },
   { code: '1600', name: 'Aset Properti & KPR', category: 'Asset', normalBalance: 'Debet', description: 'Nilai perolehan aset properti residensial atau komersial melalui KPR' },
+  { code: '1610', name: 'Aset Tetap (Kendaraan, Elektronik & Lainnya)', category: 'Asset', normalBalance: 'Debet', description: 'Nilai perolehan aset tetap non-likuid yang dimiliki secara langsung' },
+  { code: '1690', name: 'Akumulasi Penyusutan Aset Tetap', category: 'Asset', normalBalance: 'Kredit', description: 'Akun kontra untuk akumulasi penyusutan nilai buku aset tetap' },
   
   // 2000: Kewajiban
   { code: '2100', name: 'Utang Kartu Kredit', category: 'Liability', normalBalance: 'Kredit', description: 'Tagihan penggunaan limit kartu kredit' },
@@ -41,6 +43,7 @@ export const DEFAULT_COA_LIST: AccountCOA[] = [
   { code: '4100', name: 'Pendapatan Gaji Utama', category: 'Income', normalBalance: 'Kredit', description: 'Gaji rutin dari pekerjaan utama' },
   { code: '4200', name: 'Pendapatan Freelance & Usaha', category: 'Income', normalBalance: 'Kredit', description: 'Hasil kerja sampingan atau proyek' },
   { code: '4300', name: 'Hasil Investasi & Dividen', category: 'Income', normalBalance: 'Kredit', description: 'Gain & dividen portofolio investasi' },
+  { code: '4310', name: 'Apresiasi / Penambahan Nilai Aset Tetap', category: 'Income', normalBalance: 'Kredit', description: 'Kenaikan nilai pasar/revaluasi aset tetap dan properti' },
   { code: '4400', name: 'Pendapatan Lain-lain', category: 'Income', normalBalance: 'Kredit', description: 'Hadiah, refund, atau penerimaan tak terduga' },
   
   // 5000: Beban / Pengeluaran
@@ -57,6 +60,7 @@ export const DEFAULT_COA_LIST: AccountCOA[] = [
   { code: '5830', name: 'Beban Pajak & Asuransi Properti (BPHTB/PBB)', category: 'Expense', normalBalance: 'Debet', description: 'Bea perolehan hak atas tanah/bangunan, PBB, dan premi asuransi KPR' },
   { code: '5900', name: 'Beban Operasional Lainnya', category: 'Expense', normalBalance: 'Debet', description: 'Pengeluaran tak terduga lainnya' },
   { code: '5950', name: 'Beban Depresiasi & Penurunan Nilai Investasi', category: 'Expense', normalBalance: 'Debet', description: 'Beban non-kas atas koreksi/depresiasi nilai aset investasi berdasarkan durasi kepemilikan' },
+  { code: '5960', name: 'Beban Penyusutan Aset Tetap', category: 'Expense', normalBalance: 'Debet', description: 'Beban penyusutan nilai buku kendaraan, elektronik, dan aset tetap lainnya' },
 ];
 
 export const getStoredCoaList = (): AccountCOA[] => {

@@ -103,6 +103,35 @@ export const debts = pgTable('debts', {
   purpose: text('purpose').notNull(),
   category: text('category').notNull(),
   dueDay: integer('due_day'),
+  startDate: text('start_date'),
+  kprScheme: text('kpr_scheme'),
+  kprPresetId: text('kpr_preset_id'),
+  propertyPrice: decimal('property_price', { precision: 15, scale: 2 }),
+  downPayment: decimal('down_payment', { precision: 15, scale: 2 }),
+  tenorMonths: integer('tenor_months'),
+  fixedRate: decimal('fixed_rate', { precision: 5, scale: 2 }),
+  fixedYears: integer('fixed_years'),
+  floatingRate: decimal('floating_rate', { precision: 5, scale: 2 }),
+});
+
+export const fixedAssets = pgTable('fixed_assets', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  name: text('name').notNull(),
+  category: text('category').notNull(),
+  purchasePrice: decimal('purchase_price', { precision: 15, scale: 2 }).notNull(),
+  acquisitionDate: text('acquisition_date').notNull(),
+  annualRatePct: decimal('annual_rate_pct', { precision: 6, scale: 2 }).notNull().default('0'),
+  rateEffectiveDate: text('rate_effective_date'),
+  fundingMode: text('funding_mode').notNull().default('direct_record'),
+  linkedAccountId: text('linked_account_id'),
+  linkedTransactionId: text('linked_transaction_id'),
+  linkedDebtId: text('linked_debt_id'),
+  isKprLinked: boolean('is_kpr_linked').default(false),
+  kprPaidPrincipalLock: decimal('kpr_paid_principal_lock', { precision: 15, scale: 2 }),
+  kprIsPaidOff: boolean('kpr_is_paid_off').default(false),
+  manualAdjustments: jsonb('manual_adjustments'),
+  notes: text('notes'),
 });
 
 export const debtPayments = pgTable('debt_payments', {

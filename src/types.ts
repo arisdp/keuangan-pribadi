@@ -13,6 +13,8 @@ export interface Transaction {
   linkedDebtAction?: 'create' | 'pay';
   linkedInvestmentId?: string;
   linkedInvestmentAction?: 'buy' | 'sell';
+  linkedFixedAssetId?: string;
+  linkedFixedAssetAction?: 'buy';
   linkedEmergencyTxId?: string;
   // Investment unit detail properties
   unitPrice?: number;
@@ -20,10 +22,12 @@ export interface Transaction {
   unitName?: string;
   // Non-cash Adjusting Entries properties
   isAdjustment?: boolean;
-  adjustmentType?: 'investment_depreciation' | 'debt_interest_accrual';
+  adjustmentType?: 'investment_depreciation' | 'debt_interest_accrual' | 'fixed_asset_depreciation';
   adjustmentPeriodKey?: string; // e.g., YYYY-MM
   adjustmentRatePct?: number;
   adjustmentDurationDays?: number;
+  linkedFixedAssetAdjustmentId?: string;
+  previousRateEffectiveDate?: string;
   coaDebitCode?: string;
   coaCreditCode?: string;
   linkedKprBreakdown?: {
@@ -97,6 +101,43 @@ export interface InvestmentAsset {
   currentUnitPrice?: number; // Harga Satuan Hari Ini (Current Unit Price)
   priceHistory?: InvestmentPriceHistory[];
   dividendsOrInterest?: number; // Akumulasi Hasil Pasif Dividen / Bunga / Kupon (Rp)
+}
+
+export type FixedAssetCategory =
+  | 'Properti & Tanah'
+  | 'Kendaraan'
+  | 'Elektronik & Perangkat'
+  | 'Mesin & Usaha'
+  | 'Barang Berharga & Koleksi'
+  | 'Lainnya';
+
+export interface FixedAssetAdjustment {
+  id: string;
+  date: string; // YYYY-MM-DD
+  type: 'appreciation' | 'depreciation'; // appreciation = penambahan nilai, depreciation = penyusutan manual
+  amount: number;
+  note: string;
+  isAutoYearEnd?: boolean;
+  periodKey?: string; // e.g. YYYY-12
+}
+
+export interface FixedAsset {
+  id: string;
+  name: string;
+  category: FixedAssetCategory;
+  purchasePrice: number; // Harga perolehan penuh atau harga properti KPR
+  acquisitionDate: string; // YYYY-MM-DD
+  annualRatePct: number; // + untuk apresiasi tahunan %, - untuk penyusutan tahunan %
+  rateEffectiveDate?: string; // Tanggal acuan mulai perhitungan laju tahunan
+  fundingMode: 'account_deduction' | 'direct_record' | 'kpr_linked';
+  linkedAccountId?: string;
+  linkedTransactionId?: string;
+  linkedDebtId?: string;
+  isKprLinked?: boolean;
+  kprPaidPrincipalLock?: number;
+  kprIsPaidOff?: boolean;
+  manualAdjustments?: FixedAssetAdjustment[];
+  notes?: string;
 }
 
 export type AccountType = 'cash' | 'bank' | 'e-wallet' | 'credit-card' | 'paylater';
@@ -336,6 +377,7 @@ export interface UserFinancialData {
   emergencyFund: EmergencyFundConfig;
   emergencyTransactions: EmergencyFundTransaction[];
   investments: InvestmentAsset[];
+  fixedAssets?: FixedAsset[];
   recurringTransactions?: RecurringTransaction[];
   savingsGoals?: SavingsGoal[];
   investmentGoals?: InvestmentGoal[];

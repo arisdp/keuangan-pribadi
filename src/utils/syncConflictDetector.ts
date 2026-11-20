@@ -14,6 +14,7 @@ export interface SyncDataPackage {
   budgets?: any[];
   debts?: any[];
   investments?: any[];
+  fixedAssets?: any[];
   recurringTransactions?: any[];
   savingsGoals?: any[];
   emergencyConfig?: any;
@@ -89,6 +90,7 @@ export function mergeSyncData(localData: SyncDataPackage, cloudData: SyncDataPac
     budgets: deduplicateById(localData.budgets, cloudData.budgets),
     debts: deduplicateById(localData.debts, cloudData.debts),
     investments: deduplicateById(localData.investments, cloudData.investments),
+    fixedAssets: deduplicateById(localData.fixedAssets, cloudData.fixedAssets),
     recurringTransactions: deduplicateById(localData.recurringTransactions, cloudData.recurringTransactions),
     savingsGoals: deduplicateById(localData.savingsGoals, cloudData.savingsGoals),
     emergencyConfig: localData.emergencyConfig || cloudData.emergencyConfig,

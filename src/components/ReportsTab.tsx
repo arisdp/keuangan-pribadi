@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useRef } from 'react';
-import { Transaction, Account, CategoryBudget, Debt, InvestmentAsset, EmergencyFundTransaction, KprCoaMappingConfig } from '../types';
+import { Transaction, Account, CategoryBudget, Debt, FixedAsset, InvestmentAsset, EmergencyFundTransaction, KprCoaMappingConfig } from '../types';
 import { CategoryNode, DEFAULT_CATEGORY_HIERARCHY } from '../categoryHierarchy';
 import { CoaScanResult } from '../coaUtils';
 import { HierarchicalPivotReport } from './HierarchicalPivotReport';
@@ -25,9 +25,11 @@ import jsPDF from 'jspdf';
 import {
   calculateCashFlowStatement,
   calculateBalanceSheet,
+  calculateFixedAssetValuation,
   calculateTotalLiquidCash,
   isOperatingIncome,
   isOperatingExpense,
+  syncKprDebtsToFixedAssets,
 } from '../utils/accountingEngine';
 import { formatterIDR } from '../utils/formatters';
 import { showToast } from '../utils/toast';
@@ -74,6 +76,7 @@ interface ReportsTabProps {
   debts: Debt[];
   investments: InvestmentAsset[];
   emergencyTransactions: EmergencyFundTransaction[];
+  fixedAssets?: FixedAsset[];
   masterCategories?: CategoryNode[];
   kprCoaMapping?: KprCoaMappingConfig;
   onUpdateMasterCategories?: (newCats: CategoryNode[]) => void;
@@ -96,6 +99,7 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
   debts,
   investments,
   emergencyTransactions,
+  fixedAssets = [],
   masterCategories = DEFAULT_CATEGORY_HIERARCHY,
   kprCoaMapping,
   onUpdateMasterCategories,
@@ -144,7 +148,7 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
   const handleExportCSV = () => {
     switch (activeReport) {
       case 'balance-sheet':
-        exportBalanceSheetToCSV(balanceSheetData, accounts, debts, investments);
+        exportBalanceSheetToCSV(balanceSheetData, accounts, debts, investments, syncedFixedAssets);
         break;
       case 'cashflow':
         exportCashFlowToCSV(cashflowData);
@@ -202,10 +206,14 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
     return calculateCashFlowStatement(filteredTxs, accounts);
   }, [filteredTxs, accounts]);
 
+  const syncedFixedAssets = useMemo(() => {
+    return syncKprDebtsToFixedAssets(fixedAssets, debts);
+  }, [fixedAssets, debts]);
+
   // --- 2. BALANCE SHEET CALCULATIONS ---
   const balanceSheetData = useMemo(() => {
-    return calculateBalanceSheet(accounts, emergencyTransactions, investments, debts);
-  }, [accounts, emergencyTransactions, investments, debts]);
+    return calculateBalanceSheet(accounts, emergencyTransactions, investments, debts, syncedFixedAssets);
+  }, [accounts, emergencyTransactions, investments, debts, syncedFixedAssets]);
 
   // --- 3. BUDGET VS REALIZATION CALCULATIONS ---
   const budgetVsRealization = useMemo(() => {
@@ -719,6 +727,7 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
             debts={debts}
             investments={investments}
             emergencyTransactions={emergencyTransactions}
+            fixedAssets={syncedFixedAssets}
           />
           <LiquidityProjectionCard
             transactions={transactions}
@@ -1049,6 +1058,12 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
                     <span>Pembelian / Setoran Modal ke Portofolio Investasi</span>
                     <span className="font-mono text-blue-600 font-bold">-{formatterIDR.format(cashflowData.investmentOutflows)}</span>
                   </div>
+                  {cashflowData.fixedAssetOutflows > 0 && (
+                    <div className="flex justify-between text-slate-600">
+                      <span>Pembelian / Akuisisi Aset Tetap</span>
+                      <span className="font-mono text-blue-600 font-bold">-{formatterIDR.format(cashflowData.fixedAssetOutflows)}</span>
+                    </div>
+                  )}
                   <div className="flex justify-between text-slate-600">
                     <span>Pencairan Cadangan Dana Darurat</span>
                     <span className="font-mono text-emerald-600 font-bold">+{formatterIDR.format(cashflowData.savingInflows)}</span>
@@ -1208,6 +1223,60 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
                       <span className="font-mono text-blue-600">{formatterIDR.format(balanceSheetData.investmentAssets)}</span>
                     </div>
                   </div>
+                </div>
+
+                {/* Aset Tetap & Ekuitas Properti KPR */}
+                <div>
+                  <p className="font-bold text-slate-700 uppercase text-[11px] mb-2 border-b pb-1">
+                    D. Aset Tetap &amp; Ekuitas Properti KPR
+                  </p>
+                  <div className="space-y-2 pl-2 text-slate-600">
+                    {syncedFixedAssets.length === 0 ? (
+                      <div className="text-[11px] text-slate-400 italic">
+                        Belum ada aset tetap atau properti KPR tercatat.
+                      </div>
+                    ) : (
+                      syncedFixedAssets.map((fa, index) => {
+                        const val = calculateFixedAssetValuation(fa, debts);
+                        const statusText = fa.isKprLinked
+                          ? val.isPaidOff
+                            ? 'Lunas · 100% Aset Tetap'
+                            : `KPR ${val.ownershipPct.toFixed(1)}% lunas`
+                          : fa.category;
+                        return (
+                          <div key={fa.id ? `fa-${fa.id}-${index}` : `fa-${index}`} className="flex justify-between items-start gap-2">
+                            <div className="min-w-0">
+                              <span className="block text-slate-700 font-medium truncate">
+                                {fa.name} ({statusText})
+                              </span>
+                              <span className="text-[10px] text-slate-400 font-mono tabular-nums block">
+                                Basis {formatterIDR.format(val.basisValue)} · Penyesuaian{' '}
+                                {val.totalNetValueChange >= 0 ? '+' : ''}
+                                {formatterIDR.format(val.totalNetValueChange)}
+                              </span>
+                            </div>
+                            <span className="font-mono tabular-nums font-semibold shrink-0">
+                              {formatterIDR.format(val.currentBookValue)}
+                            </span>
+                          </div>
+                        );
+                      })
+                    )}
+                    <div className="flex justify-between font-bold text-slate-800 border-t pt-1 mt-1">
+                      <span>Total Nilai Buku Aset Tetap</span>
+                      <span className="font-mono tabular-nums text-emerald-700">
+                        {formatterIDR.format(balanceSheetData.fixedAssetsValue)}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* KOMBINASI INVESTASI & ASET TETAP */}
+                <div className="p-2.5 bg-blue-50/70 rounded-lg border border-blue-200/80 flex justify-between items-center text-xs font-bold text-blue-900">
+                  <span>Kombinasi Portofolio Investasi &amp; Aset Tetap</span>
+                  <span className="font-mono tabular-nums">
+                    {formatterIDR.format(balanceSheetData.combinedInvestmentAndFixedAssets)}
+                  </span>
                 </div>
 
                 {/* TOTAL ASET */}

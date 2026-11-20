@@ -11,12 +11,15 @@ import {
   applyTransactionsToAccounts,
   calculateTotalEmergencyFund,
   calculateTotalLiquidCash,
+  computePendingYearEndFixedAssetDepreciations,
   createAccountRecord,
   getAccountCreditBill,
   getLiquidAccounts,
   getTransactionAccountDelta,
+  isCreditAccount,
   normalizeAbsAmount,
   resolveDebtInstallmentAccounting,
+  syncKprDebtsToFixedAssets,
   updateAccountMetadataAndStartingBalance,
 } from './utils/accountingEngine';
 import { secureStorage } from './utils/secureStorage';
@@ -29,6 +32,9 @@ import {
   Debt, 
   EmergencyFundConfig, 
   EmergencyFundTransaction,
+  FixedAsset,
+  FixedAssetAdjustment,
+  FixedAssetCategory,
   InvestmentAsset,
   User,
   RecurringTransaction,
@@ -187,6 +193,16 @@ export default function App() {
     if (user) {
       const u: User = JSON.parse(user);
       const saved = secureStorage.getItem(`fin_${u.username}_investments`);
+      return saved ? JSON.parse(saved) : [];
+    }
+    return [];
+  });
+
+  const [fixedAssets, setFixedAssets] = useState<FixedAsset[]>(() => {
+    const user = secureStorage.getItem('fin_current_user');
+    if (user) {
+      const u: User = JSON.parse(user);
+      const saved = secureStorage.getItem(`fin_${u.username}_fixed_assets`);
       return saved ? JSON.parse(saved) : [];
     }
     return [];
@@ -514,6 +530,10 @@ export default function App() {
       setInvestments(restoredData.investments);
       secureStorage.setItem(`fin_${username}_investments`, JSON.stringify(restoredData.investments));
     }
+    if (Array.isArray(restoredData.fixedAssets)) {
+      setFixedAssets(restoredData.fixedAssets);
+      secureStorage.setItem(`fin_${username}_fixed_assets`, JSON.stringify(restoredData.fixedAssets));
+    }
     if (restoredData.emergencyConfig) {
       setEmergencyConfig(restoredData.emergencyConfig);
       secureStorage.setItem(`fin_${username}_emergency_config`, JSON.stringify(restoredData.emergencyConfig));
@@ -568,7 +588,8 @@ export default function App() {
     const hasCloudState =
       (Array.isArray(pkg.accounts) && pkg.accounts.length > 0) ||
       (Array.isArray(pkg.transactions) && pkg.transactions.length > 0) ||
-      (Array.isArray(pkg.budgets) && pkg.budgets.length > 0);
+      (Array.isArray(pkg.budgets) && pkg.budgets.length > 0) ||
+      (Array.isArray(pkg.fixedAssets) && pkg.fixedAssets.length > 0);
 
     if (!hasCloudState) return;
 
@@ -577,6 +598,7 @@ export default function App() {
     if (Array.isArray(pkg.budgets)) setBudgets(pkg.budgets);
     if (Array.isArray(pkg.debts)) setDebts(pkg.debts);
     if (Array.isArray(pkg.investments)) setInvestments(pkg.investments);
+    if (Array.isArray(pkg.fixedAssets)) setFixedAssets(pkg.fixedAssets);
     if (pkg.emergencyConfig) setEmergencyConfig(pkg.emergencyConfig);
     if (Array.isArray(pkg.emergencyTransactions)) setEmergencyTransactions(pkg.emergencyTransactions);
     if (Array.isArray(pkg.recurringTransactions)) setRecurringTransactions(pkg.recurringTransactions);
@@ -635,6 +657,7 @@ export default function App() {
         budgets,
         debts,
         investments,
+        fixedAssets,
         recurringTransactions,
         savingsGoals,
         emergencyConfig,
@@ -651,6 +674,7 @@ export default function App() {
     budgets,
     debts,
     investments,
+    fixedAssets,
     recurringTransactions,
     savingsGoals,
     emergencyConfig,
@@ -672,6 +696,7 @@ export default function App() {
             setBudgets(cloudData.budgets || []);
             setDebts(cloudData.debts || []);
             setInvestments(cloudData.investments || []);
+            setFixedAssets(cloudData.fixedAssets || []);
             setEmergencyConfig(cloudData.emergencyFund || { jobStability: 'medium', dependents: 0, monthlyExpense: 0 });
             setEmergencyTransactions(cloudData.emergencyTransactions || []);
           }
@@ -694,6 +719,7 @@ export default function App() {
         budgets,
         debts,
         investments,
+        fixedAssets,
         emergencyFund: emergencyConfig,
         emergencyTransactions
       }).catch(() => {});
@@ -704,6 +730,7 @@ export default function App() {
     budgets,
     debts,
     investments,
+    fixedAssets,
     emergencyConfig,
     emergencyTransactions,
     currentUser,
@@ -744,6 +771,49 @@ export default function App() {
 
   useEffect(() => {
     if (currentUser) {
+      secureStorage.setItem(`fin_${currentUser.username}_fixed_assets`, JSON.stringify(fixedAssets));
+    }
+  }, [fixedAssets, currentUser]);
+
+  // Sinkronisasi otomatis fasilitas KPR di modul Utang ke daftar Aset Tetap
+  useEffect(() => {
+    setFixedAssets((prev) => {
+      const next = syncKprDebtsToFixedAssets(prev, debts);
+      return JSON.stringify(prev) === JSON.stringify(next) ? prev : next;
+    });
+  }, [debts]);
+
+  // Penyesuaian penyusutan aset tetap otomatis jika tanggal mencapai akhir tahun (atau tutup tahun sebelumnya belum terposting)
+  useEffect(() => {
+    if (!currentUser || loadingPg || fixedAssets.length === 0) return;
+
+    const now = new Date();
+    const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const result = computePendingYearEndFixedAssetDepreciations(
+      fixedAssets,
+      debts,
+      transactions,
+      todayStr
+    );
+
+    if (result.postedCount > 0) {
+      setTransactions((prev) => {
+        const existingIds = new Set(prev.map((t) => t.id));
+        const uniqueNewTxs = result.newAdjustingTransactions.filter((t) => !existingIds.has(t.id));
+        return uniqueNewTxs.length > 0 ? [...uniqueNewTxs, ...prev] : prev;
+      });
+      setFixedAssets(result.updatedFixedAssets);
+      showToast({
+        type: 'info',
+        title: 'Penyusutan Akhir Tahun Otomatis Diterapkan',
+        message: `${result.postedCount} jurnal penyesuaian penyusutan aset tetap (total ${formatCurrencyIDR(result.totalDepreciationPosted)}) diposting dan nilai buku disinkronkan.`,
+        duration: 5000,
+      });
+    }
+  }, [currentUser, loadingPg, fixedAssets, debts, transactions]);
+
+  useEffect(() => {
+    if (currentUser) {
       secureStorage.setItem(`fin_${currentUser.username}_emergency_config`, JSON.stringify(emergencyConfig));
     }
   }, [emergencyConfig, currentUser]);
@@ -758,10 +828,13 @@ export default function App() {
 
   // Add a standard log transaction
   const handleAddTransaction = (newTx: Omit<Transaction, 'id'> & {
+    id?: string;
     linkedDebtId?: string;
     linkedDebtAction?: 'create' | 'pay';
     linkedInvestmentId?: string;
     linkedInvestmentAction?: 'buy' | 'sell';
+    linkedFixedAssetId?: string;
+    linkedFixedAssetAction?: 'buy';
     unitPrice?: number;
     units?: number;
     unitName?: string;
@@ -905,7 +978,7 @@ export default function App() {
     const txUnits = newTx.units || newTx.newInvestmentDetails?.units;
     const txUnitName = newTx.unitName || newTx.newInvestmentDetails?.unitName;
 
-    const txId = `tx-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const txId = newTx.id || `tx-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
     // Pre-generate linked entity IDs so tx carries exact two-way references
     let resolvedDebtId = newTx.linkedDebtId;
@@ -962,6 +1035,8 @@ export default function App() {
       linkedDebtAction: newTx.linkedDebtAction,
       linkedInvestmentId: resolvedInvestmentId,
       linkedInvestmentAction: newTx.linkedInvestmentAction,
+      linkedFixedAssetId: newTx.linkedFixedAssetId,
+      linkedFixedAssetAction: newTx.linkedFixedAssetAction,
       linkedEmergencyTxId: resolvedEmergencyTxId,
       unitPrice: txUnitPrice,
       units: txUnits,
@@ -1203,6 +1278,26 @@ export default function App() {
             return d;
           })
         );
+      } else if (targetTx.adjustmentType === 'fixed_asset_depreciation' && targetTx.linkedFixedAssetId) {
+        setFixedAssets((prevAssets) =>
+          prevAssets.map((fa) => {
+            if (fa.id !== targetTx.linkedFixedAssetId) return fa;
+            const remainingAdjustments = (fa.manualAdjustments || []).filter(
+              (adj) =>
+                adj.id !== targetTx.linkedFixedAssetAdjustmentId &&
+                !(adj.isAutoYearEnd && targetTx.adjustmentPeriodKey && adj.periodKey === targetTx.adjustmentPeriodKey)
+            );
+            const restoredRateEffectiveDate =
+              fa.rateEffectiveDate === targetTx.date
+                ? targetTx.previousRateEffectiveDate || fa.acquisitionDate
+                : fa.rateEffectiveDate;
+            return {
+              ...fa,
+              manualAdjustments: remainingAdjustments,
+              rateEffectiveDate: restoredRateEffectiveDate,
+            };
+          })
+        );
       }
       return;
     }
@@ -1367,6 +1462,17 @@ export default function App() {
                 dividendsOrInterest: Math.max(0, (inv.dividendsOrInterest || 0) - targetTx.amount),
               }
             : inv
+        )
+      );
+    }
+
+    // 4. Fixed Asset Revert
+    if (targetTx.linkedFixedAssetAction === 'buy' || targetTx.linkedFixedAssetId) {
+      setFixedAssets((prevFa) =>
+        prevFa.filter(
+          (fa) =>
+            fa.id !== targetTx.linkedFixedAssetId &&
+            fa.linkedTransactionId !== targetTx.id
         )
       );
     }
@@ -1635,6 +1741,146 @@ export default function App() {
         }
         return inv;
       })
+    );
+  };
+
+  // Fixed Assets & KPR Equity Handlers
+  const handleAddFixedAsset = (payload: {
+    name: string;
+    category: FixedAssetCategory;
+    purchasePrice: number;
+    acquisitionDate: string;
+    annualRatePct: number;
+    fundingMode: 'account_deduction' | 'direct_record';
+    linkedAccountId?: string;
+    notes?: string;
+  }): boolean => {
+    const normalizedPrice = normalizeAbsAmount(payload.purchasePrice);
+    if (!payload.name.trim() || normalizedPrice <= 0) return false;
+
+    const suffix = Math.random().toString(36).slice(2, 6);
+    const fixedAssetId = `fa-${Date.now()}-${suffix}`;
+    let linkedTxId: string | undefined;
+
+    if (payload.fundingMode === 'account_deduction') {
+      const sourceAcc = accounts.find((a) => a.id === payload.linkedAccountId);
+      if (!sourceAcc) {
+        showToast({
+          type: 'error',
+          title: 'Rekening Tidak Ditemukan',
+          message: 'Pilih rekening sumber dana yang valid untuk mencatat pembelian aset tetap.',
+        });
+        return false;
+      }
+      if (!isCreditAccount(sourceAcc) && sourceAcc.currentBalance < normalizedPrice) {
+        showToast({
+          type: 'error',
+          title: 'Saldo Rekening Tidak Mencukupi',
+          message: `Saldo ${sourceAcc.name} (${formatCurrencyIDR(sourceAcc.currentBalance)}) kurang dari harga beli ${formatCurrencyIDR(normalizedPrice)}.`,
+        });
+        return false;
+      }
+
+      const preTxId = `tx-fa-${Date.now()}-${suffix}`;
+      const bankCoa = getAccountCoaMapping(sourceAcc, getStoredCoaList());
+      const ok = handleAddTransaction({
+        id: preTxId,
+        date: payload.acquisitionDate || new Date().toISOString().split('T')[0],
+        accountId: sourceAcc.id,
+        type: 'expense',
+        category: 'Pembelian Aset Tetap',
+        description: `Pembelian Aset Tetap: ${payload.name.trim()}`,
+        amount: normalizedPrice,
+        coaDebitCode: '1610',
+        coaCreditCode: bankCoa.code,
+        linkedFixedAssetId: fixedAssetId,
+        linkedFixedAssetAction: 'buy',
+      });
+      if (!ok) return false;
+      linkedTxId = preTxId;
+    }
+
+    const newAsset: FixedAsset = {
+      id: fixedAssetId,
+      name: payload.name.trim(),
+      category: payload.category,
+      purchasePrice: normalizedPrice,
+      acquisitionDate: payload.acquisitionDate || new Date().toISOString().split('T')[0],
+      annualRatePct: Number.isFinite(payload.annualRatePct) ? payload.annualRatePct : 0,
+      rateEffectiveDate: payload.acquisitionDate || new Date().toISOString().split('T')[0],
+      fundingMode: payload.fundingMode,
+      linkedAccountId: payload.fundingMode === 'account_deduction' ? payload.linkedAccountId : undefined,
+      linkedTransactionId: linkedTxId,
+      isKprLinked: false,
+      manualAdjustments: [],
+      notes: payload.notes,
+    };
+
+    setFixedAssets((prev) => [newAsset, ...prev]);
+    showToast({
+      type: 'success',
+      title: 'Aset Tetap Ditambahkan',
+      message:
+        payload.fundingMode === 'account_deduction'
+          ? `Aset "${newAsset.name}" (${formatCurrencyIDR(normalizedPrice)}) berhasil dicatat dan dipotong dari saldo rekening.`
+          : `Aset "${newAsset.name}" (${formatCurrencyIDR(normalizedPrice)}) berhasil dicatat langsung ke daftar aset tetap.`,
+    });
+    return true;
+  };
+
+  const handleUpdateFixedAsset = (id: string, updated: Partial<FixedAsset>) => {
+    setFixedAssets((prev) =>
+      prev.map((asset) => (asset.id === id ? { ...asset, ...updated } : asset))
+    );
+  };
+
+  const handleDeleteFixedAsset = (id: string) => {
+    setFixedAssets((prev) => prev.filter((asset) => asset.id !== id));
+    showToast({
+      type: 'info',
+      title: 'Aset Tetap Dihapus',
+      message: 'Data aset tetap telah dihapus dari daftar kepemilikan.',
+    });
+  };
+
+  const handleAddFixedAssetAdjustment = (
+    assetId: string,
+    adjustment: Omit<FixedAssetAdjustment, 'id'>
+  ) => {
+    const newAdj: FixedAssetAdjustment = {
+      ...adjustment,
+      amount: normalizeAbsAmount(adjustment.amount),
+      id: `fa-adj-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    };
+    setFixedAssets((prev) =>
+      prev.map((asset) =>
+        asset.id === assetId
+          ? {
+              ...asset,
+              manualAdjustments: [newAdj, ...(asset.manualAdjustments || [])],
+            }
+          : asset
+      )
+    );
+    showToast({
+      type: 'success',
+      title: 'Penyesuaian Nilai Tercatat',
+      message: `${adjustment.type === 'appreciation' ? 'Penambahan nilai' : 'Penyusutan'} sebesar ${formatCurrencyIDR(newAdj.amount)} berhasil disimpan.`,
+    });
+  };
+
+  const handleDeleteFixedAssetAdjustment = (assetId: string, adjustmentId: string) => {
+    setFixedAssets((prev) =>
+      prev.map((asset) =>
+        asset.id === assetId
+          ? {
+              ...asset,
+              manualAdjustments: (asset.manualAdjustments || []).filter(
+                (adj) => adj.id !== adjustmentId
+              ),
+            }
+          : asset
+      )
     );
   };
 
@@ -2040,6 +2286,7 @@ export default function App() {
       setBudgets(cleanBudgets);
       setDebts([]);
       setInvestments([]);
+      setFixedAssets([]);
       setRecurringTransactions([]);
       setSavingsGoals([]);
       setEmergencyConfig(cleanEmergencyConfig);
@@ -2063,6 +2310,7 @@ export default function App() {
         secureStorage.setItem(`fin_${username}_budgets`, JSON.stringify(cleanBudgets));
         secureStorage.setItem(`fin_${username}_debts`, JSON.stringify([]));
         secureStorage.setItem(`fin_${username}_investments`, JSON.stringify([]));
+        secureStorage.setItem(`fin_${username}_fixed_assets`, JSON.stringify([]));
         secureStorage.setItem(`fin_${username}_recurring_transactions`, JSON.stringify([]));
         secureStorage.setItem(`fin_${username}_savings_goals`, JSON.stringify([]));
         secureStorage.setItem(`fin_${username}_emergency_config`, JSON.stringify(cleanEmergencyConfig));
@@ -2075,6 +2323,7 @@ export default function App() {
           budgets: cleanBudgets,
           debts: [],
           investments: [],
+          fixedAssets: [],
           recurringTransactions: [],
           savingsGoals: [],
           emergencyConfig: cleanEmergencyConfig,
@@ -2092,6 +2341,7 @@ export default function App() {
             budgets: cleanBudgets,
             debts: [],
             investments: [],
+            fixedAssets: [],
             emergencyFund: cleanEmergencyConfig,
             emergencyTransactions: []
           }).catch(() => {});
@@ -2124,6 +2374,7 @@ export default function App() {
         setBudgets(INITIAL_BUDGETS);
         setDebts(INITIAL_DEBTS);
         setInvestments(INITIAL_INVESTMENTS);
+        setFixedAssets(syncKprDebtsToFixedAssets([], INITIAL_DEBTS));
         setRecurringTransactions(INITIAL_RECURRING_TRANSACTIONS);
         setSavingsGoals([
           {
@@ -2155,6 +2406,7 @@ export default function App() {
         setBudgets(cleanBudgets);
         setDebts([]);
         setInvestments([]);
+        setFixedAssets([]);
         setRecurringTransactions([]);
         setSavingsGoals([]);
         setEmergencyConfig(cleanEmergencyConfig);
@@ -2165,8 +2417,11 @@ export default function App() {
       setTransactions(JSON.parse(secureStorage.getItem(`fin_${username}_transactions`) || '[]'));
       setAccounts(JSON.parse(secureStorage.getItem(`fin_${username}_accounts`) || '[]'));
       setBudgets(JSON.parse(secureStorage.getItem(`fin_${username}_budgets`) || '[]'));
-      setDebts(JSON.parse(secureStorage.getItem(`fin_${username}_debts`) || '[]'));
+      const loadedDebts = JSON.parse(secureStorage.getItem(`fin_${username}_debts`) || '[]');
+      setDebts(loadedDebts);
       setInvestments(JSON.parse(secureStorage.getItem(`fin_${username}_investments`) || '[]'));
+      const loadedFixed = JSON.parse(secureStorage.getItem(`fin_${username}_fixed_assets`) || '[]');
+      setFixedAssets(syncKprDebtsToFixedAssets(loadedFixed, loadedDebts));
       setRecurringTransactions(JSON.parse(secureStorage.getItem(`fin_${username}_recurring_transactions`) || '[]'));
       setSavingsGoals(JSON.parse(secureStorage.getItem(`fin_${username}_savings_goals`) || '[]'));
       setEmergencyConfig(JSON.parse(secureStorage.getItem(`fin_${username}_emergency_config`) || '{"jobStability":"medium","dependents":0,"monthlyExpense":0}'));
@@ -2196,6 +2451,7 @@ export default function App() {
     setBudgets([]);
     setDebts([]);
     setInvestments([]);
+    setFixedAssets([]);
     setRecurringTransactions([]);
     setSavingsGoals([]);
     setEmergencyConfig({ jobStability: 'medium', dependents: 0, monthlyExpense: 0 });
@@ -2544,6 +2800,7 @@ export default function App() {
                     debts={debts}
                     emergencyTransactions={emergencyTransactions}
                     investments={investments}
+                    fixedAssets={fixedAssets}
                     savingsGoals={savingsGoals}
                     onAddSavingsGoal={handleAddSavingsGoal}
                     onUpdateSavingsGoal={handleUpdateSavingsGoal}
@@ -2640,7 +2897,14 @@ export default function App() {
                     investments={investments}
                     transactions={transactions}
                     accounts={accounts}
+                    fixedAssets={fixedAssets}
+                    debts={debts}
                     onUpdateInvestment={handleUpdateInvestment}
+                    onAddFixedAsset={handleAddFixedAsset}
+                    onUpdateFixedAsset={handleUpdateFixedAsset}
+                    onDeleteFixedAsset={handleDeleteFixedAsset}
+                    onAddFixedAssetAdjustment={handleAddFixedAssetAdjustment}
+                    onDeleteFixedAssetAdjustment={handleDeleteFixedAssetAdjustment}
                     onAddTransaction={handleAddTransaction}
                   />
                 )}
@@ -2702,6 +2966,7 @@ export default function App() {
                     debts={debts}
                     investments={investments}
                     emergencyTransactions={emergencyTransactions}
+                    fixedAssets={fixedAssets}
                     masterCategories={masterCategories}
                     kprCoaMapping={kprCoaMapping}
                     onUpdateMasterCategories={(newCats) => setMasterCategories(newCats)}
@@ -2873,6 +3138,7 @@ export default function App() {
             budgets,
             debts,
             investments,
+            fixedAssets,
             emergencyConfig,
             emergencyTransactions,
             masterCategories,
@@ -2968,6 +3234,7 @@ export default function App() {
                 budgets,
                 debts,
                 investments,
+                fixedAssets,
                 recurringTransactions,
                 savingsGoals,
                 emergencyConfig,

@@ -1,5 +1,5 @@
 import React from 'react';
-import { Account, InvestmentAsset, Transaction } from '../types';
+import { Account, Debt, FixedAsset, FixedAssetAdjustment, InvestmentAsset, Transaction } from '../types';
 import { FormattedNumberInput } from './FormattedNumberInput';
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip, AreaChart, Area, LineChart, Line, XAxis, YAxis, CartesianGrid, Legend, BarChart, Bar } from 'recharts';
 import { TrendingUp, Wallet, ArrowUpRight, ArrowDownLeft, Info, Activity, Landmark, Edit2, Check, X, BarChart2, Layers, Plus, Calculator, RefreshCw, Coins, Sparkles, History, FileSpreadsheet, FileText, Download, DollarSign, Percent, Gift, Target, AlertTriangle } from 'lucide-react';
@@ -9,15 +9,30 @@ import { InvestmentSimulationCalculator } from './InvestmentSimulationCalculator
 import { InvestmentGoalSection } from './InvestmentGoalSection';
 import { InflationPurchasingPowerCalculator } from './InflationPurchasingPowerCalculator';
 import { InvestmentRoiD3Chart } from './InvestmentRoiD3Chart';
+import { FixedAssetCreatePayload, FixedAssetSection } from './FixedAssetSection';
 import { exportInvestmentsToCSV, exportInvestmentsToPDF } from '../utils/exportInvestment';
-import { applyAccountBalanceChange, getLiquidAccounts, getTransactionAccountDelta } from '../utils/accountingEngine';
+import {
+  applyAccountBalanceChange,
+  calculateCombinedPortfolioWealth,
+  calculateFixedAssetValuation,
+  getLiquidAccounts,
+  getTransactionAccountDelta,
+  syncKprDebtsToFixedAssets,
+} from '../utils/accountingEngine';
 import { showToast } from '../utils/toast';
 
 interface InvestmentTabProps {
   investments: InvestmentAsset[];
   transactions: Transaction[];
   accounts?: Account[];
+  fixedAssets?: FixedAsset[];
+  debts?: Debt[];
   onUpdateInvestment?: (id: string, updatedFields: Partial<InvestmentAsset>) => void;
+  onAddFixedAsset?: (payload: FixedAssetCreatePayload) => boolean | void;
+  onUpdateFixedAsset?: (id: string, updated: Partial<FixedAsset>) => void;
+  onDeleteFixedAsset?: (id: string) => void;
+  onAddFixedAssetAdjustment?: (assetId: string, adjustment: Omit<FixedAssetAdjustment, 'id'>) => void;
+  onDeleteFixedAssetAdjustment?: (assetId: string, adjustmentId: string) => void;
   onAddTransaction?: (tx: Omit<Transaction, 'id'> & {
     linkedInvestmentId?: string;
     linkedInvestmentAction?: 'buy' | 'sell';
@@ -38,7 +53,14 @@ export const InvestmentTab: React.FC<InvestmentTabProps> = ({
   investments = [],
   transactions = [],
   accounts = [],
+  fixedAssets = [],
+  debts = [],
   onUpdateInvestment,
+  onAddFixedAsset,
+  onUpdateFixedAsset,
+  onDeleteFixedAsset,
+  onAddFixedAssetAdjustment,
+  onDeleteFixedAssetAdjustment,
   onAddTransaction,
 }) => {
   const formatterIDR = new Intl.NumberFormat('id-ID', {
@@ -52,8 +74,9 @@ export const InvestmentTab: React.FC<InvestmentTabProps> = ({
   const [isHistoryModalOpen, setIsHistoryModalOpen] = React.useState(false);
   const [isSimulationModalOpen, setIsSimulationModalOpen] = React.useState(false);
 
-  // Pie Chart Allocation View Mode
-  const [pieViewMode, setPieViewMode] = React.useState<'category' | 'asset'>('category');
+  // Scope & Pie Chart Allocation View Mode
+  const [portfolioScope, setPortfolioScope] = React.useState<'all' | 'financial' | 'fixed'>('all');
+  const [pieViewMode, setPieViewMode] = React.useState<'category' | 'asset' | 'combined'>('category');
 
   // Edit State
   const [editingAssetId, setEditingAssetId] = React.useState<string | null>(null);
@@ -133,9 +156,48 @@ export const InvestmentTab: React.FC<InvestmentTabProps> = ({
     }))
     .sort((a, b) => b.value - a.value);
 
-  const pieData = pieViewMode === 'category' ? pieDataCategory : pieDataAsset;
+  const syncedFixedAssets = React.useMemo(
+    () => syncKprDebtsToFixedAssets(fixedAssets, debts),
+    [fixedAssets, debts]
+  );
 
-  const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899', '#06b6d4'];
+  const combinedWealth = React.useMemo(
+    () => calculateCombinedPortfolioWealth(investments, syncedFixedAssets, debts),
+    [investments, syncedFixedAssets, debts]
+  );
+
+  const pieDataCombined = React.useMemo(() => {
+    const map: Record<string, number> = {};
+    investments.forEach((inv) => {
+      if (inv.balance > 0) {
+        const key = `Investasi · ${inv.category}`;
+        map[key] = (map[key] || 0) + inv.balance;
+      }
+    });
+    syncedFixedAssets.forEach((asset) => {
+      const bookVal = calculateFixedAssetValuation(asset, debts).currentBookValue;
+      if (bookVal > 0) {
+        const key = asset.isKprLinked
+          ? `Aset KPR · ${asset.name}`
+          : `Aset Tetap · ${asset.category}`;
+        map[key] = (map[key] || 0) + bookVal;
+      }
+    });
+    return Object.entries(map)
+      .map(([name, value]) => ({ name, value }))
+      .sort((a, b) => b.value - a.value);
+  }, [investments, syncedFixedAssets, debts]);
+
+  const pieData =
+    pieViewMode === 'combined'
+      ? pieDataCombined
+      : pieViewMode === 'category'
+      ? pieDataCategory
+      : pieDataAsset;
+  const pieTotalValue =
+    pieViewMode === 'combined' ? combinedWealth.totalCombinedWealth : totalPortfolioValue;
+
+  const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899', '#06b6d4', '#0d9488'];
 
   // 3. Filter Investment Transactions from Jurnal
   const investmentTxs = transactions.filter(
@@ -701,7 +763,7 @@ export const InvestmentTab: React.FC<InvestmentTabProps> = ({
 
           {/* Export CSV */}
           <button
-            onClick={() => exportInvestmentsToCSV(investments)}
+            onClick={() => exportInvestmentsToCSV(investments, syncedFixedAssets, debts)}
             className="px-3 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:hover:bg-emerald-950/60 dark:text-emerald-300 font-extrabold text-xs rounded-xl border border-emerald-200 dark:border-emerald-800 transition flex items-center gap-1.5 cursor-pointer"
           >
             <FileSpreadsheet className="h-4 w-4" />
@@ -719,6 +781,56 @@ export const InvestmentTab: React.FC<InvestmentTabProps> = ({
         </div>
       </div>
 
+      {/* Portfolio Scope Switcher */}
+      <div className="bg-white dark:bg-slate-900 p-2 rounded-2xl border border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-1.5">
+          {(
+            [
+              { id: 'all', label: 'Semua Kekayaan (Gabungan)' },
+              { id: 'financial', label: `Investasi Finansial (${investments.length})` },
+              { id: 'fixed', label: `Aset Tetap & KPR (${syncedFixedAssets.length})` },
+            ] as const
+          ).map((scope) => (
+            <button
+              key={scope.id}
+              type="button"
+              onClick={() => setPortfolioScope(scope.id)}
+              className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition cursor-pointer ${
+                portfolioScope === scope.id
+                  ? 'bg-slate-900 dark:bg-blue-600 text-white shadow-xs'
+                  : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+              }`}
+            >
+              {scope.label}
+            </button>
+          ))}
+        </div>
+        <div className="px-3 text-xs text-slate-500 dark:text-slate-400 font-medium">
+          Kombinasi Kekayaan:{' '}
+          <strong className="font-mono tabular-nums text-slate-900 dark:text-slate-100">
+            {formatterIDR.format(combinedWealth.totalCombinedWealth)}
+          </strong>
+        </div>
+      </div>
+
+      {/* Combined Wealth + Fixed Assets & KPR Section */}
+      {(portfolioScope === 'all' || portfolioScope === 'fixed') && (
+        <FixedAssetSection
+          investments={investments}
+          fixedAssets={syncedFixedAssets}
+          debts={debts}
+          accounts={accounts}
+          onAddFixedAsset={onAddFixedAsset}
+          onUpdateFixedAsset={onUpdateFixedAsset}
+          onDeleteFixedAsset={onDeleteFixedAsset}
+          onAddAdjustment={onAddFixedAssetAdjustment}
+          onDeleteAdjustment={onDeleteFixedAssetAdjustment}
+          showCombinedBanner={true}
+        />
+      )}
+
+      {portfolioScope !== 'fixed' && (
+      <div className="space-y-6">
       {/* Upper Grid: Portfolio Summary & Chart */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         
@@ -811,13 +923,13 @@ export const InvestmentTab: React.FC<InvestmentTabProps> = ({
                 Alokasi Diversifikasi Portofolio (Pie Chart)
               </h3>
             </div>
-            <div className="flex items-center gap-1.5 bg-slate-100 p-1 rounded-xl">
+            <div className="flex flex-wrap items-center gap-1.5 bg-slate-100 dark:bg-slate-800 p-1 rounded-xl">
               <button
                 onClick={() => setPieViewMode('category')}
                 className={`px-3 py-1 rounded-lg text-xs font-bold transition cursor-pointer ${
                   pieViewMode === 'category'
                     ? 'bg-blue-600 text-white shadow-xs'
-                    : 'text-slate-600 hover:text-slate-900'
+                    : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
                 }`}
               >
                 Per Kategori
@@ -827,10 +939,20 @@ export const InvestmentTab: React.FC<InvestmentTabProps> = ({
                 className={`px-3 py-1 rounded-lg text-xs font-bold transition cursor-pointer ${
                   pieViewMode === 'asset'
                     ? 'bg-blue-600 text-white shadow-xs'
-                    : 'text-slate-600 hover:text-slate-900'
+                    : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
                 }`}
               >
                 Per Aset
+              </button>
+              <button
+                onClick={() => setPieViewMode('combined')}
+                className={`px-3 py-1 rounded-lg text-xs font-bold transition cursor-pointer ${
+                  pieViewMode === 'combined'
+                    ? 'bg-emerald-600 text-white shadow-xs'
+                    : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
+                }`}
+              >
+                Gabungan + Tetap
               </button>
             </div>
           </div>
@@ -859,7 +981,7 @@ export const InvestmentTab: React.FC<InvestmentTabProps> = ({
                     </Pie>
                     <Tooltip 
                       formatter={(val: number, name: string) => [
-                        `${formatterIDR.format(val)} (${totalPortfolioValue > 0 ? ((val / totalPortfolioValue) * 100).toFixed(1) : 0}%)`,
+                        `${formatterIDR.format(val)} (${pieTotalValue > 0 ? ((val / pieTotalValue) * 100).toFixed(1) : 0}%)`,
                         name
                       ]}
                       contentStyle={{ background: '#0f172a', color: '#fff', borderRadius: '10px', fontSize: '11px', border: '1px solid #334155' }}
@@ -872,11 +994,11 @@ export const InvestmentTab: React.FC<InvestmentTabProps> = ({
             <div className="space-y-2">
               <div className="flex justify-between items-center mb-2">
                 <span className="text-[10px] uppercase font-bold text-slate-400 block">
-                  Porsi {pieViewMode === 'category' ? 'Kategori Aset' : 'Instrumen Aset'}:
+                  Porsi {pieViewMode === 'combined' ? 'Gabungan Investasi & Aset Tetap' : pieViewMode === 'category' ? 'Kategori Aset' : 'Instrumen Aset'}:
                 </span>
                 {pieData.length > 0 && (
                   <span className="text-[10px] bg-blue-50 text-blue-700 font-extrabold px-2 py-0.5 rounded border border-blue-100">
-                    Terbesar: {pieData[0].name} ({totalPortfolioValue > 0 ? ((pieData[0].value / totalPortfolioValue) * 100).toFixed(1) : 0}%)
+                    Terbesar: {pieData[0].name} ({pieTotalValue > 0 ? ((pieData[0].value / pieTotalValue) * 100).toFixed(1) : 0}%)
                   </span>
                 )}
               </div>
@@ -886,7 +1008,7 @@ export const InvestmentTab: React.FC<InvestmentTabProps> = ({
               ) : (
                 <div className="max-h-48 overflow-y-auto space-y-1.5 pr-1">
                   {pieData.map((entry, index) => {
-                    const sharePct = totalPortfolioValue > 0 ? (entry.value / totalPortfolioValue) * 100 : 0;
+                    const sharePct = pieTotalValue > 0 ? (entry.value / pieTotalValue) * 100 : 0;
                     return (
                       <div key={entry.name} className="flex justify-between items-center text-xs p-2 rounded-lg bg-slate-50 border border-slate-100 hover:bg-slate-100/80 transition">
                         <div className="flex items-center gap-2 min-w-0">
@@ -1614,6 +1736,8 @@ export const InvestmentTab: React.FC<InvestmentTabProps> = ({
       <div id="inflation-calculator-section">
         <InflationPurchasingPowerCalculator investments={investments} />
       </div>
+      </div>
+      )}
 
       {/* MODAL 1: EDIT DETAIL INSTRUMEN ASET */}
       {editingAssetId && (

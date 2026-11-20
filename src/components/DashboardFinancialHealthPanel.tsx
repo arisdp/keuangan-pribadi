@@ -15,6 +15,7 @@ import {
   Account,
   Debt,
   EmergencyFundTransaction,
+  FixedAsset,
   InvestmentAsset,
   Transaction,
 } from '../types';
@@ -27,6 +28,7 @@ interface DashboardFinancialHealthPanelProps {
   debts: Debt[];
   investments: InvestmentAsset[];
   emergencyTransactions: EmergencyFundTransaction[];
+  fixedAssets?: FixedAsset[];
   isFocusMode?: boolean;
   onOpenReports?: () => void;
   onAddTransaction?: () => void;
@@ -38,6 +40,7 @@ export const DashboardFinancialHealthPanel: React.FC<DashboardFinancialHealthPan
   debts,
   investments,
   emergencyTransactions,
+  fixedAssets = [],
   isFocusMode = false,
   onOpenReports,
   onAddTransaction,
@@ -49,9 +52,10 @@ export const DashboardFinancialHealthPanel: React.FC<DashboardFinancialHealthPan
         accounts,
         debts,
         investments,
-        emergencyTransactions
+        emergencyTransactions,
+        fixedAssets
       ),
-    [transactions, accounts, debts, investments, emergencyTransactions]
+    [transactions, accounts, debts, investments, emergencyTransactions, fixedAssets]
   );
 
   const hasFinancialActivity =

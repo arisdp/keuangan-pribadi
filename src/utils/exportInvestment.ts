@@ -1,4 +1,9 @@
-import { InvestmentAsset } from '../types';
+import { Debt, FixedAsset, InvestmentAsset } from '../types';
+import {
+  calculateCombinedPortfolioWealth,
+  calculateFixedAssetValuation,
+  syncKprDebtsToFixedAssets,
+} from './accountingEngine';
 import jsPDF from 'jspdf';
 import html2canvas from 'html2canvas';
 
@@ -9,9 +14,13 @@ const formatterIDR = new Intl.NumberFormat('id-ID', {
 });
 
 /**
- * Export Investments to CSV File
+ * Export Investments & Fixed Assets to CSV File
  */
-export const exportInvestmentsToCSV = (investments: InvestmentAsset[]) => {
+export const exportInvestmentsToCSV = (
+  investments: InvestmentAsset[],
+  fixedAssets: FixedAsset[] = [],
+  debts: Debt[] = []
+) => {
   const headers = [
     'Nama Aset',
     'Kategori',
@@ -49,7 +58,58 @@ export const exportInvestmentsToCSV = (investments: InvestmentAsset[]) => {
     ].join(',');
   });
 
-  const csvContent = '\uFEFF' + [headers.join(','), ...rows].join('\n');
+  const sections: string[] = [headers.join(','), ...rows];
+
+  const syncedFixed = syncKprDebtsToFixedAssets(fixedAssets, debts);
+  if (syncedFixed.length > 0) {
+    const combined = calculateCombinedPortfolioWealth(investments, syncedFixed, debts);
+    sections.push('');
+    sections.push('DAFTAR ASET TETAP & PROPERTI KPR');
+    sections.push(
+      [
+        'Nama Aset Tetap',
+        'Kategori',
+        'Status Kepemilikan',
+        'Tanggal Perolehan',
+        'Basis Diakui (Rp)',
+        'Laju Tahunan (%/thn)',
+        'Penyesuaian Nilai Bersih (Rp)',
+        'Nilai Buku Bersih (Rp)',
+      ].join(',')
+    );
+
+    syncedFixed.forEach((asset) => {
+      const val = calculateFixedAssetValuation(asset, debts);
+      const statusLabel = asset.isKprLinked
+        ? val.isPaidOff
+          ? 'Lunas - Aset Tetap Penuh (100%)'
+          : `KPR Aktif (${val.ownershipPct.toFixed(1)}% lunas)`
+        : asset.fundingMode === 'account_deduction'
+        ? 'Beli via Potong Rekening'
+        : 'Pencatatan Aset Langsung';
+
+      sections.push(
+        [
+          `"${asset.name.replace(/"/g, '""')}"`,
+          `"${asset.category.replace(/"/g, '""')}"`,
+          `"${statusLabel}"`,
+          asset.acquisitionDate || '-',
+          Math.round(val.basisValue),
+          asset.annualRatePct.toFixed(2),
+          Math.round(val.totalNetValueChange),
+          Math.round(val.currentBookValue),
+        ].join(',')
+      );
+    });
+
+    sections.push('');
+    sections.push('RINGKASAN KOMBINASI INVESTASI & ASET TETAP');
+    sections.push(`Total Valuasi Investasi Finansial,${Math.round(combined.totalInvestmentValue)}`);
+    sections.push(`Total Nilai Buku Aset Tetap & KPR,${Math.round(combined.totalFixedAssetBookValue)}`);
+    sections.push(`Total Kombinasi Kekayaan Aset,${Math.round(combined.totalCombinedWealth)}`);
+  }
+
+  const csvContent = '\uFEFF' + sections.join('\n');
   const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');

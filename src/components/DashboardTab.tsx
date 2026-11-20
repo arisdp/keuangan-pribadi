@@ -1,16 +1,18 @@
 import React from 'react';
 import { motion } from 'motion/react';
-import { Transaction, Account, CategoryBudget, Debt, EmergencyFundTransaction, InvestmentAsset, SavingsGoal } from '../types';
+import { Transaction, Account, CategoryBudget, Debt, EmergencyFundTransaction, FixedAsset, InvestmentAsset, SavingsGoal } from '../types';
 import { FormattedNumberInput } from './FormattedNumberInput';
 import { TaxCalculatorCard } from './TaxCalculatorCard';
 import { DashboardFinancialHealthPanel } from './DashboardFinancialHealthPanel';
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
-import { TrendingUp, TrendingDown, Wallet, ShieldAlert, CreditCard, PiggyBank, ArrowRight, CheckCircle2, AlertTriangle, Calendar, ChevronLeft, ChevronRight, ArrowUpRight, ArrowDownRight, Info, Eye, EyeOff, Percent, ArrowDown, Sparkles, Lightbulb, Target, Plus, Trash2, Edit2, Clock, Bell, DollarSign, X, RefreshCw, Activity, BarChart3, Table, GitCommit, Scale, FileCheck, ShieldCheck } from 'lucide-react';
+import { TrendingUp, TrendingDown, Wallet, ShieldAlert, CreditCard, PiggyBank, ArrowRight, CheckCircle2, AlertTriangle, Calendar, ChevronLeft, ChevronRight, ArrowUpRight, ArrowDownRight, Info, Eye, EyeOff, Percent, ArrowDown, Sparkles, Lightbulb, Target, Plus, Trash2, Edit2, Clock, Bell, DollarSign, X, RefreshCw, Activity, BarChart3, Table, GitCommit, Scale, FileCheck, ShieldCheck, Building2 } from 'lucide-react';
 import {
+  calculateCombinedPortfolioWealth,
   calculateTotalLiquidCash,
   calculateCreditPaylaterBills,
   calculateTotalEmergencyFund,
   calculateTotalInvestments,
+  calculateTotalFixedAssets,
   calculateTotalDebts,
   calculateMonthlyDebtService,
   calculateIncomeStatementSummary,
@@ -57,6 +59,7 @@ interface DashboardTabProps {
   debts: Debt[];
   emergencyTransactions: EmergencyFundTransaction[];
   investments: InvestmentAsset[];
+  fixedAssets?: FixedAsset[];
   savingsGoals?: SavingsGoal[];
   onAddSavingsGoal?: (goal: Omit<SavingsGoal, 'id'>) => void;
   onUpdateSavingsGoal?: (id: string, updated: Partial<SavingsGoal>) => void;
@@ -72,6 +75,7 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
   debts,
   emergencyTransactions,
   investments = [],
+  fixedAssets = [],
   savingsGoals = [],
   onAddSavingsGoal,
   onUpdateSavingsGoal,
@@ -79,7 +83,7 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
   onDepositSavingsGoal,
   onQuickAction,
 }) => {
-  // 1. Calculate Net Worth (Liquid Accounts + Emergency Funds + Investments - Debts)
+  // 1. Calculate Net Worth (Liquid Accounts + Emergency Funds + Investments + Fixed Assets/KPR - Debts)
   const liquidAccounts = getLiquidAccounts(accounts);
   const creditCardAndPaylaterAccounts = getCreditAccounts(accounts);
 
@@ -90,13 +94,22 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
   // Total emergency fund
   const totalEmergency = calculateTotalEmergencyFund(emergencyTransactions);
 
-  // Total active investments
+  // Total active investments & fixed assets (including proportional KPR equity & depreciation)
   const totalInvestments = calculateTotalInvestments(investments);
+  const totalFixedAssets = calculateTotalFixedAssets(fixedAssets, debts);
+  const combinedPortfolioWealth = React.useMemo(
+    () => calculateCombinedPortfolioWealth(investments, fixedAssets, debts),
+    [investments, fixedAssets, debts]
+  );
+  const totalLiquidWithEmergency = totalLiquidAssets + totalEmergency;
+  const loanDebtsOnly = React.useMemo(
+    () => (debts || []).reduce((sum, d) => sum + Math.max(0, d.balance || 0), 0),
+    [debts]
+  );
 
   // Unified interconnected Net Worth
-  const netWorth = totalLiquidAssets + totalEmergency + totalInvestments - totalDebts;
-
-  const totalCurrentAssets = totalLiquidAssets + totalEmergency + totalInvestments;
+  const totalCurrentAssets = totalLiquidWithEmergency + totalInvestments + totalFixedAssets;
+  const netWorth = totalCurrentAssets - totalDebts;
 
   // Calculate Financial Health Status based on Current Assets vs Total Debts
   let healthStatus: 'Sehat' | 'Waspada' | 'Kritis' = 'Sehat';
@@ -250,10 +263,11 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
   // Assets vs Debts Composition Chart Data
   const assetDebtChartData = [
     {
-      category: 'Aset Lancar',
+      category: 'Total Aset',
       'Kas & Bank': totalLiquidAssets,
       'Dana Darurat': totalEmergency,
       'Portofolio Investasi': totalInvestments,
+      'Aset Tetap & KPR': totalFixedAssets,
       total: totalCurrentAssets,
     },
     {
@@ -1486,6 +1500,314 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
         </div>
       </motion.div>
 
+      {/* PANEL RINGKASAN UTAMA: NERACA KEKAYAAN BERSIH REAL-TIME */}
+      <motion.div
+        variants={cardVariants}
+        className="bg-white rounded-2xl border border-slate-200 p-5 sm:p-6 space-y-5"
+      >
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-4">
+          <div className="flex items-start gap-3">
+            <div className="p-2.5 rounded-xl bg-slate-900 text-white shrink-0">
+              <Scale className="h-5 w-5" />
+            </div>
+            <div>
+              <h2 className="text-base font-extrabold text-slate-900 tracking-tight">
+                Neraca Kekayaan Bersih
+              </h2>
+              <p className="text-xs text-slate-500 font-medium mt-0.5">
+                Real-time · Kas Likuid · Investasi · Aset Tetap Setelah Penyusutan − Liabilitas
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3 shrink-0">
+            <span
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs font-bold ${healthColor}`}
+            >
+              {healthStatus === 'Sehat' ? (
+                <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+              ) : (
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+              )}
+              <span>{healthStatus}</span>
+              <span aria-hidden="true">·</span>
+              <span className="font-mono tabular-nums">{healthRatioText}</span>
+            </span>
+
+            <button
+              type="button"
+              onClick={() => onQuickAction('reports')}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold transition cursor-pointer whitespace-nowrap shrink-0"
+            >
+              <span>Laporan Neraca</span>
+              <ArrowRight className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        </div>
+
+        {/* Hero Net Worth Figure & Asset Composition Bar */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-center">
+          <div className="lg:col-span-5 space-y-1.5">
+            <span className="text-xs font-bold text-slate-500 block">
+              Total Kekayaan Bersih (Net Worth)
+            </span>
+            <div
+              className={`text-2xl sm:text-3xl font-black font-mono tabular-nums tracking-tight ${
+                netWorth >= 0 ? 'text-slate-900' : 'text-rose-600'
+              }`}
+            >
+              {formatValue(netWorth)}
+            </div>
+            <p className="text-xs text-slate-500 font-medium font-mono tabular-nums">
+              Total Aset {formatValue(totalCurrentAssets)} − Kewajiban {formatValue(totalDebts)}
+            </p>
+          </div>
+
+          <div className="lg:col-span-7 space-y-2.5">
+            {(() => {
+              const assetSum = Math.max(0, totalCurrentAssets);
+              const liquidPct = assetSum > 0 ? (totalLiquidWithEmergency / assetSum) * 100 : 0;
+              const investPct = assetSum > 0 ? (totalInvestments / assetSum) * 100 : 0;
+              const fixedPct = assetSum > 0 ? (totalFixedAssets / assetSum) * 100 : 0;
+              return (
+                <>
+                  <div className="flex items-center justify-between text-xs text-slate-600 font-medium">
+                    <span>Komposisi Bruto Aset Aktif</span>
+                    <span className="font-mono tabular-nums font-bold text-slate-900">
+                      {formatValue(totalCurrentAssets)}
+                    </span>
+                  </div>
+                  <div className="w-full h-2.5 rounded-full bg-slate-100 overflow-hidden flex">
+                    {liquidPct > 0 && (
+                      <div
+                        className="bg-blue-600 h-full transition-all duration-300"
+                        style={{ width: `${liquidPct}%` }}
+                        title={`Kas Likuid: ${liquidPct.toFixed(1)}%`}
+                      />
+                    )}
+                    {investPct > 0 && (
+                      <div
+                        className="bg-indigo-600 h-full transition-all duration-300"
+                        style={{ width: `${investPct}%` }}
+                        title={`Investasi: ${investPct.toFixed(1)}%`}
+                      />
+                    )}
+                    {fixedPct > 0 && (
+                      <div
+                        className="bg-amber-500 h-full transition-all duration-300"
+                        style={{ width: `${fixedPct}%` }}
+                        title={`Aset Tetap Net: ${fixedPct.toFixed(1)}%`}
+                      />
+                    )}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-[11px] text-slate-600 font-medium">
+                    <span className="inline-flex items-center gap-1.5">
+                      <span className="w-2.5 h-2.5 rounded-xs bg-blue-600 inline-block shrink-0" />
+                      Kas Likuid <span className="font-mono tabular-nums font-bold text-slate-800">{liquidPct.toFixed(1)}%</span>
+                    </span>
+                    <span className="inline-flex items-center gap-1.5">
+                      <span className="w-2.5 h-2.5 rounded-xs bg-indigo-600 inline-block shrink-0" />
+                      Investasi <span className="font-mono tabular-nums font-bold text-slate-800">{investPct.toFixed(1)}%</span>
+                    </span>
+                    <span className="inline-flex items-center gap-1.5">
+                      <span className="w-2.5 h-2.5 rounded-xs bg-amber-500 inline-block shrink-0" />
+                      Aset Tetap Net <span className="font-mono tabular-nums font-bold text-slate-800">{fixedPct.toFixed(1)}%</span>
+                    </span>
+                  </div>
+                </>
+              );
+            })()}
+          </div>
+        </div>
+
+        {/* 4-Column Consolidated Balance Sheet Hairline Grid */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-px bg-slate-200 border border-slate-200 rounded-xl overflow-hidden">
+          {/* 1. Kas Likuid */}
+          <div className="bg-white p-4 flex flex-col justify-between space-y-3">
+            <div className="space-y-1">
+              <div className="flex items-center justify-between text-xs font-bold text-slate-600">
+                <span className="flex items-center gap-1.5">
+                  <Wallet className="h-3.5 w-3.5 text-blue-600" />
+                  Kas Likuid
+                </span>
+                <span className="font-mono tabular-nums text-[11px] text-slate-400">
+                  {totalCurrentAssets > 0
+                    ? `${((totalLiquidWithEmergency / totalCurrentAssets) * 100).toFixed(1)}%`
+                    : '0.0%'}
+                </span>
+              </div>
+              <div className="text-lg font-black font-mono tabular-nums text-slate-900">
+                {formatValue(totalLiquidWithEmergency)}
+              </div>
+              <div className="text-[11px] text-slate-500 space-y-0.5 pt-1">
+                <div className="flex justify-between gap-2">
+                  <span>Kas &amp; Bank ({liquidAccounts.length})</span>
+                  <span className="font-mono tabular-nums font-semibold text-slate-700">
+                    {formatValue(totalLiquidAssets)}
+                  </span>
+                </div>
+                <div className="flex justify-between gap-2">
+                  <span>Dana Darurat</span>
+                  <span className="font-mono tabular-nums font-semibold text-slate-700">
+                    {formatValue(totalEmergency)}
+                  </span>
+                </div>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => onQuickAction('accounts')}
+              className="inline-flex items-center gap-1 text-[11px] font-bold text-blue-600 hover:text-blue-700 transition cursor-pointer w-fit"
+            >
+              <span>Kelola Rekening</span>
+              <ArrowRight className="h-3 w-3" />
+            </button>
+          </div>
+
+          {/* 2. Aset Investasi */}
+          <div className="bg-white p-4 flex flex-col justify-between space-y-3">
+            <div className="space-y-1">
+              <div className="flex items-center justify-between text-xs font-bold text-slate-600">
+                <span className="flex items-center gap-1.5">
+                  <TrendingUp className="h-3.5 w-3.5 text-indigo-600" />
+                  Aset Investasi
+                </span>
+                <span className="font-mono tabular-nums text-[11px] text-slate-400">
+                  {totalCurrentAssets > 0
+                    ? `${((totalInvestments / totalCurrentAssets) * 100).toFixed(1)}%`
+                    : '0.0%'}
+                </span>
+              </div>
+              <div className="text-lg font-black font-mono tabular-nums text-slate-900">
+                {formatValue(totalInvestments)}
+              </div>
+              <div className="text-[11px] text-slate-500 space-y-0.5 pt-1">
+                <div className="flex justify-between gap-2">
+                  <span>Instrumen Aktif</span>
+                  <span className="font-mono tabular-nums font-semibold text-slate-700">
+                    {investments.length} aset
+                  </span>
+                </div>
+                <div className="flex justify-between gap-2">
+                  <span>Gain / Loss</span>
+                  <span
+                    className={`font-mono tabular-nums font-semibold ${
+                      combinedPortfolioWealth.totalInvestmentGain >= 0
+                        ? 'text-emerald-600'
+                        : 'text-rose-600'
+                    }`}
+                  >
+                    {combinedPortfolioWealth.totalInvestmentGain >= 0 ? '+' : ''}
+                    {formatValue(combinedPortfolioWealth.totalInvestmentGain)}
+                  </span>
+                </div>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => onQuickAction('investments')}
+              className="inline-flex items-center gap-1 text-[11px] font-bold text-indigo-600 hover:text-indigo-700 transition cursor-pointer w-fit"
+            >
+              <span>Buka Portofolio</span>
+              <ArrowRight className="h-3 w-3" />
+            </button>
+          </div>
+
+          {/* 3. Aset Tetap (Net Penyusutan) */}
+          <div className="bg-white p-4 flex flex-col justify-between space-y-3">
+            <div className="space-y-1">
+              <div className="flex items-center justify-between text-xs font-bold text-slate-600">
+                <span className="flex items-center gap-1.5">
+                  <Building2 className="h-3.5 w-3.5 text-amber-600" />
+                  Aset Tetap (Net)
+                </span>
+                <span className="font-mono tabular-nums text-[11px] text-slate-400">
+                  {totalCurrentAssets > 0
+                    ? `${((totalFixedAssets / totalCurrentAssets) * 100).toFixed(1)}%`
+                    : '0.0%'}
+                </span>
+              </div>
+              <div className="text-lg font-black font-mono tabular-nums text-slate-900">
+                {formatValue(combinedPortfolioWealth.totalFixedAssetBookValue)}
+              </div>
+              <div className="text-[11px] text-slate-500 space-y-0.5 pt-1">
+                <div className="flex justify-between gap-2">
+                  <span>Nilai Dasar / Ekuitas</span>
+                  <span className="font-mono tabular-nums font-semibold text-slate-700">
+                    {formatValue(combinedPortfolioWealth.totalFixedAssetBasis)}
+                  </span>
+                </div>
+                <div className="flex justify-between gap-2">
+                  <span>Penyesuaian / Susut</span>
+                  <span
+                    className={`font-mono tabular-nums font-semibold ${
+                      combinedPortfolioWealth.totalFixedAssetNetChange >= 0
+                        ? 'text-emerald-600'
+                        : 'text-amber-700'
+                    }`}
+                  >
+                    {combinedPortfolioWealth.totalFixedAssetNetChange >= 0 ? '+' : '-'}
+                    {formatValue(Math.abs(combinedPortfolioWealth.totalFixedAssetNetChange))}
+                  </span>
+                </div>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => onQuickAction('investments')}
+              className="inline-flex items-center gap-1 text-[11px] font-bold text-amber-700 hover:text-amber-800 transition cursor-pointer w-fit"
+            >
+              <span>Kelola Aset Tetap</span>
+              <ArrowRight className="h-3 w-3" />
+            </button>
+          </div>
+
+          {/* 4. Total Liabilitas / Utang */}
+          <div className="bg-white p-4 flex flex-col justify-between space-y-3">
+            <div className="space-y-1">
+              <div className="flex items-center justify-between text-xs font-bold text-slate-600">
+                <span className="flex items-center gap-1.5">
+                  <CreditCard className="h-3.5 w-3.5 text-rose-600" />
+                  Total Kewajiban
+                </span>
+                <span className="font-mono tabular-nums text-[11px] text-rose-600 font-bold">
+                  {totalCurrentAssets > 0
+                    ? `${((totalDebts / totalCurrentAssets) * 100).toFixed(1)}%`
+                    : totalDebts > 0
+                    ? '100.0%'
+                    : '0.0%'}
+                </span>
+              </div>
+              <div className="text-lg font-black font-mono tabular-nums text-rose-600">
+                {totalDebts > 0 ? `-${formatValue(totalDebts)}` : formatValue(0)}
+              </div>
+              <div className="text-[11px] text-slate-500 space-y-0.5 pt-1">
+                <div className="flex justify-between gap-2">
+                  <span>Pinjaman &amp; KPR</span>
+                  <span className="font-mono tabular-nums font-semibold text-slate-700">
+                    {formatValue(loanDebtsOnly)}
+                  </span>
+                </div>
+                <div className="flex justify-between gap-2">
+                  <span>Kartu Kredit &amp; PayLater</span>
+                  <span className="font-mono tabular-nums font-semibold text-slate-700">
+                    {formatValue(totalCreditCardBills)}
+                  </span>
+                </div>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => onQuickAction('debts')}
+              className="inline-flex items-center gap-1 text-[11px] font-bold text-rose-600 hover:text-rose-700 transition cursor-pointer w-fit"
+            >
+              <span>Kelola Utang &amp; KPR</span>
+              <ArrowRight className="h-3 w-3" />
+            </button>
+          </div>
+        </div>
+      </motion.div>
+
       {/* FINANCIAL HEALTH SCORE CARD */}
       <motion.div variants={cardVariants} className="bg-gradient-to-br from-slate-900 via-slate-950 to-indigo-950 p-6 rounded-2xl text-white shadow-xl border border-indigo-900/50 space-y-6">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800 pb-4">
@@ -1657,6 +1979,7 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
           debts={debts}
           investments={investments}
           emergencyTransactions={emergencyTransactions}
+          fixedAssets={fixedAssets}
           isFocusMode={isFocusMode}
           onOpenReports={() => onQuickAction('reports')}
           onAddTransaction={() => onQuickAction('transactions')}
@@ -2126,7 +2449,7 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
                 {isFocusMode ? 'Rp ••••••' : formatterIDR.format(netWorth)}
               </h4>
               <p className="text-[10px] text-slate-400 font-medium">
-                Aset Likuid + Darurat + Investasi - Utang
+                Aset Likuid + Darurat + Investasi + Aset Tetap - Utang
               </p>
             </div>
 
@@ -3143,7 +3466,7 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
               </span>
             </div>
             <p className="text-xs text-slate-400 mb-4 font-medium">
-              Perbandingan akumulasi dana likuid, dana darurat, dan investasi yang Anda miliki terhadap kewajiban utang aktif saat ini.
+              Perbandingan akumulasi dana likuid, dana darurat, investasi, serta aset tetap &amp; KPR terhadap kewajiban utang aktif saat ini.
             </p>
           </div>
 
@@ -3176,17 +3499,18 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
                 <Legend iconSize={10} wrapperStyle={{ fontSize: '10px', fontWeight: 'bold', paddingTop: '10px' }} />
                 <Bar dataKey="Kas & Bank" stackId="assets" fill="#3b82f6" radius={[0, 0, 0, 0]} />
                 <Bar dataKey="Dana Darurat" stackId="assets" fill="#10b981" radius={[0, 0, 0, 0]} />
-                <Bar dataKey="Portofolio Investasi" stackId="assets" fill="#6366f1" radius={[0, 4, 4, 0]} />
+                <Bar dataKey="Portofolio Investasi" stackId="assets" fill="#6366f1" radius={[0, 0, 0, 0]} />
+                <Bar dataKey="Aset Tetap & KPR" stackId="assets" fill="#0d9488" radius={[0, 4, 4, 0]} />
                 <Bar dataKey="Total Utang" fill="#ef4444" radius={[0, 4, 4, 0]} />
               </BarChart>
             </ResponsiveContainer>
           </div>
 
           {/* Detailed Breakdown Legend List */}
-          <div className="mt-4 pt-4 border-t border-slate-100 grid grid-cols-2 sm:grid-cols-4 gap-3 text-center">
+          <div className="mt-4 pt-4 border-t border-slate-100 grid grid-cols-2 sm:grid-cols-5 gap-2.5 text-center">
             <div className="bg-slate-50 p-2 rounded-lg border border-slate-100">
               <span className="text-[9px] text-slate-400 block font-bold uppercase tracking-wider">Kas & Bank</span>
-              <span className="text-xs font-bold text-blue-600 font-mono mt-0.5 block">
+              <span className="text-xs font-bold text-blue-600 font-mono tabular-nums mt-0.5 block">
                 {formatValue(totalLiquidAssets)}
               </span>
               <span className="text-[9px] text-slate-400 font-medium">
@@ -3195,7 +3519,7 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
             </div>
             <div className="bg-slate-50 p-2 rounded-lg border border-slate-100">
               <span className="text-[9px] text-slate-400 block font-bold uppercase tracking-wider">Dana Darurat</span>
-              <span className="text-xs font-bold text-emerald-600 font-mono mt-0.5 block">
+              <span className="text-xs font-bold text-emerald-600 font-mono tabular-nums mt-0.5 block">
                 {formatValue(totalEmergency)}
               </span>
               <span className="text-[9px] text-slate-400 font-medium">
@@ -3204,7 +3528,7 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
             </div>
             <div className="bg-slate-50 p-2 rounded-lg border border-slate-100">
               <span className="text-[9px] text-slate-400 block font-bold uppercase tracking-wider">Investasi</span>
-              <span className="text-xs font-bold text-indigo-600 font-mono mt-0.5 block">
+              <span className="text-xs font-bold text-indigo-600 font-mono tabular-nums mt-0.5 block">
                 {formatValue(totalInvestments)}
               </span>
               <span className="text-[9px] text-slate-400 font-medium">
@@ -3212,8 +3536,17 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
               </span>
             </div>
             <div className="bg-slate-50 p-2 rounded-lg border border-slate-100">
+              <span className="text-[9px] text-slate-400 block font-bold uppercase tracking-wider">Aset Tetap & KPR</span>
+              <span className="text-xs font-bold text-teal-600 font-mono tabular-nums mt-0.5 block">
+                {formatValue(totalFixedAssets)}
+              </span>
+              <span className="text-[9px] text-slate-400 font-medium">
+                {totalCurrentAssets > 0 ? `${((totalFixedAssets / totalCurrentAssets) * 100).toFixed(0)}% aset` : '0%'}
+              </span>
+            </div>
+            <div className="bg-slate-50 p-2 rounded-lg border border-slate-100 col-span-2 sm:col-span-1">
               <span className="text-[9px] text-slate-400 block font-bold uppercase tracking-wider">Total Utang</span>
-              <span className="text-xs font-bold text-rose-600 font-mono mt-0.5 block">
+              <span className="text-xs font-bold text-rose-600 font-mono tabular-nums mt-0.5 block">
                 {formatValue(totalDebts)}
               </span>
               <span className="text-[9px] text-slate-400 font-medium">

@@ -3,6 +3,7 @@ import {
   AccountType,
   Debt,
   EmergencyFundTransaction,
+  FixedAsset,
   InvestmentAsset,
   KprCoaMappingConfig,
   Transaction,
@@ -257,6 +258,7 @@ export type TransactionAccountingNature =
   | 'emergency_fund_transfer'
   | 'investment_buy'
   | 'investment_sell'
+  | 'fixed_asset_buy'
   | 'equity_injection'
   | 'non_cash_adjustment';
 
@@ -338,6 +340,556 @@ export function calculateTotalEmergencyFund(
 
 export function calculateTotalInvestments(investments: InvestmentAsset[]): number {
   return (investments || []).reduce((sum, inv) => sum + (inv.balance || 0), 0);
+}
+
+export function isKprDebtRecord(
+  debt?: Pick<Debt, 'category' | 'kprScheme' | 'name'> | null
+): boolean {
+  if (!debt) return false;
+  return (
+    debt.category === 'KPR / Properti' ||
+    Boolean(debt.kprScheme) ||
+    /\bkpr\b/i.test(debt.name || '')
+  );
+}
+
+export function getKprPropertyGrossPrice(
+  debt: Pick<Debt, 'propertyPrice' | 'balance' | 'downPayment'>
+): number {
+  const explicitPrice = normalizeAbsAmount(debt.propertyPrice);
+  if (explicitPrice > 0) return explicitPrice;
+  return normalizeAbsAmount(debt.balance) + normalizeAbsAmount(debt.downPayment);
+}
+
+/**
+ * Menyelaraskan daftar KPR di modul Hutang menjadi entri Aset Tetap terhubung.
+ * - Saat KPR aktif: aset tetap mengikuti harga properti dengan ekuitas pokok lunas bertahap.
+ * - Saat KPR lunas (balance === 0): status terkunci sebagai Aset Tetap Penuh (100% Lunas)
+ *   dan tetap dipertahankan meskipun riwayat utang KPR dihapus/diarsipkan.
+ */
+export function syncKprDebtsToFixedAssets(
+  fixedAssets: FixedAsset[],
+  debts: Debt[],
+  todayStr?: string
+): FixedAsset[] {
+  const safeFixedAssets = Array.isArray(fixedAssets) ? fixedAssets : [];
+  const safeDebts = Array.isArray(debts) ? debts : [];
+  const defaultDate =
+    normalizeLedgerDateYYYYMMDD(todayStr) || new Date().toISOString().split('T')[0];
+
+  const kprDebts = safeDebts.filter((d) => isKprDebtRecord(d));
+  const kprDebtMap = new Map<string, Debt>();
+  kprDebts.forEach((d) => kprDebtMap.set(d.id, d));
+
+  const nextAssets: FixedAsset[] = [];
+  const handledDebtIds = new Set<string>();
+
+  for (const asset of safeFixedAssets) {
+    if (!asset.isKprLinked || !asset.linkedDebtId) {
+      nextAssets.push(asset);
+      continue;
+    }
+
+    const matchedDebt = kprDebtMap.get(asset.linkedDebtId);
+    if (matchedDebt) {
+      handledDebtIds.add(matchedDebt.id);
+      const grossPrice = Math.max(
+        normalizeAbsAmount(asset.purchasePrice),
+        getKprPropertyGrossPrice(matchedDebt)
+      );
+      const remBalance = Math.max(0, normalizeAbsAmount(matchedDebt.balance));
+      const isPaidOff = remBalance <= 0;
+
+      nextAssets.push({
+        ...asset,
+        purchasePrice: grossPrice,
+        kprIsPaidOff: isPaidOff || Boolean(asset.kprIsPaidOff),
+        kprPaidPrincipalLock:
+          isPaidOff || asset.kprIsPaidOff ? grossPrice : asset.kprPaidPrincipalLock,
+      });
+    } else if (asset.kprIsPaidOff || (asset.kprPaidPrincipalLock || 0) > 0) {
+      // KPR sudah lunas (atau memiliki porsi lunas terkunci) dan utang diarsipkan: pertahankan sebagai Aset Tetap Penuh
+      const lockedVal = asset.kprPaidPrincipalLock || normalizeAbsAmount(asset.purchasePrice);
+      nextAssets.push({
+        ...asset,
+        purchasePrice: Math.max(normalizeAbsAmount(asset.purchasePrice), lockedVal),
+        kprIsPaidOff: true,
+        kprPaidPrincipalLock: Math.max(normalizeAbsAmount(asset.purchasePrice), lockedVal),
+      });
+    }
+  }
+
+  for (const debt of kprDebts) {
+    if (handledDebtIds.has(debt.id)) continue;
+    const grossPrice = getKprPropertyGrossPrice(debt);
+    if (grossPrice <= 0) continue;
+    const remBalance = Math.max(0, normalizeAbsAmount(debt.balance));
+    const isPaidOff = remBalance <= 0;
+    const acqDate = normalizeLedgerDateYYYYMMDD(debt.startDate) || defaultDate;
+
+    nextAssets.push({
+      id: `fa-kpr-${debt.id}`,
+      name: debt.name.replace(/^kpr\s+/i, 'Properti ').trim() || `Properti KPR: ${debt.name}`,
+      category: 'Properti & Tanah',
+      purchasePrice: grossPrice,
+      acquisitionDate: acqDate,
+      annualRatePct: 5, // Default apresiasi properti konservatif 5%/tahun (dapat disesuaikan pengguna)
+      rateEffectiveDate: acqDate,
+      fundingMode: 'kpr_linked',
+      linkedDebtId: debt.id,
+      isKprLinked: true,
+      kprIsPaidOff: isPaidOff,
+      kprPaidPrincipalLock: isPaidOff ? grossPrice : undefined,
+      manualAdjustments: [],
+      notes: 'Tersinkronisasi otomatis dari fasilitas KPR (bertahap sesuai porsi pokok lunas).',
+    });
+  }
+
+  return nextAssets;
+}
+
+export interface FixedAssetValuationResult {
+  assetId: string;
+  fullAcquisitionValue: number;
+  basisValue: number; // Harga perolehan (aset biasa) atau porsi pokok lunas (KPR)
+  remainingKprPrincipal: number;
+  ownershipRatio: number; // 0..1
+  ownershipPct: number; // 0..100
+  isKprActive: boolean;
+  isPaidOff: boolean;
+  elapsedDays: number;
+  annualRatePct: number;
+  autoAdjustment: number; // + apresiasi otomatis, - penyusutan otomatis
+  manualAppreciation: number;
+  manualDepreciation: number;
+  manualNetAdjustment: number;
+  totalNetValueChange: number;
+  currentBookValue: number;
+}
+
+export function calculateFixedAssetValuation(
+  asset: FixedAsset,
+  debts: Debt[] = [],
+  asOfDateStr?: string
+): FixedAssetValuationResult {
+  const safeAsOfStr =
+    normalizeLedgerDateYYYYMMDD(asOfDateStr) || new Date().toISOString().split('T')[0];
+  const linkedDebt = asset.linkedDebtId
+    ? (debts || []).find((d) => d.id === asset.linkedDebtId)
+    : undefined;
+
+  let fullAcquisitionValue = normalizeAbsAmount(asset.purchasePrice);
+  let remainingKprPrincipal = 0;
+  let basisValue = fullAcquisitionValue;
+  let isPaidOff = true;
+  let isKprActive = false;
+
+  if (asset.isKprLinked) {
+    if (linkedDebt) {
+      fullAcquisitionValue = Math.max(fullAcquisitionValue, getKprPropertyGrossPrice(linkedDebt));
+      remainingKprPrincipal = Math.max(0, normalizeAbsAmount(linkedDebt.balance));
+      isPaidOff = remainingKprPrincipal <= 0;
+      isKprActive = !isPaidOff;
+      basisValue = isPaidOff
+        ? fullAcquisitionValue
+        : Math.max(0, fullAcquisitionValue - remainingKprPrincipal);
+    } else {
+      isPaidOff = true;
+      isKprActive = false;
+      basisValue =
+        asset.kprPaidPrincipalLock !== undefined
+          ? Math.max(0, normalizeAbsAmount(asset.kprPaidPrincipalLock))
+          : fullAcquisitionValue;
+    }
+  }
+
+  const ownershipRatio =
+    fullAcquisitionValue > 0 ? Math.min(1, Math.max(0, basisValue / fullAcquisitionValue)) : 1;
+  const ownershipPct = ownershipRatio * 100;
+
+  const effectiveStartStr =
+    normalizeLedgerDateYYYYMMDD(asset.rateEffectiveDate || asset.acquisitionDate) || safeAsOfStr;
+  const asOfMs = Date.parse(`${safeAsOfStr}T00:00:00Z`);
+  const startMs = Date.parse(`${effectiveStartStr}T00:00:00Z`);
+  const elapsedDays =
+    Number.isFinite(asOfMs) && Number.isFinite(startMs)
+      ? Math.max(0, Math.floor((asOfMs - startMs) / 86400000))
+      : 0;
+
+  const rawRate = Number(asset.annualRatePct);
+  const annualRatePct = Number.isFinite(rawRate) ? rawRate : 0;
+  const autoAdjustment =
+    basisValue > 0 && annualRatePct !== 0 && elapsedDays > 0
+      ? Math.round(basisValue * (annualRatePct / 100) * (elapsedDays / 365))
+      : 0;
+
+  let manualAppreciation = 0;
+  let manualDepreciation = 0;
+  (asset.manualAdjustments || []).forEach((adj) => {
+    if (!adj) return;
+    const amt = normalizeAbsAmount(adj.amount);
+    if (adj.type === 'appreciation') manualAppreciation += amt;
+    else manualDepreciation += amt;
+  });
+
+  const manualNetAdjustment = manualAppreciation - manualDepreciation;
+  const totalNetValueChange = autoAdjustment + manualNetAdjustment;
+  const currentBookValue = Math.max(0, Math.round(basisValue + totalNetValueChange));
+
+  return {
+    assetId: asset.id,
+    fullAcquisitionValue,
+    basisValue,
+    remainingKprPrincipal,
+    ownershipRatio,
+    ownershipPct,
+    isKprActive,
+    isPaidOff,
+    elapsedDays,
+    annualRatePct,
+    autoAdjustment,
+    manualAppreciation,
+    manualDepreciation,
+    manualNetAdjustment,
+    totalNetValueChange,
+    currentBookValue,
+  };
+}
+
+export interface FixedAssetDepreciationResult {
+  assetId: string;
+  isDepreciable: boolean;
+  annualRatePct: number; // Besaran % penyusutan tahunan (positif)
+  depreciationBase: number;
+  currentBookValueBefore: number;
+  elapsedDays: number;
+  annualDepreciationAmount: number;
+  proratedDepreciationAmount: number;
+  cappedDepreciationAmount: number;
+  projectedBookValueAfter: number;
+  effectiveStartDate: string;
+  asOfDate: string;
+}
+
+/**
+ * Menghitung penyusutan tahunan berbasis persentase untuk sebuah FixedAsset.
+ * Hanya aset dengan annualRatePct < 0 dan basis nilai > 0 yang mengalami penyusutan.
+ */
+export function calculateAssetDepreciation(
+  asset: FixedAsset,
+  debts: Debt[] = [],
+  asOfDateStr?: string,
+  periodDaysOverride?: number
+): FixedAssetDepreciationResult {
+  const safeAsOfStr =
+    normalizeLedgerDateYYYYMMDD(asOfDateStr) || new Date().toISOString().split('T')[0];
+  const valuation = calculateFixedAssetValuation(asset, debts, safeAsOfStr);
+  const effectiveStartDate =
+    normalizeLedgerDateYYYYMMDD(asset.rateEffectiveDate || asset.acquisitionDate) || safeAsOfStr;
+
+  const isDepreciable = valuation.annualRatePct < 0 && valuation.basisValue > 0;
+  const annualRatePct = isDepreciable ? Math.abs(valuation.annualRatePct) : 0;
+  const depreciationBase = valuation.basisValue;
+  const currentBookValueBefore = Math.max(
+    0,
+    Math.round(valuation.basisValue + valuation.manualNetAdjustment)
+  );
+
+  let elapsedDays = valuation.elapsedDays;
+  if (periodDaysOverride !== undefined && Number.isFinite(periodDaysOverride)) {
+    elapsedDays = Math.max(0, Math.floor(periodDaysOverride));
+  }
+
+  const annualDepreciationAmount =
+    isDepreciable && depreciationBase > 0
+      ? Math.round(depreciationBase * (annualRatePct / 100))
+      : 0;
+
+  const proratedDepreciationAmount =
+    isDepreciable && elapsedDays > 0 && depreciationBase > 0
+      ? Math.round(depreciationBase * (annualRatePct / 100) * (elapsedDays / 365))
+      : 0;
+
+  const cappedDepreciationAmount = Math.min(
+    currentBookValueBefore,
+    Math.max(0, proratedDepreciationAmount)
+  );
+  const projectedBookValueAfter = Math.max(0, currentBookValueBefore - cappedDepreciationAmount);
+
+  return {
+    assetId: asset.id,
+    isDepreciable,
+    annualRatePct,
+    depreciationBase,
+    currentBookValueBefore,
+    elapsedDays,
+    annualDepreciationAmount,
+    proratedDepreciationAmount,
+    cappedDepreciationAmount,
+    projectedBookValueAfter,
+    effectiveStartDate,
+    asOfDate: safeAsOfStr,
+  };
+}
+
+export interface PendingYearEndDepreciationResult {
+  newAdjustingTransactions: Transaction[];
+  updatedFixedAssets: FixedAsset[];
+  postedCount: number;
+  totalDepreciationPosted: number;
+}
+
+/**
+ * Memeriksa periode tutup buku akhir tahun (31 Desember) sejak tanggal acuan aset tetap
+ * hingga tanggal hari ini. Menghasilkan jurnal penyesuaian non-kas (Dr 5960 / Cr 1690)
+ * beserta pembaruan acuan nilai aset tanpa hitung ganda.
+ */
+export function computePendingYearEndFixedAssetDepreciations(
+  fixedAssets: FixedAsset[] = [],
+  debts: Debt[] = [],
+  transactions: Transaction[] = [],
+  todayStr?: string
+): PendingYearEndDepreciationResult {
+  const safeTodayStr =
+    normalizeLedgerDateYYYYMMDD(todayStr) || new Date().toISOString().split('T')[0];
+  const currentYear = parseInt(safeTodayStr.slice(0, 4), 10);
+  if (!Number.isFinite(currentYear)) {
+    return {
+      newAdjustingTransactions: [],
+      updatedFixedAssets: fixedAssets,
+      postedCount: 0,
+      totalDepreciationPosted: 0,
+    };
+  }
+
+  const safeTxs = Array.isArray(transactions) ? transactions : [];
+  const safeAssets = Array.isArray(fixedAssets) ? fixedAssets : [];
+  const newAdjustingTransactions: Transaction[] = [];
+  let hasAnyAssetChange = false;
+  let totalDepreciationPosted = 0;
+
+  const updatedFixedAssets = safeAssets.map((asset) => {
+    if (!asset || !Number.isFinite(Number(asset.annualRatePct)) || Number(asset.annualRatePct) >= 0) {
+      return asset;
+    }
+
+    const baseAcqDate = normalizeLedgerDateYYYYMMDD(asset.acquisitionDate) || safeTodayStr;
+    let workingEffectiveDate =
+      normalizeLedgerDateYYYYMMDD(asset.rateEffectiveDate || asset.acquisitionDate) || safeTodayStr;
+    const startYear = parseInt(workingEffectiveDate.slice(0, 4), 10);
+    if (!Number.isFinite(startYear) || startYear > currentYear) {
+      return asset;
+    }
+
+    let workingAsset: FixedAsset = {
+      ...asset,
+      manualAdjustments: Array.isArray(asset.manualAdjustments) ? [...asset.manualAdjustments] : [],
+    };
+    let assetChanged = false;
+
+    for (let year = startYear; year <= currentYear; year++) {
+      const yearEndStr = `${year}-12-31`;
+      if (safeTodayStr < yearEndStr) {
+        break;
+      }
+
+      if (workingEffectiveDate >= yearEndStr) {
+        continue;
+      }
+
+      const periodKey = `${year}-12`;
+      const alreadyPostedTx = safeTxs.some(
+        (tx) =>
+          tx.isAdjustment &&
+          tx.adjustmentType === 'fixed_asset_depreciation' &&
+          tx.linkedFixedAssetId === workingAsset.id &&
+          tx.adjustmentPeriodKey === periodKey
+      );
+      const alreadyInAsset = (workingAsset.manualAdjustments || []).some(
+        (adj) => adj.isAutoYearEnd && adj.periodKey === periodKey
+      );
+
+      if (alreadyPostedTx || alreadyInAsset) {
+        if (workingEffectiveDate < yearEndStr) {
+          workingEffectiveDate = yearEndStr;
+          workingAsset.rateEffectiveDate = yearEndStr;
+          assetChanged = true;
+        }
+        continue;
+      }
+
+      let periodDays = 0;
+      const prevYearEndStr = `${year - 1}-12-31`;
+      const yearStartStr = `${year}-01-01`;
+      if (workingEffectiveDate === prevYearEndStr || workingEffectiveDate <= yearStartStr) {
+        periodDays = 365;
+      } else {
+        const startMs = Date.parse(`${workingEffectiveDate}T00:00:00Z`);
+        const endMs = Date.parse(`${yearEndStr}T00:00:00Z`);
+        if (Number.isFinite(startMs) && Number.isFinite(endMs) && endMs >= startMs) {
+          const rawDiff = Math.floor((endMs - startMs) / 86400000);
+          const includesAcqDay = workingEffectiveDate === baseAcqDate ? 1 : 0;
+          periodDays = Math.min(365, Math.max(1, rawDiff + includesAcqDay));
+        }
+      }
+
+      if (periodDays <= 0) {
+        continue;
+      }
+
+      const dep = calculateAssetDepreciation(workingAsset, debts, yearEndStr, periodDays);
+      if (!dep.isDepreciable || dep.cappedDepreciationAmount <= 0) {
+        continue;
+      }
+
+      const adjId = `fa-yearend-${workingAsset.id}-${year}`;
+      const txId = `tx-adj-fa-${workingAsset.id}-${year}`;
+      const prevEffectiveDate = workingEffectiveDate;
+
+      newAdjustingTransactions.push({
+        id: txId,
+        date: yearEndStr,
+        accountId: '',
+        type: 'expense',
+        category: 'Penyusutan Aset Tetap',
+        description: `[Penyesuaian Akhir Tahun ${year}] Penyusutan ${workingAsset.name} (${periodDays} hr @ ${dep.annualRatePct}%/thn)`,
+        amount: dep.cappedDepreciationAmount,
+        isAdjustment: true,
+        adjustmentType: 'fixed_asset_depreciation',
+        adjustmentPeriodKey: periodKey,
+        adjustmentRatePct: dep.annualRatePct,
+        adjustmentDurationDays: periodDays,
+        linkedFixedAssetId: workingAsset.id,
+        linkedFixedAssetAdjustmentId: adjId,
+        previousRateEffectiveDate: prevEffectiveDate,
+        coaDebitCode: '5960',
+        coaCreditCode: '1690',
+      });
+
+      workingAsset.manualAdjustments = [
+        {
+          id: adjId,
+          date: yearEndStr,
+          type: 'depreciation',
+          amount: dep.cappedDepreciationAmount,
+          note: `Penyusutan Otomatis Akhir Tahun ${year} (${dep.annualRatePct}%/thn · ${periodDays} hr)`,
+          isAutoYearEnd: true,
+          periodKey,
+        },
+        ...(workingAsset.manualAdjustments || []),
+      ];
+      workingAsset.rateEffectiveDate = yearEndStr;
+      workingEffectiveDate = yearEndStr;
+      assetChanged = true;
+      totalDepreciationPosted += dep.cappedDepreciationAmount;
+    }
+
+    if (assetChanged) {
+      hasAnyAssetChange = true;
+      return workingAsset;
+    }
+    return asset;
+  });
+
+  return {
+    newAdjustingTransactions,
+    updatedFixedAssets: hasAnyAssetChange ? updatedFixedAssets : safeAssets,
+    postedCount: newAdjustingTransactions.length,
+    totalDepreciationPosted,
+  };
+}
+
+export function calculateTotalFixedAssets(
+  fixedAssets: FixedAsset[] = [],
+  debts: Debt[] = [],
+  asOfDateStr?: string
+): number {
+  const synced = syncKprDebtsToFixedAssets(fixedAssets, debts, asOfDateStr);
+  return synced.reduce(
+    (sum, asset) => sum + calculateFixedAssetValuation(asset, debts, asOfDateStr).currentBookValue,
+    0
+  );
+}
+
+export interface CombinedPortfolioWealthSummary {
+  totalInvestmentValue: number;
+  totalInvestmentCost: number;
+  totalInvestmentGain: number;
+  totalFixedAssetBookValue: number;
+  totalFixedAssetBasis: number;
+  totalFixedAssetAppreciation: number;
+  totalFixedAssetDepreciation: number;
+  totalFixedAssetNetChange: number;
+  totalCombinedWealth: number;
+  investmentSharePct: number;
+  fixedAssetSharePct: number;
+  activeKprAssetCount: number;
+  paidOffKprAssetCount: number;
+  directFixedAssetCount: number;
+}
+
+export function calculateCombinedPortfolioWealth(
+  investments: InvestmentAsset[] = [],
+  fixedAssets: FixedAsset[] = [],
+  debts: Debt[] = [],
+  asOfDateStr?: string
+): CombinedPortfolioWealthSummary {
+  const totalInvestmentValue = calculateTotalInvestments(investments);
+  const totalInvestmentCost = (investments || []).reduce(
+    (sum, inv) => sum + (inv.initialCapital !== undefined ? inv.initialCapital : inv.balance || 0),
+    0
+  );
+  const totalInvestmentGain = totalInvestmentValue - totalInvestmentCost;
+
+  const synced = syncKprDebtsToFixedAssets(fixedAssets, debts, asOfDateStr);
+  let totalFixedAssetBookValue = 0;
+  let totalFixedAssetBasis = 0;
+  let totalFixedAssetAppreciation = 0;
+  let totalFixedAssetDepreciation = 0;
+  let activeKprAssetCount = 0;
+  let paidOffKprAssetCount = 0;
+  let directFixedAssetCount = 0;
+
+  synced.forEach((asset) => {
+    const val = calculateFixedAssetValuation(asset, debts, asOfDateStr);
+    totalFixedAssetBookValue += val.currentBookValue;
+    totalFixedAssetBasis += val.basisValue;
+    if (val.autoAdjustment > 0) totalFixedAssetAppreciation += val.autoAdjustment;
+    if (val.autoAdjustment < 0) totalFixedAssetDepreciation += Math.abs(val.autoAdjustment);
+    totalFixedAssetAppreciation += val.manualAppreciation;
+    totalFixedAssetDepreciation += val.manualDepreciation;
+
+    if (asset.isKprLinked) {
+      if (val.isPaidOff) paidOffKprAssetCount += 1;
+      else activeKprAssetCount += 1;
+    } else {
+      directFixedAssetCount += 1;
+    }
+  });
+
+  const totalFixedAssetNetChange = totalFixedAssetAppreciation - totalFixedAssetDepreciation;
+  const totalCombinedWealth = totalInvestmentValue + totalFixedAssetBookValue;
+  const investmentSharePct =
+    totalCombinedWealth > 0 ? (totalInvestmentValue / totalCombinedWealth) * 100 : 0;
+  const fixedAssetSharePct =
+    totalCombinedWealth > 0 ? (totalFixedAssetBookValue / totalCombinedWealth) * 100 : 0;
+
+  return {
+    totalInvestmentValue,
+    totalInvestmentCost,
+    totalInvestmentGain,
+    totalFixedAssetBookValue,
+    totalFixedAssetBasis,
+    totalFixedAssetAppreciation,
+    totalFixedAssetDepreciation,
+    totalFixedAssetNetChange,
+    totalCombinedWealth,
+    investmentSharePct,
+    fixedAssetSharePct,
+    activeKprAssetCount,
+    paidOffKprAssetCount,
+    directFixedAssetCount,
+  };
 }
 
 export function calculateTotalDebts(accounts: Account[], debts: Debt[]): number {
@@ -1051,7 +1603,14 @@ export function previewSafeAnomalyCleanupImpact(
 export function classifyTransaction(
   tx: Pick<
     Transaction,
-    'type' | 'category' | 'linkedDebtAction' | 'linkedInvestmentAction' | 'isAdjustment' | 'adjustmentType'
+    | 'type'
+    | 'category'
+    | 'linkedDebtAction'
+    | 'linkedInvestmentAction'
+    | 'linkedFixedAssetAction'
+    | 'linkedFixedAssetId'
+    | 'isAdjustment'
+    | 'adjustmentType'
   >
 ): TransactionAccountingNature {
   const catLower = (tx.category || '').trim().toLowerCase();
@@ -1059,6 +1618,7 @@ export function classifyTransaction(
   if (
     tx.isAdjustment ||
     catLower === 'depresiasi aset investasi' ||
+    catLower === 'penyusutan aset tetap' ||
     catLower === 'akrual bunga utang'
   ) {
     return 'non_cash_adjustment';
@@ -1086,6 +1646,14 @@ export function classifyTransaction(
 
   if (tx.type === 'saving' || EMERGENCY_CATEGORIES.has(catLower)) {
     return 'emergency_fund_transfer';
+  }
+
+  if (
+    tx.linkedFixedAssetAction === 'buy' ||
+    Boolean(tx.linkedFixedAssetId) ||
+    catLower === 'pembelian aset tetap'
+  ) {
+    return 'fixed_asset_buy';
   }
 
   if (tx.linkedInvestmentAction === 'buy' || tx.type === 'investment') {
@@ -1120,6 +1688,7 @@ export interface IncomeStatementSummary {
   debtProceedsOut: number;
   investmentPurchases: number;
   investmentSales: number;
+  fixedAssetPurchases: number;
   emergencyAdditions: number;
   emergencyWithdrawals: number;
   nonCashAdjustments: number;
@@ -1136,6 +1705,7 @@ export function calculateIncomeStatementSummary(
   let debtProceedsOut = 0;
   let investmentPurchases = 0;
   let investmentSales = 0;
+  let fixedAssetPurchases = 0;
   let emergencyAdditions = 0;
   let emergencyWithdrawals = 0;
   let nonCashAdjustments = 0;
@@ -1175,6 +1745,9 @@ export function calculateIncomeStatementSummary(
       case 'investment_sell':
         investmentSales += amt;
         break;
+      case 'fixed_asset_buy':
+        fixedAssetPurchases += amt;
+        break;
       case 'emergency_fund_transfer':
         if (tx.type === 'income') emergencyWithdrawals += amt;
         else emergencyAdditions += amt;
@@ -1196,6 +1769,7 @@ export function calculateIncomeStatementSummary(
     debtProceedsOut,
     investmentPurchases,
     investmentSales,
+    fixedAssetPurchases,
     emergencyAdditions,
     emergencyWithdrawals,
     nonCashAdjustments,
@@ -1209,6 +1783,7 @@ export interface CashFlowSummary {
   netOperating: number;
   investmentInflows: number;
   investmentOutflows: number;
+  fixedAssetOutflows: number;
   savingInflows: number;
   savingOutflows: number;
   netInvesting: number;
@@ -1231,6 +1806,7 @@ export function calculateCashFlowStatement(
   let operatingOutflows = 0;
   let investmentInflows = 0;
   let investmentOutflows = 0;
+  let fixedAssetOutflows = 0;
   let savingInflows = 0;
   let savingOutflows = 0;
   let debtProceedsInflows = 0;
@@ -1279,6 +1855,10 @@ export function calculateCashFlowStatement(
       case 'investment_sell':
         if (!isCreditCharge) investmentInflows += amt;
         break;
+      case 'fixed_asset_buy':
+        if (isCreditCharge) nonCashCreditOutflows += amt;
+        else fixedAssetOutflows += amt;
+        break;
       case 'emergency_fund_transfer':
         if (tx.type === 'income') {
           if (!isCreditCharge) savingInflows += amt;
@@ -1294,7 +1874,7 @@ export function calculateCashFlowStatement(
 
   const netOperating = operatingInflows - operatingOutflows;
   const netInvesting =
-    investmentInflows + savingInflows - (investmentOutflows + savingOutflows);
+    investmentInflows + savingInflows - (investmentOutflows + fixedAssetOutflows + savingOutflows);
   const financingInflows = debtProceedsInflows;
   const financingOutflows = debtPaymentOutflows;
   const netFinancing = financingInflows - financingOutflows;
@@ -1306,6 +1886,7 @@ export function calculateCashFlowStatement(
     netOperating,
     investmentInflows,
     investmentOutflows,
+    fixedAssetOutflows,
     savingInflows,
     savingOutflows,
     netInvesting,
@@ -1323,6 +1904,10 @@ export interface BalanceSheetSummary {
   liquidAssets: number;
   emergencyAssets: number;
   investmentAssets: number;
+  fixedAssetsBasis: number;
+  fixedAssetsNetAdjustment: number;
+  fixedAssetsValue: number;
+  combinedInvestmentAndFixedAssets: number;
   totalAssets: number;
   creditCardPaylaterBills: number;
   activeDebtsBalance: number;
@@ -1335,12 +1920,18 @@ export function calculateBalanceSheet(
   accounts: Account[],
   emergencyTransactions: EmergencyFundTransaction[],
   investments: InvestmentAsset[],
-  debts: Debt[]
+  debts: Debt[],
+  fixedAssets: FixedAsset[] = []
 ): BalanceSheetSummary {
   const liquidAssets = calculateTotalLiquidCash(accounts);
   const emergencyAssets = calculateTotalEmergencyFund(emergencyTransactions);
-  const investmentAssets = calculateTotalInvestments(investments);
-  const totalAssets = liquidAssets + emergencyAssets + investmentAssets;
+  const combinedWealth = calculateCombinedPortfolioWealth(investments, fixedAssets, debts);
+  const investmentAssets = combinedWealth.totalInvestmentValue;
+  const fixedAssetsBasis = combinedWealth.totalFixedAssetBasis;
+  const fixedAssetsNetAdjustment = combinedWealth.totalFixedAssetNetChange;
+  const fixedAssetsValue = combinedWealth.totalFixedAssetBookValue;
+  const combinedInvestmentAndFixedAssets = combinedWealth.totalCombinedWealth;
+  const totalAssets = liquidAssets + emergencyAssets + investmentAssets + fixedAssetsValue;
 
   const creditCardPaylaterBills = calculateCreditPaylaterBills(accounts);
   const activeDebtsBalance = (debts || []).reduce((sum, d) => sum + Math.max(0, d.balance || 0), 0);
@@ -1353,6 +1944,10 @@ export function calculateBalanceSheet(
     liquidAssets,
     emergencyAssets,
     investmentAssets,
+    fixedAssetsBasis,
+    fixedAssetsNetAdjustment,
+    fixedAssetsValue,
+    combinedInvestmentAndFixedAssets,
     totalAssets,
     creditCardPaylaterBills,
     activeDebtsBalance,
@@ -1457,6 +2052,13 @@ export function calculateNetWorthHistory30Days(
         case 'investment_sell':
           // Pemindahan antar pos aset (Kas <-> Dana Darurat / Investasi) berdampak 0 pada Total Aset & Net Worth
           break;
+        case 'fixed_asset_buy':
+          if (onCreditCard) {
+            rolledAssets -= amt;
+            rolledDebts -= amt;
+          }
+          // Pembelian tunai dari kas/bank (Kas <-> Aset Tetap) berdampak 0 pada Total Aset & Net Worth
+          break;
         case 'non_cash_adjustment':
           if (tx.adjustmentType === 'debt_interest_accrual') {
             rolledDebts -= amt;
@@ -1497,6 +2099,7 @@ export interface CFPHealthRatiosResult {
   liquidCash: number;
   emergencyBalance: number;
   totalInvestmentValue: number;
+  totalFixedAssetValue: number;
   totalAssets: number;
   totalLiabilities: number;
   currentLiabilities: number;
@@ -1518,7 +2121,8 @@ export function calculateCFPFinancialHealthRatios(
   accounts: Account[],
   debts: Debt[],
   investments: InvestmentAsset[],
-  emergencyTransactions: EmergencyFundTransaction[] = []
+  emergencyTransactions: EmergencyFundTransaction[] = [],
+  fixedAssets: FixedAsset[] = []
 ): CFPHealthRatiosResult {
   const now = new Date();
   const currentYM = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
@@ -1537,7 +2141,8 @@ export function calculateCFPFinancialHealthRatios(
   const liquidCash = calculateTotalLiquidCash(accounts);
   const emergencyBalance = calculateTotalEmergencyFund(emergencyTransactions);
   const totalInvestmentValue = calculateTotalInvestments(investments);
-  const totalAssets = liquidCash + emergencyBalance + totalInvestmentValue;
+  const totalFixedAssetValue = calculateTotalFixedAssets(fixedAssets, debts);
+  const totalAssets = liquidCash + emergencyBalance + totalInvestmentValue + totalFixedAssetValue;
 
   const creditLiabilities = calculateCreditPaylaterBills(accounts);
   const loanDebts = (debts || []).reduce((sum, d) => sum + Math.max(0, d.balance || 0), 0);
@@ -1593,6 +2198,7 @@ export function calculateCFPFinancialHealthRatios(
     liquidCash,
     emergencyBalance,
     totalInvestmentValue,
+    totalFixedAssetValue,
     totalAssets,
     totalLiabilities,
     currentLiabilities,

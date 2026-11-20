@@ -1,13 +1,23 @@
 import jsPDF from 'jspdf';
 import html2canvas from 'html2canvas';
-import { Transaction, Account, Debt, InvestmentAsset, KprCoaMappingConfig } from '../types';
-import { isOperatingIncome, isOperatingExpense, classifyTransaction } from './accountingEngine';
+import { Transaction, Account, Debt, FixedAsset, InvestmentAsset, KprCoaMappingConfig } from '../types';
+import {
+  isOperatingIncome,
+  isOperatingExpense,
+  classifyTransaction,
+  calculateFixedAssetValuation,
+  syncKprDebtsToFixedAssets,
+} from './accountingEngine';
 import { showToast } from './toast';
 
 interface BalanceSheetExportData {
   liquidAssets: number;
   emergencyAssets: number;
   investmentAssets: number;
+  fixedAssetsBasis?: number;
+  fixedAssetsNetAdjustment?: number;
+  fixedAssetsValue?: number;
+  combinedInvestmentAndFixedAssets?: number;
   totalAssets: number;
   creditCardPaylaterBills: number;
   activeDebtsBalance: number;
@@ -22,6 +32,7 @@ interface CashFlowExportData {
   netOperating: number;
   investmentInflows?: number;
   investmentOutflows: number;
+  fixedAssetOutflows?: number;
   netInvesting: number;
   savingInflows?: number;
   savingOutflows: number;
@@ -106,8 +117,17 @@ export const exportBalanceSheetToCSV = (
   data: BalanceSheetExportData,
   accounts: Account[],
   debts: Debt[],
-  investments: InvestmentAsset[]
+  investments: InvestmentAsset[],
+  fixedAssets: FixedAsset[] = []
 ) => {
+  const syncedFixedAssets = syncKprDebtsToFixedAssets(fixedAssets, debts);
+  const fixedAssetsTotal = data.fixedAssetsValue ?? syncedFixedAssets.reduce(
+    (sum, fa) => sum + calculateFixedAssetValuation(fa, debts).currentBookValue,
+    0
+  );
+  const combinedInvestFixed =
+    data.combinedInvestmentAndFixedAssets ?? ((data.investmentAssets || 0) + fixedAssetsTotal);
+
   let csv = `LAPORAN NERACA KEUANGAN (BALANCE SHEET) - NUSANTARA WEALTH\n`;
   csv += `Tanggal Posisi,${new Date().toLocaleDateString('id-ID')}\n\n`;
 
@@ -121,6 +141,17 @@ export const exportBalanceSheetToCSV = (
   investments.forEach(inv => {
     csv += `  - ${inv.name} (${inv.category}),${inv.balance}\n`;
   });
+  csv += `Aset Tetap & Ekuitas Properti KPR,${fixedAssetsTotal}\n`;
+  syncedFixedAssets.forEach((fa) => {
+    const val = calculateFixedAssetValuation(fa, debts);
+    const statusLabel = fa.isKprLinked
+      ? val.isPaidOff
+        ? 'Lunas - Aset Tetap Penuh'
+        : `KPR Aktif (${val.ownershipPct.toFixed(1)}% lunas)`
+      : fa.category;
+    csv += `  - "${fa.name.replace(/"/g, '""')} (${statusLabel}) [Basis ${val.basisValue}; Penyesuaian ${val.totalNetValueChange >= 0 ? '+' : ''}${val.totalNetValueChange}]",${val.currentBookValue}\n`;
+  });
+  csv += `Kombinasi Portofolio Investasi & Aset Tetap,${combinedInvestFixed}\n`;
   csv += `TOTAL ASET,${data.totalAssets}\n\n`;
 
   csv += `KEWAJIBAN & UTANG (LIABILITIES),NILAI (IDR)\n`;
@@ -152,6 +183,9 @@ export const exportCashFlowToCSV = (data: CashFlowExportData) => {
     csv += `Pencairan / Penjualan Investasi,${data.investmentInflows}\n`;
   }
   csv += `Pembelian / Setoran Investasi,-${data.investmentOutflows}\n`;
+  if (data.fixedAssetOutflows && data.fixedAssetOutflows > 0) {
+    csv += `Pembelian / Akuisisi Aset Tetap,-${data.fixedAssetOutflows}\n`;
+  }
   if (data.savingInflows) {
     csv += `Pencairan Dana Darurat,${data.savingInflows}\n`;
   }

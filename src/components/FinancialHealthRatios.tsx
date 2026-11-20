@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { Transaction, Account, Debt, InvestmentAsset, EmergencyFundTransaction } from '../types';
+import { Transaction, Account, Debt, FixedAsset, InvestmentAsset, EmergencyFundTransaction } from '../types';
 import { calculateCFPFinancialHealthRatios } from '../utils/accountingEngine';
 import { formatterIDR } from '../utils/formatters';
 import { 
@@ -13,6 +13,7 @@ interface FinancialHealthRatiosProps {
   debts: Debt[];
   investments: InvestmentAsset[];
   emergencyTransactions?: EmergencyFundTransaction[];
+  fixedAssets?: FixedAsset[];
 }
 
 export const FinancialHealthRatios: React.FC<FinancialHealthRatiosProps> = ({
@@ -21,6 +22,7 @@ export const FinancialHealthRatios: React.FC<FinancialHealthRatiosProps> = ({
   debts,
   investments,
   emergencyTransactions = [],
+  fixedAssets = [],
 }) => {
   // CALCULATIONS FOR CFP METRICS & RATIOS (centralized in accountingEngine)
   const metrics = useMemo(() => {
@@ -29,9 +31,10 @@ export const FinancialHealthRatios: React.FC<FinancialHealthRatiosProps> = ({
       accounts,
       debts,
       investments,
-      emergencyTransactions
+      emergencyTransactions,
+      fixedAssets
     );
-  }, [transactions, accounts, debts, investments, emergencyTransactions]);
+  }, [transactions, accounts, debts, investments, emergencyTransactions, fixedAssets]);
 
   return (
     <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-md space-y-6">

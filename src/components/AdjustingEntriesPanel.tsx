@@ -700,7 +700,7 @@ export const AdjustingEntriesPanel: React.FC<AdjustingEntriesPanelProps> = ({
                 </h4>
                 <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
                   Entri <strong>{reverseConfirmTx.description}</strong> senilai{' '}
-                  <span className="font-mono font-bold">{formatterIDR.format(reverseConfirmTx.amount)}</span> akan dihapus dan saldo aset investasi/utang terkait akan dikembalikan seperti semula.
+                  <span className="font-mono font-bold">{formatterIDR.format(reverseConfirmTx.amount)}</span> akan dihapus dan saldo aset investasi, aset tetap, atau utang terkait akan dikembalikan seperti semula.
                 </p>
               </div>
             </div>

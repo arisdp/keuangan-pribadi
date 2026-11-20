@@ -28,6 +28,7 @@ import {
   CategoryBudget,
   Debt,
   InvestmentAsset,
+  FixedAsset,
   EmergencyFundConfig,
   EmergencyFundTransaction,
   RecurringTransaction,
@@ -46,6 +47,7 @@ interface BackupDataModalProps {
     budgets: CategoryBudget[];
     debts: Debt[];
     investments: InvestmentAsset[];
+    fixedAssets?: FixedAsset[];
     emergencyConfig: EmergencyFundConfig;
     emergencyTransactions: EmergencyFundTransaction[];
     masterCategories: CategoryNode[];

@@ -3,7 +3,7 @@ import { db, pool, dbConnectionMetadata, isDatabaseConfigured } from '../db';
 import { eq, inArray, or, sql } from 'drizzle-orm';
 import { 
   users, accounts, transactions, investments, 
-  budgets, debts, recurringTransactions, savingsGoals,
+  budgets, debts, fixedAssets, recurringTransactions, savingsGoals,
   emergencyFundConfigs, emergencyFundTransactions, investmentPriceHistory, debtPayments
 } from '../db/schema';
 import { dbLogger } from '../utils/dbLogger';
@@ -128,7 +128,44 @@ export async function ensureTablesExist(): Promise<boolean> {
           min_payment numeric(15, 2) NOT NULL,
           purpose text NOT NULL,
           category text NOT NULL,
-          due_day integer
+          due_day integer,
+          start_date text,
+          kpr_scheme text,
+          kpr_preset_id text,
+          property_price numeric(15, 2),
+          down_payment numeric(15, 2),
+          tenor_months integer,
+          fixed_rate numeric(5, 2),
+          fixed_years integer,
+          floating_rate numeric(5, 2)
+        )`,
+        `ALTER TABLE debts ADD COLUMN IF NOT EXISTS start_date text`,
+        `ALTER TABLE debts ADD COLUMN IF NOT EXISTS kpr_scheme text`,
+        `ALTER TABLE debts ADD COLUMN IF NOT EXISTS kpr_preset_id text`,
+        `ALTER TABLE debts ADD COLUMN IF NOT EXISTS property_price numeric(15, 2)`,
+        `ALTER TABLE debts ADD COLUMN IF NOT EXISTS down_payment numeric(15, 2)`,
+        `ALTER TABLE debts ADD COLUMN IF NOT EXISTS tenor_months integer`,
+        `ALTER TABLE debts ADD COLUMN IF NOT EXISTS fixed_rate numeric(5, 2)`,
+        `ALTER TABLE debts ADD COLUMN IF NOT EXISTS fixed_years integer`,
+        `ALTER TABLE debts ADD COLUMN IF NOT EXISTS floating_rate numeric(5, 2)`,
+        `CREATE TABLE IF NOT EXISTS fixed_assets (
+          id text PRIMARY KEY,
+          user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          name text NOT NULL,
+          category text NOT NULL,
+          purchase_price numeric(15, 2) NOT NULL,
+          acquisition_date text NOT NULL,
+          annual_rate_pct numeric(6, 2) NOT NULL DEFAULT 0,
+          rate_effective_date text,
+          funding_mode text NOT NULL DEFAULT 'direct_record',
+          linked_account_id text,
+          linked_transaction_id text,
+          linked_debt_id text,
+          is_kpr_linked boolean DEFAULT false,
+          kpr_paid_principal_lock numeric(15, 2),
+          kpr_is_paid_off boolean DEFAULT false,
+          manual_adjustments jsonb,
+          notes text
         )`,
         `CREATE TABLE IF NOT EXISTS debt_payments (
           id text PRIMARY KEY,
@@ -800,6 +837,7 @@ apiRouter.get('/sync', async (req, res) => {
     const allBudgets = await db.select().from(budgets).where(eq(budgets.userId, userId));
     const allDebts = await db.select().from(debts).where(eq(debts.userId, userId));
     const allInvestments = await db.select().from(investments).where(eq(investments.userId, userId));
+    const allFixedAssets = await db.select().from(fixedAssets).where(eq(fixedAssets.userId, userId));
     const allRecurringTxs = await db.select().from(recurringTransactions).where(eq(recurringTransactions.userId, userId));
     const allSavingsGoals = await db.select().from(savingsGoals).where(eq(savingsGoals.userId, userId));
     
@@ -818,7 +856,8 @@ apiRouter.get('/sync', async (req, res) => {
             key.toLowerCase().includes('price') || key.toLowerCase().includes('rate') ||
             key.toLowerCase().includes('limit') || key.toLowerCase().includes('payment') ||
             key.toLowerCase().includes('quantity') || key.toLowerCase().includes('units') ||
-            key.toLowerCase().includes('dividends') || key.toLowerCase().includes('debt')
+            key.toLowerCase().includes('dividends') || key.toLowerCase().includes('debt') ||
+            key.toLowerCase().includes('lock')
           )) {
           // Careful with string dates parsing as numbers. We only cast specific keys.
           res[key] = Number(res[key]);
@@ -837,6 +876,11 @@ apiRouter.get('/sync', async (req, res) => {
       return { ...mapToNum(debt), paymentHistory: payments };
     });
 
+    const formattedFixedAssets = allFixedAssets.map(fa => ({
+      ...mapToNum(fa),
+      manualAdjustments: Array.isArray(fa.manualAdjustments) ? fa.manualAdjustments : [],
+    }));
+
     res.json({
       accounts: allAccounts.map(mapToNum),
       transactions: allTransactions.map(mapToNum),
@@ -848,6 +892,7 @@ apiRouter.get('/sync', async (req, res) => {
       }),
       debts: formattedDebts,
       investments: formattedInvestments,
+      fixedAssets: formattedFixedAssets,
       recurringTransactions: allRecurringTxs.map(mapToNum),
       savingsGoals: allSavingsGoals.map(mapToNum),
       emergencyConfig: efConfigs.length > 0 ? mapToNum(efConfigs[0]) : { jobStability: 'medium', dependents: 0, monthlyExpense: 0 },
@@ -970,7 +1015,8 @@ apiRouter.post('/sync', async (req, res) => {
       await tx.execute(sql`DELETE FROM savings_goals WHERE user_id = ${userId};`);
       await tx.execute(sql`DELETE FROM emergency_fund_configs WHERE user_id = ${userId};`);
 
-      // 6. Delete investments & debts
+      // 6. Delete investments, fixed_assets & debts
+      await tx.execute(sql`DELETE FROM fixed_assets WHERE user_id = ${userId};`);
       await tx.execute(sql`DELETE FROM investments WHERE user_id = ${userId};`);
       await tx.execute(sql`DELETE FROM debts WHERE user_id = ${userId};`);
 
@@ -1083,6 +1129,15 @@ apiRouter.post('/sync', async (req, res) => {
         purpose: String(d.purpose || 'Lainnya'),
         category: String(d.category || 'Utang Konsumtif'),
         dueDay: safeNullableInt(d.dueDay),
+        startDate: d.startDate ? String(d.startDate) : null,
+        kprScheme: d.kprScheme ? String(d.kprScheme) : null,
+        kprPresetId: d.kprPresetId ? String(d.kprPresetId) : null,
+        propertyPrice: safeNullableNumberString(d.propertyPrice),
+        downPayment: safeNullableNumberString(d.downPayment),
+        tenorMonths: safeNullableInt(d.tenorMonths),
+        fixedRate: safeNullableNumberString(d.fixedRate),
+        fixedYears: safeNullableInt(d.fixedYears),
+        floatingRate: safeNullableNumberString(d.floatingRate),
       }));
       const uniqueDebts = deduplicateById(mappedDebts);
       if (uniqueDebts.length > 0) {
@@ -1155,6 +1210,31 @@ apiRouter.post('/sync', async (req, res) => {
       const uniquePriceHistories = deduplicateById(mappedPriceHistories);
       if (uniquePriceHistories.length > 0) {
         await tx.insert(investmentPriceHistory).values(uniquePriceHistories as any).onConflictDoNothing();
+      }
+
+      // 2e-2. FIXED ASSETS
+      const mappedFixedAssets = (body.fixedAssets || []).map((fa: any, idx: number) => ({
+        id: ensureUserScopedId(fa.id, 'fa', idx),
+        userId,
+        name: String(fa.name || 'Aset Tetap'),
+        category: String(fa.category || 'Lainnya'),
+        purchasePrice: safeNumberString(fa.purchasePrice, '0'),
+        acquisitionDate: String(fa.acquisitionDate || new Date().toISOString().split('T')[0]),
+        annualRatePct: safeNumberString(fa.annualRatePct, '0'),
+        rateEffectiveDate: fa.rateEffectiveDate ? String(fa.rateEffectiveDate) : null,
+        fundingMode: String(fa.fundingMode || 'direct_record'),
+        linkedAccountId: fa.linkedAccountId ? ensureUserScopedId(fa.linkedAccountId, 'acc', 0) : null,
+        linkedTransactionId: fa.linkedTransactionId ? ensureUserScopedId(fa.linkedTransactionId, 'tx', 0) : null,
+        linkedDebtId: fa.linkedDebtId ? ensureUserScopedId(fa.linkedDebtId, 'debt', 0) : null,
+        isKprLinked: Boolean(fa.isKprLinked),
+        kprPaidPrincipalLock: safeNullableNumberString(fa.kprPaidPrincipalLock),
+        kprIsPaidOff: Boolean(fa.kprIsPaidOff),
+        manualAdjustments: Array.isArray(fa.manualAdjustments) ? fa.manualAdjustments : [],
+        notes: fa.notes ? String(fa.notes) : null,
+      }));
+      const uniqueFixedAssets = deduplicateById(mappedFixedAssets);
+      if (uniqueFixedAssets.length > 0) {
+        await tx.insert(fixedAssets).values(uniqueFixedAssets as any).onConflictDoNothing();
       }
 
       // 2f. RECURRING TRANSACTIONS
