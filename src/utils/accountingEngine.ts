@@ -189,13 +189,11 @@ export function resolveDebtInstallmentAccounting(params: {
   const interestCategory = isKpr ? effectiveCoa.interestExpenseCategory : 'Beban Bunga Pinjaman / KPR';
 
   if (tx.linkedKprBreakdown) {
-    const interestPart = Math.min(safeAmt, Math.max(0, Number(tx.linkedKprBreakdown.interestPart) || 0));
-    const principalPart = Math.max(
-      0,
+    const interestPart = Math.min(safeAmt, normalizeAbsAmount(tx.linkedKprBreakdown.interestPart));
+    const principalPart =
       tx.linkedKprBreakdown.principalPart !== undefined
-        ? Number(tx.linkedKprBreakdown.principalPart) || 0
-        : safeAmt - interestPart
-    );
+        ? Math.min(safeAmt, normalizeAbsAmount(tx.linkedKprBreakdown.principalPart))
+        : Math.max(0, safeAmt - interestPart);
     return {
       linkedKprBreakdown: {
         principalPart,
@@ -308,8 +306,17 @@ export function getAccountCreditBill(acc: Account): number {
   if (typeof acc.usedLimit === 'number' && Number.isFinite(acc.usedLimit)) {
     return Math.max(0, acc.usedLimit);
   }
-  const limit = acc.creditLimit ?? acc.startingBalance ?? 0;
-  return Math.max(0, limit - (acc.currentBalance || 0));
+  const limit = normalizeAbsAmount(acc.creditLimit ?? acc.startingBalance ?? 0);
+  const rawCur = Number(acc.currentBalance);
+  const curBal = Number.isFinite(rawCur) ? rawCur : 0;
+  return Math.max(0, limit - curBal);
+}
+
+export function getCreditOverlimitAmount(acc?: Pick<Account, 'type' | 'currentBalance'> | null): number {
+  if (!acc || !isCreditAccount(acc)) return 0;
+  const rawCur = Number(acc.currentBalance);
+  if (!Number.isFinite(rawCur) || rawCur >= 0) return 0;
+  return Math.abs(rawCur);
 }
 
 export function calculateTotalLiquidCash(accounts: Account[]): number {
@@ -381,8 +388,7 @@ export function applyAccountBalanceChange(acc: Account, delta: number): Account 
     };
   }
 
-  const rawLimit = Number(acc.creditLimit ?? acc.startingBalance ?? 0);
-  const limit = Number.isFinite(rawLimit) ? Math.max(0, rawLimit) : 0;
+  const limit = normalizeAbsAmount(acc.creditLimit ?? acc.startingBalance ?? 0);
   return {
     ...acc,
     currentBalance: nextBalance,
@@ -1147,13 +1153,11 @@ export function calculateIncomeStatementSummary(
         break;
       case 'debt_principal_pay':
         if (tx.linkedKprBreakdown) {
-          const interestPart = Math.max(0, Number(tx.linkedKprBreakdown.interestPart) || 0);
-          const principalPart = Math.max(
-            0,
+          const interestPart = normalizeAbsAmount(tx.linkedKprBreakdown.interestPart);
+          const principalPart =
             tx.linkedKprBreakdown.principalPart !== undefined
-              ? Number(tx.linkedKprBreakdown.principalPart) || 0
-              : Math.max(0, amt - interestPart)
-          );
+              ? normalizeAbsAmount(tx.linkedKprBreakdown.principalPart)
+              : Math.max(0, amt - interestPart);
           operatingExpense += interestPart;
           kprInterestExpense += interestPart;
           debtPrincipalPayments += principalPart;
@@ -1248,11 +1252,11 @@ export function calculateCashFlowStatement(
         break;
       case 'debt_principal_pay':
         if (tx.linkedKprBreakdown) {
-          const interestPart = Math.max(0, Number(tx.linkedKprBreakdown.interestPart) || 0);
-          const principalPart = Math.max(
-            0,
-            Number(tx.linkedKprBreakdown.principalPart) || Math.max(0, amt - interestPart)
-          );
+          const interestPart = normalizeAbsAmount(tx.linkedKprBreakdown.interestPart);
+          const principalPart =
+            tx.linkedKprBreakdown.principalPart !== undefined
+              ? normalizeAbsAmount(tx.linkedKprBreakdown.principalPart)
+              : Math.max(0, amt - interestPart);
           if (isCreditCharge) {
             nonCashCreditOutflows += amt;
           } else {

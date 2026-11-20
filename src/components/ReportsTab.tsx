@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useRef } from 'react';
 import { Transaction, Account, CategoryBudget, Debt, InvestmentAsset, EmergencyFundTransaction, KprCoaMappingConfig } from '../types';
 import { CategoryNode, DEFAULT_CATEGORY_HIERARCHY } from '../categoryHierarchy';
+import { CoaScanResult } from '../coaUtils';
 import { HierarchicalPivotReport } from './HierarchicalPivotReport';
 import { MasterCategoryManager } from './MasterCategoryManager';
 import { CategoryTreeDiagram } from './CategoryTreeDiagram';
@@ -83,6 +84,8 @@ interface ReportsTabProps {
   onApplyAdjustments?: (entries: AdjustingEntryDraft[]) => void;
   onReverseAdjustment?: (txId: string) => void;
   onOpenIntegrityModal?: () => void;
+  coaScanResult?: CoaScanResult;
+  onRescanCoa?: () => CoaScanResult | void;
 }
 
 
@@ -103,6 +106,8 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
   onApplyAdjustments,
   onReverseAdjustment,
   onOpenIntegrityModal,
+  coaScanResult,
+  onRescanCoa,
 }) => {
   // Sub-tab selection
   const [activeReport, setActiveReport] = useState<'pivot-tree' | 'category-tree' | 'master-categories' | 'cashflow' | 'balance-sheet' | 'adjusting-entries' | 'budget-realization' | 'tax-calculator' | 'advanced-analytics' | 'sankey-flow' | 'financial-ratios' | 'ai-reconciliation' | 'integrity-report'>('pivot-tree');
@@ -766,6 +771,9 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
             transactions={transactions}
             masterCategories={masterCategories}
             investments={investments}
+            coaScanResult={coaScanResult}
+            onRescanCoa={onRescanCoa}
+            onOpenIntegrityModal={onOpenIntegrityModal}
             onUpdateAccounts={onUpdateAccounts}
             onUpdateTransactions={onUpdateTransactions}
             onUpdateInvestments={onUpdateInvestments}

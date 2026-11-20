@@ -7,6 +7,7 @@ import { showToast } from '../utils/toast';
 import { FormattedNumberInput } from './FormattedNumberInput';
 import { WhatIfSavingsSimulator } from './WhatIfSavingsSimulator';
 import { DebtPriorityScheduler } from './DebtPriorityScheduler';
+import { OverlimitTrendChart } from './CreditOverlimitTrendAnalyzer';
 
 interface AiAnalysisTabProps {
   transactions: Transaction[];
@@ -1079,6 +1080,14 @@ export const AiAnalysisTab: React.FC<AiAnalysisTabProps> = ({
           </div>
         )}
       </div>
+
+      {/* ANALISIS VISUAL OVERLIMIT TREND CHART (6 BULAN TERAKHIR) */}
+      <OverlimitTrendChart
+        accounts={accounts}
+        transactions={transactions}
+        budgets={budgets}
+        onApplyBudgetSuggestion={onApplyBudgetSuggestion}
+      />
 
       {/* SIMULASI WHAT-IF HEMAT 10% & PROYEKSI SALDO MASA DEPAN */}
       <WhatIfSavingsSimulator

@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useCallback } from 'react';
 import { Account, Transaction, InvestmentAsset, Debt, CategoryBudget } from '../types';
 import { CategoryNode, flattenCategoryHierarchy } from '../categoryHierarchy';
-import { getStoredCoaList, getAccountCoaMapping, AccountCOA } from '../coaUtils';
+import { getStoredCoaList, getAccountCoaMapping, AccountCOA, CoaScanResult } from '../coaUtils';
 import {
   ShieldCheck,
   ShieldAlert,
@@ -77,6 +77,8 @@ interface IntegrityReportProps {
   onUpdateAccounts?: (updatedAccounts: Account[]) => void;
   onUpdateTransactions?: (updatedTransactions: Transaction[]) => void;
   onUpdateInvestments?: (updatedInvestments: InvestmentAsset[]) => void;
+  coaScanResult?: CoaScanResult;
+  onRescanCoa?: () => CoaScanResult | void;
   className?: string;
 }
 
@@ -93,6 +95,8 @@ export const IntegrityReport: React.FC<IntegrityReportProps> = ({
   onUpdateAccounts,
   onUpdateTransactions,
   onUpdateInvestments,
+  coaScanResult,
+  onRescanCoa,
   className = '',
 }) => {
   const [activeTab, setActiveTab] = useState<DiscrepancyCategory | 'all'>('all');
@@ -416,10 +420,13 @@ export const IntegrityReport: React.FC<IntegrityReportProps> = ({
   // Handle Manual Trigger for Re-scan
   const handleTriggerReScan = () => {
     setIsScanning(true);
+    if (onRescanCoa) {
+      onRescanCoa();
+    }
     setTimeout(() => {
       setIsScanning(false);
       showToast('Pemindaian ulang integritas dataset selesai disinkronkan!');
-    }, 600);
+    }, 450);
   };
 
   // Filtered Discrepancies
@@ -701,7 +708,14 @@ export const IntegrityReport: React.FC<IntegrityReportProps> = ({
                 </span>
               </h2>
               <p className="text-xs text-slate-400 font-medium">
-                Pemeriksaan komprehensif lintas dataset (Rekening, Transaksi, Portofolio Investasi, & Master COA)
+                Pemeriksaan komprehensif lintas dataset (Rekening, Transaksi, Portofolio Investasi, &amp; Master COA)
+                {coaScanResult ? (
+                  <span className="font-mono tabular-nums text-slate-300">
+                    {' '}
+                    · {coaScanResult.totalLedgerAnomalies} anomali ledger · {coaScanResult.totalDuplicates} COA duplikat
+                    {coaScanResult.scannedAt ? ` · Dipindai ${coaScanResult.scannedAt}` : ''}
+                  </span>
+                ) : null}
               </p>
             </div>
           </div>

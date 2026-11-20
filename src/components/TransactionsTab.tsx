@@ -14,6 +14,7 @@ import {
   getAccountCreditBill,
   getTransactionAccountDelta,
   isCreditAccount,
+  normalizeAbsAmount,
 } from '../utils/accountingEngine';
 
 interface TransactionsTabProps {
@@ -869,7 +870,7 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
           tx.category.toLowerCase() === category.toLowerCase() &&
           tx.date.startsWith(txMonth)
       )
-      .reduce((sum, tx) => sum + tx.amount, 0);
+      .reduce((sum, tx) => sum + normalizeAbsAmount(tx.amount), 0);
 
     const limit = budgetForCat.limit;
     const sisa = limit - alreadySpent;
@@ -890,7 +891,7 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
 
   const handleAddTxSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    const parsedAmount = parseFloat(amount);
+    const parsedAmount = normalizeAbsAmount(parseFloat(amount));
     if (!accountId || !category || !parsedAmount || parsedAmount <= 0) {
       showToast({
         type: 'warning',
@@ -987,7 +988,7 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
               tx.category.toLowerCase() === category.toLowerCase() &&
               tx.date.startsWith(txMonth)
           )
-          .reduce((sum, tx) => sum + tx.amount, 0);
+          .reduce((sum, tx) => sum + normalizeAbsAmount(tx.amount), 0);
         
         const limit = budgetForCat.limit;
         const totalProposed = alreadySpent + parsedAmount;
@@ -1140,7 +1141,7 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
 
   const handleTransferSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    const parsedAmount = parseFloat(transferAmount);
+    const parsedAmount = normalizeAbsAmount(parseFloat(transferAmount));
     if (!fromAccount || !toAccount || !parsedAmount || parsedAmount <= 0) {
       showToast({
         type: 'warning',
@@ -2505,9 +2506,9 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
                     </div>
                   )}
                   {isNegativeProjected && (
-                    <p className="text-[10px] text-rose-700 font-semibold pt-0.5">
+                    <p className="text-[10px] text-rose-700 font-semibold pt-0.5 font-mono tabular-nums">
                       {isCredit
-                        ? 'Nominal melebihi sisa limit tersedia pada kartu/PayLater.'
+                        ? `Status: Overlimit (melebihi limit sebesar ${formatterIDR.format(Math.abs(projectedAcc.currentBalance))}) · Transaksi tetap diizinkan.`
                         : 'Nominal melebihi saldo kas rekening saat ini.'}
                     </p>
                   )}

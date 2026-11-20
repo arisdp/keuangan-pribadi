@@ -11,8 +11,10 @@ import {
 import {
   applyAccountBalanceChange,
   getAccountCreditBill,
+  getCreditOverlimitAmount,
   getTransactionAccountDelta,
   isCreditAccount,
+  normalizeAbsAmount,
 } from '../utils/accountingEngine';
 import {
   Calculator,
@@ -227,6 +229,7 @@ export const DebtTab: React.FC<DebtTabProps> = ({
       const defaultAPR = acc.type === 'credit-card' ? 21 : 24;
       const rate = acc.interestRate !== undefined ? acc.interestRate : defaultAPR;
       const bill = getAccountCreditBill(acc);
+      const overlimitAmount = getCreditOverlimitAmount(acc);
       const calculatedMin = Math.max(bill * 0.1, bill > 0 ? 50000 : 0);
       const min = acc.minPayment !== undefined ? acc.minPayment : calculatedMin;
 
@@ -234,6 +237,8 @@ export const DebtTab: React.FC<DebtTabProps> = ({
         id: acc.id,
         name: acc.name,
         balance: bill,
+        overlimitAmount,
+        remainingLimit: acc.currentBalance,
         interestRate: rate,
         minPayment: min,
         purpose: 'consumptive' as const,
@@ -1818,7 +1823,7 @@ export const DebtTab: React.FC<DebtTabProps> = ({
 
                       {(() => {
                         const selectedAcc = liquidAccounts.find((a) => a.id === addDisburseAccountId);
-                        const parsedBal = parseFloat(balance) || 0;
+                        const parsedBal = normalizeAbsAmount(parseFloat(balance));
                         if (!selectedAcc) return null;
                         const delta = getTransactionAccountDelta({
                           type: bankLinkTxType,
@@ -1993,9 +1998,14 @@ export const DebtTab: React.FC<DebtTabProps> = ({
                               </span>
                             )}
                             {d.isAccount && (
-                              <span className="text-[9px] uppercase font-extrabold bg-blue-50 text-blue-700 border border-blue-100 px-2 py-0.5 rounded-full flex items-center gap-1">
+                              <span className="text-[10px] font-semibold text-blue-700 flex items-center gap-1">
                                 <ArrowLeftRight className="h-2.5 w-2.5 shrink-0" />
                                 Terkoneksi Rekening
+                              </span>
+                            )}
+                            {d.isAccount && (d as typeof accountDebts[number]).overlimitAmount > 0 && (
+                              <span className="text-[10px] font-bold text-rose-600 font-mono tabular-nums">
+                                · Overlimit (Sisa Limit {formatterIDR.format((d as typeof accountDebts[number]).remainingLimit)})
                               </span>
                             )}
                             {index === 0 && (

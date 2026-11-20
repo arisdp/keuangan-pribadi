@@ -15,6 +15,7 @@ import {
   getAccountCreditBill,
   getLiquidAccounts,
   getTransactionAccountDelta,
+  normalizeAbsAmount,
   resolveDebtInstallmentAccounting,
   updateAccountMetadataAndStartingBalance,
 } from './utils/accountingEngine';
@@ -86,7 +87,9 @@ import {
   factoryResetMasterData,
   DEFAULT_COA_LIST,
   saveStoredCoaList,
-  clearMasterChangeLogs
+  clearMasterChangeLogs,
+  scanCoaDuplicatesAndUnused,
+  CoaScanResult
 } from './coaUtils';
 import { motion, AnimatePresence } from 'motion/react';
 import { useTheme } from './ThemeContext';
@@ -353,6 +356,7 @@ export default function App() {
         const scheduledDayStr = String(Math.min(rec.dayOfMonth, 28)).padStart(2, '0');
         const txDate = `${currentYM}-${scheduledDayStr}`;
 
+        const normalizedRecAmt = normalizeAbsAmount(rec.amount);
         const newTx: Transaction = {
           id: `tx-rec-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
           date: txDate,
@@ -360,7 +364,7 @@ export default function App() {
           type: rec.type,
           category: rec.category,
           description: `[Jadwal Otomatis] ${rec.title}${rec.description ? ` - ${rec.description}` : ''}`,
-          amount: rec.amount,
+          amount: normalizedRecAmt,
         };
 
         newTxsToAdd.push(newTx);
@@ -455,6 +459,21 @@ export default function App() {
   const [showBackupModal, setShowBackupModal] = useState<boolean>(false);
   const [showIntegrityModal, setShowIntegrityModal] = useState<boolean>(false);
   const startupIntegrityCheckedUserRef = useRef<string | null>(null);
+
+  // --- CENTRALIZED COA & LEDGER ANOMALY SCAN STATE (LIFTED) ---
+  const [coaScanResult, setCoaScanResult] = useState<CoaScanResult>(() =>
+    scanCoaDuplicatesAndUnused(getStoredCoaList(), accounts, transactions)
+  );
+
+  const handleRescanCoa = (): CoaScanResult => {
+    const freshScan = scanCoaDuplicatesAndUnused(getStoredCoaList(), accounts, transactions);
+    setCoaScanResult(freshScan);
+    return freshScan;
+  };
+
+  useEffect(() => {
+    setCoaScanResult(scanCoaDuplicatesAndUnused(getStoredCoaList(), accounts, transactions));
+  }, [accounts, transactions, showIntegrityModal, activeTab]);
 
   // --- AUTOMATIC DATA INTEGRITY VALIDATION ON APPLICATION LOAD ---
   useEffect(() => {
@@ -761,6 +780,9 @@ export default function App() {
       unitName?: string;
     };
   }): boolean => {
+    // Normalisasi Math.abs sejak gerbang masuk agar validasi & delta saldo selalu konsisten
+    const normalizedAmount = normalizeAbsAmount(newTx.amount);
+
     // Protection & validation for unified Debt / KPR installment payment or payoff
     let payTargetLabel = '';
     let isFullDebtPayoff = false;
@@ -776,8 +798,7 @@ export default function App() {
         return false;
       }
 
-      const rawPayAmt = Number(newTx.amount);
-      if (!Number.isFinite(rawPayAmt) || rawPayAmt <= 0) {
+      if (normalizedAmount <= 0) {
         showToast({
           type: 'warning',
           title: 'Nominal Tidak Valid',
@@ -798,11 +819,11 @@ export default function App() {
         return false;
       }
 
-      if (paymentSource.currentBalance < newTx.amount) {
+      if (paymentSource.currentBalance < normalizedAmount) {
         showToast({
           type: 'error',
           title: 'Dana Tidak Mencukupi',
-          message: `Saldo ${paymentSource.name} (${formatCurrencyIDR(paymentSource.currentBalance)}) tidak cukup untuk membayar cicilan sebesar ${formatCurrencyIDR(newTx.amount)}.`,
+          message: `Saldo ${paymentSource.name} (${formatCurrencyIDR(paymentSource.currentBalance)}) tidak cukup untuk membayar cicilan sebesar ${formatCurrencyIDR(normalizedAmount)}.`,
           duration: 6000,
         });
         return false;
@@ -830,17 +851,17 @@ export default function App() {
           return false;
         }
         const currentDebtBal = getAccountCreditBill(targetDebtAcc);
-        if (newTx.amount > currentDebtBal) {
+        if (normalizedAmount > currentDebtBal) {
           showToast({
             type: 'warning',
             title: 'Nominal Melebihi Sisa Tagihan',
-            message: `Nominal bayar (${formatCurrencyIDR(newTx.amount)}) melebihi sisa tagihan "${targetDebtAcc.name}" (${formatCurrencyIDR(currentDebtBal)}).`,
+            message: `Nominal bayar (${formatCurrencyIDR(normalizedAmount)}) melebihi sisa tagihan "${targetDebtAcc.name}" (${formatCurrencyIDR(currentDebtBal)}).`,
             duration: 5000,
           });
           return false;
         }
         payTargetLabel = targetDebtAcc.name;
-        isFullDebtPayoff = currentDebtBal - newTx.amount <= 0;
+        isFullDebtPayoff = currentDebtBal - normalizedAmount <= 0;
       } else {
         const matchedDebt = debts.find((d) => d.id === newTx.linkedDebtId);
         if (!matchedDebt) {
@@ -855,7 +876,7 @@ export default function App() {
         const bankCoa = getAccountCoaMapping(paymentSource, getStoredCoaList());
         resolvedDebtAccounting = resolveDebtInstallmentAccounting({
           tx: {
-            amount: newTx.amount,
+            amount: normalizedAmount,
             date: newTx.date,
             coaDebitCode: newTx.coaDebitCode,
             coaCreditCode: newTx.coaCreditCode,
@@ -925,10 +946,6 @@ export default function App() {
     }
 
     const resolvedKprBreakdown = resolvedDebtAccounting?.linkedKprBreakdown ?? newTx.linkedKprBreakdown;
-
-    const normalizedAmount = Number.isFinite(Number(newTx.amount))
-      ? Math.abs(Number(newTx.amount))
-      : 0;
 
     const tx: Transaction = {
       id: txId,
@@ -1153,6 +1170,7 @@ export default function App() {
     const targetTx = transactions.find((t) => t.id === id);
     if (!targetTx) return;
 
+    const safeTxAmount = normalizeAbsAmount(targetTx.amount);
     setTransactions((prev) => prev.filter((t) => t.id !== id));
 
     // If Non-Cash Adjusting Entry, reverse asset depreciation or debt interest accrual without touching cash accounts
@@ -1161,7 +1179,7 @@ export default function App() {
         setInvestments((prevInv) =>
           prevInv.map((inv) => {
             if (inv.id === targetTx.linkedInvestmentId) {
-              const restoredBal = inv.balance + targetTx.amount;
+              const restoredBal = inv.balance + safeTxAmount;
               const qty = inv.quantity ?? inv.units ?? 0;
               const nextUnitPrice = qty > 0 ? restoredBal / qty : inv.currentUnitPrice ?? inv.unitPrice;
               return {
@@ -1179,7 +1197,7 @@ export default function App() {
             if (d.id === targetTx.linkedDebtId) {
               return {
                 ...d,
-                balance: Math.max(0, d.balance - targetTx.amount),
+                balance: Math.max(0, d.balance - safeTxAmount),
               };
             }
             return d;
@@ -1234,15 +1252,15 @@ export default function App() {
         setAccounts((prevAccounts) =>
           prevAccounts.map((acc) => {
             if (acc.id === targetAccId) {
-              return applyCreditBillPayment(acc, targetTx.amount, 'revert');
+              return applyCreditBillPayment(acc, safeTxAmount, 'revert');
             }
             return acc;
           })
         );
       } else {
         const principalPayAmt = targetTx.linkedKprBreakdown
-          ? Math.max(0, Number(targetTx.linkedKprBreakdown.principalPart) || 0)
-          : targetTx.amount;
+          ? normalizeAbsAmount(targetTx.linkedKprBreakdown.principalPart)
+          : safeTxAmount;
         setDebts((prevDebts) =>
           prevDebts.map((d) => {
             if (d.id === targetTx.linkedDebtId) {
@@ -1437,7 +1455,7 @@ export default function App() {
       type: target.type,
       category: target.category,
       description: `[Jadwal Otomatis] ${target.title}${target.description ? ` - ${target.description}` : ''}`,
-      amount: target.amount,
+      amount: normalizeAbsAmount(target.amount),
     };
 
     setTransactions((prev) => [newTx, ...prev]);
@@ -1633,10 +1651,16 @@ export default function App() {
           postKprInitialCostsToJournal?: boolean;
         }
   ) => {
+    const normalizedDebtBalance = normalizeAbsAmount(newDebt.balance);
+    const normalizedDebtMinPayment = normalizeAbsAmount(newDebt.minPayment);
+    const normalizedDownPayment = normalizeAbsAmount(newDebt.downPayment);
     const uniqueSuffix = Math.random().toString(36).slice(2, 6);
     const debtId = `debt-${Date.now()}-${uniqueSuffix}`;
     const d: Debt = {
       ...newDebt,
+      balance: normalizedDebtBalance,
+      minPayment: normalizedDebtMinPayment,
+      ...(newDebt.downPayment !== undefined ? { downPayment: normalizedDownPayment } : {}),
       id: debtId,
     };
     setDebts((prev) => [...prev, d]);
@@ -1687,7 +1711,7 @@ export default function App() {
               : isKprDebt
                 ? `Pencairan KPR: ${newDebt.name}`
                 : `Pencairan Hutang: ${newDebt.name}`,
-          amount: newDebt.balance,
+          amount: normalizedDebtBalance,
           linkedDebtId: debtId,
           linkedDebtAction: 'create',
           ...(isKprDebt
@@ -1702,7 +1726,7 @@ export default function App() {
         let totalInitialCashOutflow = 0;
 
         if (isKprDebt && shouldPostKprInitialCosts) {
-          const dpAmount = Math.round(newDebt.downPayment || 0);
+          const dpAmount = Math.round(normalizedDownPayment);
           if (dpAmount > 0) {
             generatedTxs.push({
               id: `tx-kpr-dp-${Date.now()}-${uniqueSuffix}`,
@@ -1721,10 +1745,10 @@ export default function App() {
 
           if (newDebt.kprFeesSummary) {
             const provisiLegalFee = Math.round(
-              (newDebt.kprFeesSummary.provisiFee || 0) +
-                (newDebt.kprFeesSummary.adminFee || 0) +
-                (newDebt.kprFeesSummary.appraisalFee || 0) +
-                (newDebt.kprFeesSummary.notaryAjbFee || 0)
+              normalizeAbsAmount(newDebt.kprFeesSummary.provisiFee) +
+                normalizeAbsAmount(newDebt.kprFeesSummary.adminFee) +
+                normalizeAbsAmount(newDebt.kprFeesSummary.appraisalFee) +
+                normalizeAbsAmount(newDebt.kprFeesSummary.notaryAjbFee)
             );
             if (provisiLegalFee > 0) {
               generatedTxs.push({
@@ -1743,7 +1767,8 @@ export default function App() {
             }
 
             const taxInsuranceFee = Math.round(
-              (newDebt.kprFeesSummary.bphtbTax || 0) + (newDebt.kprFeesSummary.insuranceFee || 0)
+              normalizeAbsAmount(newDebt.kprFeesSummary.bphtbTax) +
+                normalizeAbsAmount(newDebt.kprFeesSummary.insuranceFee)
             );
             if (taxInsuranceFee > 0) {
               generatedTxs.push({
@@ -1778,8 +1803,8 @@ export default function App() {
           title: 'Hutang & Rekening Tersinkronisasi',
           message:
             resolvedTxType === 'expense'
-              ? `Hutang "${newDebt.name}" dicatat dan saldo ${targetAcc.name} berkurang ${formatCurrencyIDR(newDebt.balance)}${initialFeeNote}.`
-              : `Hutang "${newDebt.name}" dicatat dan saldo ${targetAcc.name} bertambah ${formatCurrencyIDR(newDebt.balance)}${initialFeeNote}.`,
+              ? `Hutang "${newDebt.name}" dicatat dan saldo ${targetAcc.name} berkurang ${formatCurrencyIDR(normalizedDebtBalance)}${initialFeeNote}.`
+              : `Hutang "${newDebt.name}" dicatat dan saldo ${targetAcc.name} bertambah ${formatCurrencyIDR(normalizedDebtBalance)}${initialFeeNote}.`,
           duration: 4500,
         });
       } else {
@@ -1806,7 +1831,8 @@ export default function App() {
     const debtInterestTotals = new Map<string, number>();
 
     entries.forEach((entry, idx) => {
-      if (entry.adjustmentAmount <= 0) return;
+      const normalizedAdjAmt = normalizeAbsAmount(entry.adjustmentAmount);
+      if (normalizedAdjAmt <= 0) return;
       const isDep = entry.type === 'investment_depreciation';
 
       newTxs.push({
@@ -1818,7 +1844,7 @@ export default function App() {
         description: isDep
           ? `[Penyesuaian Non-Kas] Depresiasi ${entry.targetName} (${entry.durationDays} hr @ ${entry.annualRatePct}%/thn)`
           : `[Penyesuaian Non-Kas] Akrual Bunga ${entry.targetName} (${entry.durationDays} hr @ ${entry.annualRatePct}% APR)`,
-        amount: entry.adjustmentAmount,
+        amount: normalizedAdjAmt,
         isAdjustment: true,
         adjustmentType: entry.type,
         adjustmentPeriodKey: entry.periodKey,
@@ -1832,9 +1858,9 @@ export default function App() {
       });
 
       if (isDep) {
-        invDepTotals.set(entry.targetId, (invDepTotals.get(entry.targetId) || 0) + entry.adjustmentAmount);
+        invDepTotals.set(entry.targetId, (invDepTotals.get(entry.targetId) || 0) + normalizedAdjAmt);
       } else {
-        debtInterestTotals.set(entry.targetId, (debtInterestTotals.get(entry.targetId) || 0) + entry.adjustmentAmount);
+        debtInterestTotals.set(entry.targetId, (debtInterestTotals.get(entry.targetId) || 0) + normalizedAdjAmt);
       }
     });
 
@@ -2397,14 +2423,30 @@ export default function App() {
               </p>
             </div>
             
-            <button
-              onClick={() => setShowIntegrityModal(true)}
-              className="text-[10px] uppercase font-extrabold text-emerald-700 dark:text-emerald-400 hover:text-emerald-800 border border-emerald-200 dark:border-emerald-700/60 hover:border-emerald-300 px-2.5 sm:px-3 py-1.5 rounded-lg transition cursor-pointer bg-emerald-50/80 dark:bg-emerald-900/30 flex items-center gap-1.5 shadow-2xs"
-              title="Pemeriksaan Integritas Akuntansi & Dual-Entry Ledger"
-            >
-              <ShieldCheck className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
-              <span className="hidden sm:inline">Audit Akuntansi</span>
-            </button>
+            {(() => {
+              const totalSyncedIssues = coaScanResult.totalLedgerAnomalies + coaScanResult.totalDuplicates;
+              return (
+                <button
+                  onClick={() => setShowIntegrityModal(true)}
+                  className={`text-[10px] uppercase font-extrabold px-2.5 sm:px-3 py-1.5 rounded-lg border transition cursor-pointer flex items-center gap-1.5 shadow-2xs whitespace-nowrap shrink-0 ${
+                    totalSyncedIssues > 0
+                      ? 'text-rose-700 dark:text-rose-300 border-rose-300 dark:border-rose-700/70 bg-rose-50/90 dark:bg-rose-950/40 hover:border-rose-400'
+                      : 'text-emerald-700 dark:text-emerald-400 hover:text-emerald-800 border-emerald-200 dark:border-emerald-700/60 hover:border-emerald-300 bg-emerald-50/80 dark:bg-emerald-900/30'
+                  }`}
+                  title="Pemeriksaan Integritas Akuntansi & Dual-Entry Ledger"
+                >
+                  {totalSyncedIssues > 0 ? (
+                    <AlertTriangle className="h-3.5 w-3.5 text-rose-600 dark:text-rose-400 shrink-0" />
+                  ) : (
+                    <ShieldCheck className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                  )}
+                  <span className="hidden sm:inline">Audit Akuntansi</span>
+                  {totalSyncedIssues > 0 && (
+                    <span className="font-mono tabular-nums">({totalSyncedIssues})</span>
+                  )}
+                </button>
+              );
+            })()}
 
             <button
               onClick={() => setShowBackupModal(true)}
@@ -2685,6 +2727,8 @@ export default function App() {
                     onApplyAdjustments={handleApplyAdjustingEntries}
                     onReverseAdjustment={handleReverseAdjustingEntry}
                     onOpenIntegrityModal={() => setShowIntegrityModal(true)}
+                    coaScanResult={coaScanResult}
+                    onRescanCoa={handleRescanCoa}
                   />
                 )}
 
@@ -2846,6 +2890,8 @@ export default function App() {
           accounts={accounts}
           transactions={transactions}
           masterCategories={masterCategories}
+          coaScanResult={coaScanResult}
+          onRescanCoa={handleRescanCoa}
           onUpdateAccounts={(updatedAccs) => {
             setAccounts(updatedAccs);
             if (currentUser) {
@@ -2880,6 +2926,7 @@ export default function App() {
                 setMasterCategories(updatedTree);
               }
             }
+            handleRescanCoa();
             setShowIntegrityModal(false);
             showToast({
               type: 'success',
@@ -2890,6 +2937,7 @@ export default function App() {
           onApplyAdjustmentEntries={(adjEntries) => {
             const newTransactions: Transaction[] = adjEntries.map((e, idx) => ({
               ...e,
+              amount: normalizeAbsAmount(e.amount),
               id: `tx-adj-${Date.now()}-${idx}-${Math.random().toString(36).substring(2, 6)}`,
             }));
 

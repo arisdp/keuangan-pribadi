@@ -65,6 +65,8 @@ interface AccountingIntegrityModalProps {
   onApplyAdjustmentEntries?: (entries: Omit<Transaction, 'id'>[]) => void;
   onUpdateAccounts?: (updatedAccounts: Account[]) => void;
   onUpdateTransactions?: (updatedTransactions: Transaction[]) => void;
+  coaScanResult?: CoaScanResult;
+  onRescanCoa?: () => CoaScanResult | void;
   defaultTab?: 'audit' | 'auto-reconcile' | 'manual-reconcile' | 'change-log';
 }
 
@@ -78,6 +80,8 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
   onApplyAdjustmentEntries,
   onUpdateAccounts,
   onUpdateTransactions,
+  coaScanResult,
+  onRescanCoa,
   defaultTab = 'audit',
 }) => {
   const [activeTab, setActiveTab] = useState<'audit' | 'auto-reconcile' | 'manual-reconcile' | 'change-log'>(defaultTab);
@@ -486,27 +490,36 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
     setTimeout(() => setManualSyncMessage(null), 5000);
   };
 
-  // State hasil pemindaian COA & anomali buku besar (auto-sync saat buka modal / perubahan data + manual Pindai Ulang)
-  const [scanResult, setScanResult] = useState<CoaScanResult>(() =>
-    scanCoaDuplicatesAndUnused(getStoredCoaList(), accounts, transactions)
+  // State hasil pemindaian COA & anomali buku besar (tersinkron dengan state App.tsx + manual Pindai Ulang)
+  const [localScanResult, setLocalScanResult] = useState<CoaScanResult>(() =>
+    coaScanResult || scanCoaDuplicatesAndUnused(getStoredCoaList(), accounts, transactions)
   );
+  const scanResult = coaScanResult || localScanResult;
   const [lastScannedAt, setLastScannedAt] = useState<string>(() => scanResult.scannedAt || '');
   const [isRescanning, setIsRescanning] = useState<boolean>(false);
 
   useEffect(() => {
+    if (coaScanResult) {
+      setLocalScanResult(coaScanResult);
+      if (coaScanResult.scannedAt) {
+        setLastScannedAt(coaScanResult.scannedAt);
+      }
+      return;
+    }
     if (!isOpen) return;
     const effectiveCoas = activeCoaList.length > 0 ? activeCoaList : getStoredCoaList();
     const nextScan = scanCoaDuplicatesAndUnused(effectiveCoas, accounts, transactions);
-    setScanResult(nextScan);
+    setLocalScanResult(nextScan);
     setLastScannedAt(nextScan.scannedAt);
-  }, [isOpen, activeCoaList, accounts, transactions]);
+  }, [isOpen, coaScanResult, activeCoaList, accounts, transactions]);
 
   const handleManualRescan = () => {
     setIsRescanning(true);
     const freshCoas = getStoredCoaList();
     setActiveCoaList(freshCoas);
-    const nextScan = scanCoaDuplicatesAndUnused(freshCoas, accounts, transactions);
-    setScanResult(nextScan);
+    const externalScan = onRescanCoa ? onRescanCoa() : undefined;
+    const nextScan = externalScan || scanCoaDuplicatesAndUnused(freshCoas, accounts, transactions);
+    setLocalScanResult(nextScan);
     setLastScannedAt(nextScan.scannedAt);
     setShowCleanupConfirm(false);
     setTimeout(() => setIsRescanning(false), 350);

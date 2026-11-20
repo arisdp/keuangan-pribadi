@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Account, AccountType, Transaction } from '../types';
 import { FormattedNumberInput } from './FormattedNumberInput';
-import { Plus, Trash2, CreditCard, Wallet, Banknote, ShieldCheck, Info, Sparkles, Check, X, AlertCircle, Percent, DollarSign, FileText, Calendar, ArrowUpRight, ArrowDownLeft, RefreshCw, Layers, Building2, CheckCircle2 } from 'lucide-react';
+import { Plus, Trash2, CreditCard, Wallet, Banknote, ShieldCheck, Info, Sparkles, Check, X, AlertCircle, AlertTriangle, Percent, DollarSign, FileText, Calendar, ArrowUpRight, ArrowDownLeft, RefreshCw, Layers, Building2, CheckCircle2 } from 'lucide-react';
 import { getAccountCoaMapping, synchronizeAccountsAndCOA, CoaSyncReport } from '../coaUtils';
 import {
   applyAccountBalanceChange,
@@ -10,9 +10,11 @@ import {
   calculateTotalLiquidCash,
   getAccountCreditBill,
   getCreditAccounts,
+  getCreditOverlimitAmount,
   getLiquidAccounts,
   getTransactionAccountDelta,
   isCreditAccount,
+  normalizeAbsAmount,
 } from '../utils/accountingEngine';
 
 interface AccountsTabProps {
@@ -48,6 +50,9 @@ export const AccountsTab: React.FC<AccountsTabProps> = ({
 }) => {
   // Selected Account to filter transactions
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
+  // Interactive Overlimit Tooltip state (click-pinned or hover/focus-revealed)
+  const [openOverlimitTooltipId, setOpenOverlimitTooltipId] = useState<string | null>(null);
+  const [hoveredOverlimitTooltipId, setHoveredOverlimitTooltipId] = useState<string | null>(null);
   // Custom Modal/Dialog States to replace window.confirm and window.alert
   const [confirmModal, setConfirmModal] = useState<{
     isOpen: boolean;
@@ -130,10 +135,10 @@ export const AccountsTab: React.FC<AccountsTabProps> = ({
   const filteredTxs = selectedAccount ? (transactions || []).filter(tx => tx.accountId === selectedAccount.id) : [];
   const selectedAccountIncome = filteredTxs
     .filter(tx => tx.type === 'income')
-    .reduce((sum, tx) => sum + tx.amount, 0);
+    .reduce((sum, tx) => sum + normalizeAbsAmount(tx.amount), 0);
   const selectedAccountExpense = filteredTxs
     .filter(tx => tx.type === 'expense' || tx.type === 'saving' || tx.type === 'investment')
-    .reduce((sum, tx) => sum + tx.amount, 0);
+    .reduce((sum, tx) => sum + normalizeAbsAmount(tx.amount), 0);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -399,15 +404,35 @@ export const AccountsTab: React.FC<AccountsTabProps> = ({
 
               const isCreditOrPaylater = isCreditAccount(acc);
               const accountCreditBill = getAccountCreditBill(acc);
-              const usedLimitPercent = isCreditOrPaylater && acc.creditLimit ? (accountCreditBill / acc.creditLimit) * 100 : 0;
+              const overlimitAmount = getCreditOverlimitAmount(acc);
+              const effectiveLimit = normalizeAbsAmount(acc.creditLimit ?? acc.startingBalance ?? 0);
+              const isOverlimit =
+                isCreditOrPaylater &&
+                (overlimitAmount > 0 ||
+                  acc.currentBalance < 0 ||
+                  (effectiveLimit > 0 && accountCreditBill > effectiveLimit));
+              const displayOverlimitAmount = Math.max(
+                overlimitAmount,
+                effectiveLimit > 0 ? Math.max(0, accountCreditBill - effectiveLimit) : 0
+              );
+              const usedLimitPercent = isCreditOrPaylater && effectiveLimit > 0 ? (accountCreditBill / effectiveLimit) * 100 : 0;
               const isSelected = selectedAccountId === acc.id;
+              const isTooltipVisible =
+                isOverlimit &&
+                (openOverlimitTooltipId === acc.id || hoveredOverlimitTooltipId === acc.id);
 
               return (
                 <div 
                   key={acc.id} 
                   onClick={() => setSelectedAccountId(isSelected ? null : acc.id)}
                   className={`bg-gradient-to-br ${cardBg} p-5 rounded-2xl border shadow-md relative flex flex-col justify-between min-h-[12rem] h-auto transition-all hover:scale-[1.02] hover:shadow-lg cursor-pointer ${
-                    isSelected ? 'ring-4 ring-blue-500/70 border-blue-500 shadow-blue-500/10' : 'hover:border-white/20'
+                    isTooltipVisible ? 'z-30' : ''
+                  } ${
+                    isSelected
+                      ? 'ring-4 ring-blue-500/70 border-blue-500 shadow-blue-500/10'
+                      : isOverlimit
+                      ? 'border-rose-500/80 ring-1 ring-rose-500/30'
+                      : 'hover:border-white/20'
                   }`}
                 >
                   {/* Top Line */}
@@ -465,41 +490,156 @@ export const AccountsTab: React.FC<AccountsTabProps> = ({
                       </div>
                     ) : (
                       <div className="space-y-1.5">
-                        <p className="font-mono text-xs tracking-wider text-rose-300">
-                          {acc.accountNumber || 'ID AKUN: --'}
-                        </p>
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="font-mono text-xs tracking-wider text-rose-300">
+                            {acc.accountNumber || 'ID AKUN: --'}
+                          </p>
+                          {isOverlimit && (
+                            <div
+                              className="relative inline-flex shrink-0"
+                              onMouseEnter={() => setHoveredOverlimitTooltipId(acc.id)}
+                              onMouseLeave={() =>
+                                setHoveredOverlimitTooltipId((prev) => (prev === acc.id ? null : prev))
+                              }
+                            >
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setOpenOverlimitTooltipId((prev) => (prev === acc.id ? null : acc.id));
+                                }}
+                                onFocus={() => setHoveredOverlimitTooltipId(acc.id)}
+                                onBlur={(e) => {
+                                  if (!e.currentTarget.parentElement?.contains(e.relatedTarget as Node)) {
+                                    setHoveredOverlimitTooltipId((prev) =>
+                                      prev === acc.id ? null : prev
+                                    );
+                                  }
+                                }}
+                                aria-expanded={isTooltipVisible}
+                                aria-label={`Peringatan overlimit ${acc.name}. Klik untuk detail status.`}
+                                className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-md bg-rose-600 hover:bg-rose-500 text-white border border-rose-400/80 text-[10px] font-extrabold uppercase tracking-wider shadow-sm transition cursor-pointer whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-300"
+                              >
+                                <AlertTriangle className="h-3 w-3 shrink-0" />
+                                <span>Overlimit</span>
+                              </button>
+
+                              {isTooltipVisible && (
+                                <div
+                                  role="tooltip"
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="absolute right-0 top-full mt-2 z-50 w-72 sm:w-80 p-3.5 rounded-xl bg-slate-950 text-slate-100 border border-rose-500/80 shadow-2xl text-xs space-y-2.5 animate-fadeIn cursor-default"
+                                >
+                                  <div className="flex items-start justify-between gap-2 border-b border-slate-800 pb-2">
+                                    <div className="flex items-center gap-1.5 text-rose-400 font-bold">
+                                      <AlertTriangle className="h-4 w-4 shrink-0" />
+                                      <span>Peringatan Status Overlimit</span>
+                                    </div>
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setOpenOverlimitTooltipId(null);
+                                        setHoveredOverlimitTooltipId(null);
+                                      }}
+                                      aria-label="Tutup tooltip overlimit"
+                                      className="p-0.5 rounded text-slate-400 hover:text-white hover:bg-slate-800 cursor-pointer"
+                                    >
+                                      <X className="h-3.5 w-3.5" />
+                                    </button>
+                                  </div>
+
+                                  <p className="text-[11px] text-slate-300 leading-relaxed font-normal">
+                                    Pemakaian <strong className="text-white">{acc.name}</strong> telah melebihi plafon limit kredit yang tersedia sehingga sisa limit bernilai negatif. Kondisi ini berisiko menimbulkan denda overlimit dan beban bunga tambahan.
+                                  </p>
+
+                                  <div className="bg-slate-900/90 border border-slate-800 rounded-lg p-2.5 space-y-1 text-[11px]">
+                                    <div className="flex justify-between gap-3">
+                                      <span className="text-slate-400">Plafon Limit</span>
+                                      <span className="font-mono tabular-nums text-slate-200">
+                                        {formatterIDR.format(effectiveLimit)}
+                                      </span>
+                                    </div>
+                                    <div className="flex justify-between gap-3">
+                                      <span className="text-slate-400">Terpakai ({usedLimitPercent.toFixed(1)}%)</span>
+                                      <span className="font-mono tabular-nums font-bold text-rose-300">
+                                        {formatterIDR.format(accountCreditBill)}
+                                      </span>
+                                    </div>
+                                    <div className="flex justify-between gap-3">
+                                      <span className="text-slate-400">Selisih Overlimit</span>
+                                      <span className="font-mono tabular-nums font-bold text-rose-400">
+                                        +{formatterIDR.format(displayOverlimitAmount)}
+                                      </span>
+                                    </div>
+                                    <div className="flex justify-between gap-3 border-t border-slate-800 pt-1">
+                                      <span className="text-slate-400">Sisa Limit (Saldo)</span>
+                                      <span className="font-mono tabular-nums font-bold text-rose-400">
+                                        {formatterIDR.format(acc.currentBalance)}
+                                      </span>
+                                    </div>
+                                  </div>
+
+                                  {onTransferFunds && (
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setOpenOverlimitTooltipId(null);
+                                        setHoveredOverlimitTooltipId(null);
+                                        initiatePayment(acc);
+                                        setPaymentAmount(displayOverlimitAmount.toString());
+                                      }}
+                                      className="w-full py-1.5 px-3 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-bold text-[11px] transition cursor-pointer text-center whitespace-nowrap shrink-0"
+                                    >
+                                      Bayar Selisih Overlimit ({formatterIDR.format(displayOverlimitAmount)})
+                                    </button>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
                         
                         {/* Custom visual progress bar for used limit */}
                         <div className="space-y-1">
                           <div className="flex justify-between text-[10px] font-bold text-slate-400">
                             <span>Batas Pemakaian</span>
-                            <span className={usedLimitPercent >= 90 ? 'text-rose-400' : usedLimitPercent >= 75 ? 'text-amber-400' : 'text-slate-300'}>
-                              {usedLimitPercent.toFixed(0)}% Terpakai
+                            <span className={`font-mono tabular-nums ${isOverlimit || usedLimitPercent >= 90 ? 'text-rose-400' : usedLimitPercent >= 75 ? 'text-amber-400' : 'text-slate-300'}`}>
+                              {usedLimitPercent.toFixed(0)}% Terpakai{isOverlimit ? ' · Overlimit' : ''}
                             </span>
                           </div>
                           <div className="w-full bg-slate-800 rounded-full h-2 overflow-hidden">
                             <div 
                               className={`h-full rounded-full transition-all duration-500 ${
-                                usedLimitPercent >= 90 ? 'bg-rose-500' : usedLimitPercent >= 75 ? 'bg-amber-500' : 'bg-emerald-500'
+                                isOverlimit || usedLimitPercent >= 90 ? 'bg-rose-500' : usedLimitPercent >= 75 ? 'bg-amber-500' : 'bg-emerald-500'
                               }`}
                               style={{ width: `${Math.min(usedLimitPercent, 100)}%` }}
                             />
                           </div>
                         </div>
 
+                        {isOverlimit && (
+                          <p className="text-[10px] font-semibold text-rose-300 font-mono tabular-nums">
+                            Melebihi batas limit sebesar {formatterIDR.format(displayOverlimitAmount)}
+                          </p>
+                        )}
+
                         {/* Credit stats list */}
                         <div className="grid grid-cols-3 gap-2 text-[10px] pt-1 font-semibold text-slate-400">
                           <div>
                             <span className="block text-[8px] text-slate-500 uppercase tracking-widest">Sisa Limit</span>
-                            <span className="text-slate-200 font-mono text-xs">{formatterIDR.format(acc.currentBalance)}</span>
+                            <span className={`font-mono tabular-nums text-xs ${isOverlimit ? 'text-rose-400 font-bold' : 'text-slate-200'}`}>
+                              {formatterIDR.format(acc.currentBalance)}
+                            </span>
                           </div>
                           <div className="text-center">
                             <span className="block text-[8px] text-slate-500 uppercase tracking-widest font-bold">Hutang Terpakai</span>
-                            <span className="text-rose-300 font-mono text-xs block">{formatterIDR.format(accountCreditBill)}</span>
+                            <span className="text-rose-300 font-mono tabular-nums text-xs block">{formatterIDR.format(accountCreditBill)}</span>
                           </div>
                           <div className="text-right">
                             <span className="block text-[8px] text-slate-500 uppercase tracking-widest font-bold">Jatuh Tempo</span>
-                            <span className="text-amber-300 font-mono text-xs block">{acc.dueDay ? `Tgl ${acc.dueDay}` : '-'}</span>
+                            <span className="text-amber-300 font-mono tabular-nums text-xs block">{acc.dueDay ? `Tgl ${acc.dueDay}` : '-'}</span>
                           </div>
                         </div>
                       </div>

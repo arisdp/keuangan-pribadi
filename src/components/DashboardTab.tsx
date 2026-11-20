@@ -17,6 +17,7 @@ import {
   calculateNetWorthHistory30Days,
   getAccountCreditBill,
   getCreditAccounts,
+  getCreditOverlimitAmount,
   getLiquidAccounts,
   isCreditAccount,
   isOperatingIncome,
@@ -2954,29 +2955,50 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
                 ))}
 
                 {/* Credit Card & PayLater Accounts */}
-                {creditCardAndPaylaterAccounts.map((acc) => (
-                  <div key={acc.id} className="p-3 bg-slate-50/90 rounded-xl border border-slate-150 flex items-center justify-between gap-3 hover:bg-slate-100 transition">
-                    <div className="space-y-0.5 min-w-0">
-                      <div className="flex items-center gap-1.5">
-                        <span className="font-extrabold text-slate-800 text-xs truncate">{acc.name}</span>
-                        <span className="text-[8px] font-black uppercase px-1.5 py-0.5 rounded bg-purple-100 text-purple-700">
-                          {acc.type === 'credit-card' ? 'Kartu Kredit' : 'PayLater'}
-                        </span>
+                {creditCardAndPaylaterAccounts.map((acc) => {
+                  const overlimitAmt = getCreditOverlimitAmount(acc);
+                  const isOverlimit = overlimitAmt > 0;
+                  return (
+                    <div
+                      key={acc.id}
+                      className={`p-3 rounded-xl border flex items-center justify-between gap-3 transition ${
+                        isOverlimit
+                          ? 'bg-rose-50/70 dark:bg-rose-950/20 border-rose-200 dark:border-rose-900/60 hover:bg-rose-50'
+                          : 'bg-slate-50/90 border-slate-150 hover:bg-slate-100'
+                      }`}
+                    >
+                      <div className="space-y-0.5 min-w-0">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="font-extrabold text-slate-800 dark:text-slate-100 text-xs truncate">{acc.name}</span>
+                          <span className="text-[10px] font-semibold text-slate-500 dark:text-slate-400">
+                            · {acc.type === 'credit-card' ? 'Kartu Kredit' : 'PayLater'}
+                          </span>
+                          {isOverlimit && (
+                            <span className="text-[10px] font-bold text-rose-600 dark:text-rose-400">
+                              · Overlimit
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-[10px] text-slate-500 dark:text-slate-400 font-mono tabular-nums">
+                          Limit: {formatValue(acc.creditLimit || 0)}
+                          {isOverlimit && (
+                            <span className="text-rose-600 dark:text-rose-400 font-bold">
+                              {' '}· Sisa: {isFocusMode ? 'Rp ••••••' : formatterIDR.format(acc.currentBalance)}
+                            </span>
+                          )}
+                        </p>
                       </div>
-                      <p className="text-[10px] text-slate-400 font-medium">
-                        Limit: {formatValue(acc.creditLimit || 0)}
-                      </p>
+                      <div className="text-right shrink-0">
+                        <span className="text-xs font-black text-rose-600 dark:text-rose-400 font-mono tabular-nums block">
+                          {isFocusMode ? 'Rp ••••••' : formatterIDR.format(getAccountCreditBill(acc))}
+                        </span>
+                        {acc.dueDay && (
+                          <span className="text-[9px] text-slate-400 font-bold font-mono tabular-nums">Tgl {acc.dueDay} / bln</span>
+                        )}
+                      </div>
                     </div>
-                    <div className="text-right shrink-0">
-                      <span className="text-xs font-black text-rose-600 font-mono block">
-                        {isFocusMode ? 'Rp ••••••' : formatterIDR.format(getAccountCreditBill(acc))}
-                      </span>
-                      {acc.dueDay && (
-                        <span className="text-[9px] text-slate-400 font-bold">Tgl {acc.dueDay} / bln</span>
-                      )}
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
