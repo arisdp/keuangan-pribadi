@@ -4,6 +4,7 @@ import {
   Debt,
   EmergencyFundTransaction,
   FixedAsset,
+  FixedAssetAdjustment,
   InvestmentAsset,
   KprCoaMappingConfig,
   Transaction,
@@ -569,23 +570,50 @@ export interface FixedAssetDepreciationResult {
   projectedBookValueAfter: number;
   effectiveStartDate: string;
   asOfDate: string;
+  draftAdjustment: FixedAssetAdjustment | null;
 }
 
-/**
- * Menghitung penyusutan tahunan berbasis persentase untuk sebuah FixedAsset.
- * Hanya aset dengan annualRatePct < 0 dan basis nilai > 0 yang mengalami penyusutan.
- */
-export function calculateAssetDepreciation(
+export interface CalculateAssetDepreciationOptions {
+  periodDaysOverride?: number;
+  periodKey?: string;
+  isAutoYearEnd?: boolean;
+  note?: string;
+  adjustmentId?: string;
+}
+
+export interface BatchFixedAssetDepreciationDraftEntry {
+  assetId: string;
+  assetName: string;
+  adjustment: FixedAssetAdjustment;
+  depreciationAmount: number;
+  elapsedDays: number;
+}
+
+export interface BatchFixedAssetDepreciationResult {
+  items: FixedAssetDepreciationResult[];
+  draftAdjustments: BatchFixedAssetDepreciationDraftEntry[];
+  totalDepreciationAmount: number;
+  pendingCount: number;
+  eligibleCount: number;
+  asOfDate: string;
+}
+
+function calculateSingleAssetDepreciation(
   asset: FixedAsset,
   debts: Debt[] = [],
   asOfDateStr?: string,
-  periodDaysOverride?: number
+  periodDaysOrOptions?: number | CalculateAssetDepreciationOptions
 ): FixedAssetDepreciationResult {
   const safeAsOfStr =
     normalizeLedgerDateYYYYMMDD(asOfDateStr) || new Date().toISOString().split('T')[0];
   const valuation = calculateFixedAssetValuation(asset, debts, safeAsOfStr);
   const effectiveStartDate =
     normalizeLedgerDateYYYYMMDD(asset.rateEffectiveDate || asset.acquisitionDate) || safeAsOfStr;
+
+  const opts: CalculateAssetDepreciationOptions =
+    typeof periodDaysOrOptions === 'number'
+      ? { periodDaysOverride: periodDaysOrOptions }
+      : periodDaysOrOptions || {};
 
   const isDepreciable = valuation.annualRatePct < 0 && valuation.basisValue > 0;
   const annualRatePct = isDepreciable ? Math.abs(valuation.annualRatePct) : 0;
@@ -596,8 +624,8 @@ export function calculateAssetDepreciation(
   );
 
   let elapsedDays = valuation.elapsedDays;
-  if (periodDaysOverride !== undefined && Number.isFinite(periodDaysOverride)) {
-    elapsedDays = Math.max(0, Math.floor(periodDaysOverride));
+  if (opts.periodDaysOverride !== undefined && Number.isFinite(opts.periodDaysOverride)) {
+    elapsedDays = Math.max(0, Math.floor(opts.periodDaysOverride));
   }
 
   const annualDepreciationAmount =
@@ -616,6 +644,30 @@ export function calculateAssetDepreciation(
   );
   const projectedBookValueAfter = Math.max(0, currentBookValueBefore - cappedDepreciationAmount);
 
+  const resolvedPeriodKey = opts.periodKey || safeAsOfStr.slice(0, 7);
+  const resolvedId =
+    opts.adjustmentId ||
+    (opts.isAutoYearEnd
+      ? `fa-yearend-${asset.id}-${safeAsOfStr.slice(0, 4)}`
+      : `fa-sync-${asset.id}-${safeAsOfStr}`);
+
+  const draftAdjustment: FixedAssetAdjustment | null =
+    isDepreciable && cappedDepreciationAmount > 0
+      ? {
+          id: resolvedId,
+          date: safeAsOfStr,
+          type: 'depreciation',
+          amount: cappedDepreciationAmount,
+          note:
+            opts.note ||
+            (opts.isAutoYearEnd
+              ? `Penyusutan Otomatis Akhir Tahun ${safeAsOfStr.slice(0, 4)} (${annualRatePct}%/thn · ${elapsedDays} hr)`
+              : `Sinkronisasi Penyusutan (${annualRatePct}%/thn · ${elapsedDays} hr s.d. ${safeAsOfStr})`),
+          ...(opts.isAutoYearEnd ? { isAutoYearEnd: true } : {}),
+          periodKey: resolvedPeriodKey,
+        }
+      : null;
+
   return {
     assetId: asset.id,
     isDepreciable,
@@ -629,6 +681,228 @@ export function calculateAssetDepreciation(
     projectedBookValueAfter,
     effectiveStartDate,
     asOfDate: safeAsOfStr,
+    draftAdjustment,
+  };
+}
+
+/**
+ * Menghitung penyusutan tahunan berbasis persentase untuk satu FixedAsset atau seluruh daftar FixedAsset[].
+ * Hanya aset dengan annualRatePct < 0 dan basis nilai > 0 yang diproses serta menghasilkan draft FixedAssetAdjustment
+ * yang valid dan siap diposting sebagai jurnal penyesuaian non-kas.
+ */
+export function calculateAssetDepreciation(
+  asset: FixedAsset,
+  debts?: Debt[],
+  asOfDateStr?: string,
+  periodDaysOrOptions?: number | CalculateAssetDepreciationOptions
+): FixedAssetDepreciationResult;
+export function calculateAssetDepreciation(
+  assets: FixedAsset[],
+  debts?: Debt[],
+  asOfDateStr?: string,
+  periodDaysOrOptions?: number | CalculateAssetDepreciationOptions
+): BatchFixedAssetDepreciationResult;
+export function calculateAssetDepreciation(
+  assetOrAssets: FixedAsset | FixedAsset[],
+  debts: Debt[] = [],
+  asOfDateStr?: string,
+  periodDaysOrOptions?: number | CalculateAssetDepreciationOptions
+): FixedAssetDepreciationResult | BatchFixedAssetDepreciationResult {
+  if (Array.isArray(assetOrAssets)) {
+    const safeAsOfStr =
+      normalizeLedgerDateYYYYMMDD(asOfDateStr) || new Date().toISOString().split('T')[0];
+    const items: FixedAssetDepreciationResult[] = [];
+    const draftAdjustments: BatchFixedAssetDepreciationDraftEntry[] = [];
+    let totalDepreciationAmount = 0;
+
+    for (const asset of assetOrAssets) {
+      if (!asset || !Number.isFinite(Number(asset.annualRatePct)) || Number(asset.annualRatePct) >= 0) {
+        continue;
+      }
+      const res = calculateSingleAssetDepreciation(asset, debts, safeAsOfStr, periodDaysOrOptions);
+      if (!res.isDepreciable) continue;
+      items.push(res);
+      if (res.draftAdjustment && res.cappedDepreciationAmount > 0) {
+        draftAdjustments.push({
+          assetId: asset.id,
+          assetName: asset.name,
+          adjustment: res.draftAdjustment,
+          depreciationAmount: res.cappedDepreciationAmount,
+          elapsedDays: res.elapsedDays,
+        });
+        totalDepreciationAmount += res.cappedDepreciationAmount;
+      }
+    }
+
+    return {
+      items,
+      draftAdjustments,
+      totalDepreciationAmount,
+      pendingCount: draftAdjustments.length,
+      eligibleCount: items.length,
+      asOfDate: safeAsOfStr,
+    };
+  }
+
+  return calculateSingleAssetDepreciation(assetOrAssets, debts, asOfDateStr, periodDaysOrOptions);
+}
+
+export interface SyncedFixedAssetDepreciationResult {
+  updatedAsset: FixedAsset;
+  adjustment: FixedAssetAdjustment | null;
+  adjustingTransaction: Transaction | null;
+  depreciation: FixedAssetDepreciationResult;
+  applied: boolean;
+}
+
+/**
+ * Menghasilkan sekaligus menerapkan FixedAssetAdjustment tersinkronisasi dari
+ * calculateAssetDepreciation beserta jurnal penyesuaian non-kas berpasangan (Dr 5960 / Cr 1690)
+ * dan memajukan rateEffectiveDate agar penyusutan periode tersebut tidak dihitung dua kali.
+ */
+export function buildSyncedFixedAssetDepreciationAdjustment(
+  asset: FixedAsset,
+  debts: Debt[] = [],
+  asOfDateStr?: string,
+  options?: CalculateAssetDepreciationOptions & {
+    existingTransactions?: Transaction[];
+  }
+): SyncedFixedAssetDepreciationResult {
+  const dep = calculateAssetDepreciation(asset, debts, asOfDateStr, options);
+  const existingAdjustments = Array.isArray(asset.manualAdjustments)
+    ? asset.manualAdjustments
+    : [];
+  const existingTxs = Array.isArray(options?.existingTransactions)
+    ? options.existingTransactions
+    : [];
+
+  if (!dep.isDepreciable || dep.cappedDepreciationAmount <= 0 || !dep.draftAdjustment) {
+    return {
+      updatedAsset: asset,
+      adjustment: null,
+      adjustingTransaction: null,
+      depreciation: dep,
+      applied: false,
+    };
+  }
+
+  const adj = dep.draftAdjustment;
+  const alreadyInAsset = existingAdjustments.some(
+    (item) =>
+      item.id === adj.id ||
+      (Boolean(adj.isAutoYearEnd) && Boolean(item.isAutoYearEnd) && item.periodKey === adj.periodKey)
+  );
+  const alreadyPostedTx = existingTxs.some(
+    (tx) =>
+      tx.isAdjustment &&
+      tx.adjustmentType === 'fixed_asset_depreciation' &&
+      tx.linkedFixedAssetId === asset.id &&
+      (tx.linkedFixedAssetAdjustmentId === adj.id ||
+        (Boolean(adj.isAutoYearEnd) && tx.adjustmentPeriodKey === adj.periodKey))
+  );
+
+  if (alreadyInAsset || alreadyPostedTx) {
+    return {
+      updatedAsset: asset,
+      adjustment: null,
+      adjustingTransaction: null,
+      depreciation: dep,
+      applied: false,
+    };
+  }
+
+  const yearLabel = dep.asOfDate.slice(0, 4);
+  const txId = options?.isAutoYearEnd
+    ? `tx-adj-fa-${asset.id}-${yearLabel}`
+    : `tx-adj-fa-sync-${asset.id}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+
+  const adjustingTransaction: Transaction = {
+    id: txId,
+    date: dep.asOfDate,
+    accountId: '',
+    type: 'expense',
+    category: 'Penyusutan Aset Tetap',
+    description: options?.isAutoYearEnd
+      ? `[Penyesuaian Akhir Tahun ${yearLabel}] Penyusutan ${asset.name} (${dep.elapsedDays} hr @ ${dep.annualRatePct}%/thn)`
+      : `[Sinkronisasi Penyusutan] ${asset.name} (${dep.elapsedDays} hr @ ${dep.annualRatePct}%/thn)`,
+    amount: dep.cappedDepreciationAmount,
+    isAdjustment: true,
+    adjustmentType: 'fixed_asset_depreciation',
+    adjustmentPeriodKey: adj.periodKey || dep.asOfDate.slice(0, 7),
+    adjustmentRatePct: dep.annualRatePct,
+    adjustmentDurationDays: dep.elapsedDays,
+    linkedFixedAssetId: asset.id,
+    linkedFixedAssetAdjustmentId: adj.id,
+    previousRateEffectiveDate: dep.effectiveStartDate,
+    coaDebitCode: '5960',
+    coaCreditCode: '1690',
+  };
+
+  const updatedAsset: FixedAsset = {
+    ...asset,
+    manualAdjustments: [adj, ...existingAdjustments],
+    rateEffectiveDate: dep.asOfDate,
+  };
+
+  return {
+    updatedAsset,
+    adjustment: adj,
+    adjustingTransaction,
+    depreciation: dep,
+    applied: true,
+  };
+}
+
+export interface BatchSyncedFixedAssetDepreciationResult {
+  updatedAssets: FixedAsset[];
+  newAdjustingTransactions: Transaction[];
+  appliedCount: number;
+  totalDepreciationPosted: number;
+}
+
+/**
+ * Memproses seluruh aset tetap dengan annualRatePct < 0 secara atomik untuk posting
+ * jurnal penyesuaian non-kas serentak tanpa hitung ganda.
+ */
+export function buildBatchSyncedFixedAssetDepreciationAdjustments(
+  assets: FixedAsset[] = [],
+  debts: Debt[] = [],
+  asOfDateStr?: string,
+  options?: CalculateAssetDepreciationOptions & {
+    existingTransactions?: Transaction[];
+  }
+): BatchSyncedFixedAssetDepreciationResult {
+  const safeAssets = Array.isArray(assets) ? assets : [];
+  const runningTxs = Array.isArray(options?.existingTransactions)
+    ? [...options.existingTransactions]
+    : [];
+  const newAdjustingTransactions: Transaction[] = [];
+  let appliedCount = 0;
+  let totalDepreciationPosted = 0;
+
+  const updatedAssets = safeAssets.map((asset) => {
+    if (!asset || !Number.isFinite(Number(asset.annualRatePct)) || Number(asset.annualRatePct) >= 0) {
+      return asset;
+    }
+    const synced = buildSyncedFixedAssetDepreciationAdjustment(asset, debts, asOfDateStr, {
+      ...options,
+      existingTransactions: runningTxs,
+    });
+    if (!synced.applied || !synced.adjustingTransaction || !synced.adjustment) {
+      return asset;
+    }
+    runningTxs.push(synced.adjustingTransaction);
+    newAdjustingTransactions.push(synced.adjustingTransaction);
+    appliedCount += 1;
+    totalDepreciationPosted += synced.adjustment.amount;
+    return synced.updatedAsset;
+  });
+
+  return {
+    updatedAssets,
+    newAdjustingTransactions,
+    appliedCount,
+    totalDepreciationPosted,
   };
 }
 
@@ -737,51 +1011,27 @@ export function computePendingYearEndFixedAssetDepreciations(
         continue;
       }
 
-      const dep = calculateAssetDepreciation(workingAsset, debts, yearEndStr, periodDays);
-      if (!dep.isDepreciable || dep.cappedDepreciationAmount <= 0) {
+      const synced = buildSyncedFixedAssetDepreciationAdjustment(
+        workingAsset,
+        debts,
+        yearEndStr,
+        {
+          periodDaysOverride: periodDays,
+          periodKey,
+          isAutoYearEnd: true,
+          existingTransactions: safeTxs,
+        }
+      );
+
+      if (!synced.applied || !synced.adjustingTransaction) {
         continue;
       }
 
-      const adjId = `fa-yearend-${workingAsset.id}-${year}`;
-      const txId = `tx-adj-fa-${workingAsset.id}-${year}`;
-      const prevEffectiveDate = workingEffectiveDate;
-
-      newAdjustingTransactions.push({
-        id: txId,
-        date: yearEndStr,
-        accountId: '',
-        type: 'expense',
-        category: 'Penyusutan Aset Tetap',
-        description: `[Penyesuaian Akhir Tahun ${year}] Penyusutan ${workingAsset.name} (${periodDays} hr @ ${dep.annualRatePct}%/thn)`,
-        amount: dep.cappedDepreciationAmount,
-        isAdjustment: true,
-        adjustmentType: 'fixed_asset_depreciation',
-        adjustmentPeriodKey: periodKey,
-        adjustmentRatePct: dep.annualRatePct,
-        adjustmentDurationDays: periodDays,
-        linkedFixedAssetId: workingAsset.id,
-        linkedFixedAssetAdjustmentId: adjId,
-        previousRateEffectiveDate: prevEffectiveDate,
-        coaDebitCode: '5960',
-        coaCreditCode: '1690',
-      });
-
-      workingAsset.manualAdjustments = [
-        {
-          id: adjId,
-          date: yearEndStr,
-          type: 'depreciation',
-          amount: dep.cappedDepreciationAmount,
-          note: `Penyusutan Otomatis Akhir Tahun ${year} (${dep.annualRatePct}%/thn · ${periodDays} hr)`,
-          isAutoYearEnd: true,
-          periodKey,
-        },
-        ...(workingAsset.manualAdjustments || []),
-      ];
-      workingAsset.rateEffectiveDate = yearEndStr;
+      newAdjustingTransactions.push(synced.adjustingTransaction);
+      workingAsset = synced.updatedAsset;
       workingEffectiveDate = yearEndStr;
       assetChanged = true;
-      totalDepreciationPosted += dep.cappedDepreciationAmount;
+      totalDepreciationPosted += synced.depreciation.cappedDepreciationAmount;
     }
 
     if (assetChanged) {

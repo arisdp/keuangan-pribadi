@@ -5,9 +5,11 @@ import { FormattedNumberInput } from './FormattedNumberInput';
 import { TaxCalculatorCard } from './TaxCalculatorCard';
 import { DashboardFinancialHealthPanel } from './DashboardFinancialHealthPanel';
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
-import { TrendingUp, TrendingDown, Wallet, ShieldAlert, CreditCard, PiggyBank, ArrowRight, CheckCircle2, AlertTriangle, Calendar, ChevronLeft, ChevronRight, ArrowUpRight, ArrowDownRight, Info, Eye, EyeOff, Percent, ArrowDown, Sparkles, Lightbulb, Target, Plus, Trash2, Edit2, Clock, Bell, DollarSign, X, RefreshCw, Activity, BarChart3, Table, GitCommit, Scale, FileCheck, ShieldCheck, Building2 } from 'lucide-react';
+import { TrendingUp, TrendingDown, Wallet, ShieldAlert, CreditCard, PiggyBank, ArrowRight, CheckCircle2, AlertTriangle, Calendar, ChevronLeft, ChevronRight, ChevronDown, ArrowUpRight, ArrowDownRight, Info, Eye, EyeOff, Percent, ArrowDown, Sparkles, Lightbulb, Target, Plus, Trash2, Edit2, Clock, Bell, DollarSign, X, RefreshCw, Activity, BarChart3, Table, GitCommit, Scale, FileCheck, ShieldCheck, Building2 } from 'lucide-react';
 import {
+  calculateAssetDepreciation,
   calculateCombinedPortfolioWealth,
+  calculateFixedAssetValuation,
   calculateTotalLiquidCash,
   calculateCreditPaylaterBills,
   calculateTotalEmergencyFund,
@@ -27,6 +29,7 @@ import {
   isInternalTransfer,
   classifyTransaction,
   getTransactionAccountDelta,
+  syncKprDebtsToFixedAssets,
 } from '../utils/accountingEngine';
 import { formatterIDR } from '../utils/formatters';
 
@@ -65,6 +68,8 @@ interface DashboardTabProps {
   onUpdateSavingsGoal?: (id: string, updated: Partial<SavingsGoal>) => void;
   onDeleteSavingsGoal?: (id: string) => void;
   onDepositSavingsGoal?: (id: string, amount: number) => void;
+  onSyncFixedAssetDepreciation?: (assetId: string) => void;
+  onSyncAllFixedAssetDepreciations?: () => void;
   onQuickAction: (tab: string) => void;
 }
 
@@ -81,6 +86,8 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
   onUpdateSavingsGoal,
   onDeleteSavingsGoal,
   onDepositSavingsGoal,
+  onSyncFixedAssetDepreciation,
+  onSyncAllFixedAssetDepreciations,
   onQuickAction,
 }) => {
   // 1. Calculate Net Worth (Liquid Accounts + Emergency Funds + Investments + Fixed Assets/KPR - Debts)
@@ -101,6 +108,24 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
     () => calculateCombinedPortfolioWealth(investments, fixedAssets, debts),
     [investments, fixedAssets, debts]
   );
+  const syncedFixedAssetsList = React.useMemo(
+    () => syncKprDebtsToFixedAssets(fixedAssets, debts),
+    [fixedAssets, debts]
+  );
+  const [activeNetWorthModal, setActiveNetWorthModal] = React.useState<
+    'liquid' | 'investment' | 'fixed' | 'debt' | null
+  >(null);
+
+  React.useEffect(() => {
+    if (!activeNetWorthModal) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setActiveNetWorthModal(null);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [activeNetWorthModal]);
   const totalLiquidWithEmergency = totalLiquidAssets + totalEmergency;
   const loanDebtsOnly = React.useMemo(
     () => (debts || []).reduce((sum, d) => sum + Math.max(0, d.balance || 0), 0),
@@ -148,6 +173,11 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
 
   // Format current actual date dynamically (e.g. '2026-07-21')
   const systemTodayStr = `${actualYear}-${String(actualMonth).padStart(2, '0')}-${String(actualDay).padStart(2, '0')}`;
+
+  const batchAssetDepreciation = React.useMemo(
+    () => calculateAssetDepreciation(syncedFixedAssetsList, debts, systemTodayStr),
+    [syncedFixedAssetsList, debts, systemTodayStr]
+  );
 
   // 2. Calculate current month dynamically
   // Let's filter transactions for current active month (e.g., 2026-07)
@@ -1620,11 +1650,15 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
           </div>
         </div>
 
-        {/* 4-Column Consolidated Balance Sheet Hairline Grid */}
+        {/* 4-Column Interactive Balance Sheet Summary Cards */}
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-px bg-slate-200 border border-slate-200 rounded-xl overflow-hidden">
           {/* 1. Kas Likuid */}
-          <div className="bg-white p-4 flex flex-col justify-between space-y-3">
-            <div className="space-y-1">
+          <button
+            type="button"
+            onClick={() => setActiveNetWorthModal('liquid')}
+            className="p-4 flex flex-col justify-between space-y-3 text-left bg-white hover:bg-slate-50 transition cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600"
+          >
+            <div className="space-y-1 w-full">
               <div className="flex items-center justify-between text-xs font-bold text-slate-600">
                 <span className="flex items-center gap-1.5">
                   <Wallet className="h-3.5 w-3.5 text-blue-600" />
@@ -1654,19 +1688,19 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
                 </div>
               </div>
             </div>
-            <button
-              type="button"
-              onClick={() => onQuickAction('accounts')}
-              className="inline-flex items-center gap-1 text-[11px] font-bold text-blue-600 hover:text-blue-700 transition cursor-pointer w-fit"
-            >
-              <span>Kelola Rekening</span>
-              <ArrowRight className="h-3 w-3" />
-            </button>
-          </div>
+            <span className="inline-flex items-center justify-between w-full text-[11px] font-bold text-blue-600 pt-1">
+              <span>Lihat rincian item</span>
+              <ArrowUpRight className="h-3.5 w-3.5" />
+            </span>
+          </button>
 
           {/* 2. Aset Investasi */}
-          <div className="bg-white p-4 flex flex-col justify-between space-y-3">
-            <div className="space-y-1">
+          <button
+            type="button"
+            onClick={() => setActiveNetWorthModal('investment')}
+            className="p-4 flex flex-col justify-between space-y-3 text-left bg-white hover:bg-slate-50 transition cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600"
+          >
+            <div className="space-y-1 w-full">
               <div className="flex items-center justify-between text-xs font-bold text-slate-600">
                 <span className="flex items-center gap-1.5">
                   <TrendingUp className="h-3.5 w-3.5 text-indigo-600" />
@@ -1703,19 +1737,19 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
                 </div>
               </div>
             </div>
-            <button
-              type="button"
-              onClick={() => onQuickAction('investments')}
-              className="inline-flex items-center gap-1 text-[11px] font-bold text-indigo-600 hover:text-indigo-700 transition cursor-pointer w-fit"
-            >
-              <span>Buka Portofolio</span>
-              <ArrowRight className="h-3 w-3" />
-            </button>
-          </div>
+            <span className="inline-flex items-center justify-between w-full text-[11px] font-bold text-indigo-600 pt-1">
+              <span>Lihat rincian item</span>
+              <ArrowUpRight className="h-3.5 w-3.5" />
+            </span>
+          </button>
 
           {/* 3. Aset Tetap (Net Penyusutan) */}
-          <div className="bg-white p-4 flex flex-col justify-between space-y-3">
-            <div className="space-y-1">
+          <button
+            type="button"
+            onClick={() => setActiveNetWorthModal('fixed')}
+            className="p-4 flex flex-col justify-between space-y-3 text-left bg-white hover:bg-slate-50 transition cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-600"
+          >
+            <div className="space-y-1 w-full">
               <div className="flex items-center justify-between text-xs font-bold text-slate-600">
                 <span className="flex items-center gap-1.5">
                   <Building2 className="h-3.5 w-3.5 text-amber-600" />
@@ -1752,19 +1786,25 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
                 </div>
               </div>
             </div>
-            <button
-              type="button"
-              onClick={() => onQuickAction('investments')}
-              className="inline-flex items-center gap-1 text-[11px] font-bold text-amber-700 hover:text-amber-800 transition cursor-pointer w-fit"
-            >
-              <span>Kelola Aset Tetap</span>
-              <ArrowRight className="h-3 w-3" />
-            </button>
-          </div>
+            <span className="inline-flex items-center justify-between w-full text-[11px] font-bold text-amber-700 pt-1">
+              <span>
+                Rincian ({syncedFixedAssetsList.length} aset
+                {batchAssetDepreciation.pendingCount > 0
+                  ? ` · ${batchAssetDepreciation.pendingCount} susut`
+                  : ''}
+                )
+              </span>
+              <ArrowUpRight className="h-3.5 w-3.5" />
+            </span>
+          </button>
 
           {/* 4. Total Liabilitas / Utang */}
-          <div className="bg-white p-4 flex flex-col justify-between space-y-3">
-            <div className="space-y-1">
+          <button
+            type="button"
+            onClick={() => setActiveNetWorthModal('debt')}
+            className="p-4 flex flex-col justify-between space-y-3 text-left bg-white hover:bg-slate-50 transition cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-600"
+          >
+            <div className="space-y-1 w-full">
               <div className="flex items-center justify-between text-xs font-bold text-slate-600">
                 <span className="flex items-center gap-1.5">
                   <CreditCard className="h-3.5 w-3.5 text-rose-600" />
@@ -1796,16 +1836,392 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
                 </div>
               </div>
             </div>
-            <button
-              type="button"
-              onClick={() => onQuickAction('debts')}
-              className="inline-flex items-center gap-1 text-[11px] font-bold text-rose-600 hover:text-rose-700 transition cursor-pointer w-fit"
-            >
-              <span>Kelola Utang &amp; KPR</span>
-              <ArrowRight className="h-3 w-3" />
-            </button>
-          </div>
+            <span className="inline-flex items-center justify-between w-full text-[11px] font-bold text-rose-600 pt-1">
+              <span>Lihat rincian item</span>
+              <ArrowUpRight className="h-3.5 w-3.5" />
+            </span>
+          </button>
         </div>
+
+        {/* Centered Modal Rincian Item & Navigasi Cepat */}
+        {activeNetWorthModal && (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4"
+            onClick={() => setActiveNetWorthModal(null)}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="net-worth-modal-title"
+          >
+            <div
+              className="w-full max-w-2xl rounded-2xl border border-slate-200 bg-white shadow-2xl overflow-hidden flex flex-col max-h-[85vh]"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* Modal Header */}
+              <div className="px-5 py-4 border-b border-slate-200 flex items-start justify-between gap-4">
+                <div className="flex items-start gap-3 min-w-0">
+                  <div
+                    className={`p-2.5 rounded-xl shrink-0 ${
+                      activeNetWorthModal === 'liquid'
+                        ? 'bg-blue-50 text-blue-600'
+                        : activeNetWorthModal === 'investment'
+                        ? 'bg-indigo-50 text-indigo-600'
+                        : activeNetWorthModal === 'fixed'
+                        ? 'bg-amber-50 text-amber-700'
+                        : 'bg-rose-50 text-rose-600'
+                    }`}
+                  >
+                    {activeNetWorthModal === 'liquid' && <Wallet className="h-5 w-5" />}
+                    {activeNetWorthModal === 'investment' && <TrendingUp className="h-5 w-5" />}
+                    {activeNetWorthModal === 'fixed' && <Building2 className="h-5 w-5" />}
+                    {activeNetWorthModal === 'debt' && <CreditCard className="h-5 w-5" />}
+                  </div>
+                  <div className="min-w-0">
+                    <h3
+                      id="net-worth-modal-title"
+                      className="text-base font-extrabold text-slate-900 tracking-tight"
+                    >
+                      {activeNetWorthModal === 'liquid' && 'Rincian Kas Likuid & Dana Darurat'}
+                      {activeNetWorthModal === 'investment' && 'Rincian Portofolio Investasi'}
+                      {activeNetWorthModal === 'fixed' && 'Rincian Aset Tetap & Penyusutan'}
+                      {activeNetWorthModal === 'debt' && 'Rincian Kewajiban, Utang & Tagihan Kredit'}
+                    </h3>
+                    <p className="text-xs text-slate-500 font-medium mt-0.5">
+                      {activeNetWorthModal === 'liquid' &&
+                        `${liquidAccounts.length} rekening likuid aktif · Dana Darurat tergabung ke likuiditas`}
+                      {activeNetWorthModal === 'investment' &&
+                        `${investments.length} instrumen aktif · Nilai pasar & imbal hasil terkini`}
+                      {activeNetWorthModal === 'fixed' &&
+                        `${syncedFixedAssetsList.length} aset tetap & properti KPR · Nilai buku setelah penyusutan`}
+                      {activeNetWorthModal === 'debt' &&
+                        `${debts.filter((d) => d.balance > 0).length} pinjaman aktif · ${creditCardAndPaylaterAccounts.filter((a) => getAccountCreditBill(a) > 0).length} tagihan kredit/PayLater`}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-3 shrink-0">
+                  <div className="text-right hidden sm:block">
+                    <span className="text-[11px] font-semibold text-slate-400 block">
+                      Total Kategori
+                    </span>
+                    <span
+                      className={`text-sm font-black font-mono tabular-nums ${
+                        activeNetWorthModal === 'debt' ? 'text-rose-600' : 'text-slate-900'
+                      }`}
+                    >
+                      {activeNetWorthModal === 'liquid' && formatValue(totalLiquidWithEmergency)}
+                      {activeNetWorthModal === 'investment' && formatValue(totalInvestments)}
+                      {activeNetWorthModal === 'fixed' &&
+                        formatValue(combinedPortfolioWealth.totalFixedAssetBookValue)}
+                      {activeNetWorthModal === 'debt' &&
+                        (totalDebts > 0 ? `-${formatValue(totalDebts)}` : formatValue(0))}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setActiveNetWorthModal(null)}
+                    className="p-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-100 text-slate-500 hover:text-slate-800 transition cursor-pointer"
+                    aria-label="Tutup modal rincian"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
+              </div>
+
+              {/* Modal Body */}
+              <div className="p-5 overflow-y-auto space-y-4">
+                {activeNetWorthModal === 'liquid' && (
+                  <div className="rounded-xl border border-slate-200 bg-white divide-y divide-slate-100">
+                    {liquidAccounts.length === 0 && totalEmergency <= 0 ? (
+                      <div className="p-6 text-center text-xs text-slate-500">
+                        Belum ada rekening likuid atau saldo dana darurat terdaftar.
+                      </div>
+                    ) : (
+                      <>
+                        {liquidAccounts.map((acc) => (
+                          <div
+                            key={acc.id}
+                            className="px-4 py-3 flex items-center justify-between gap-3 text-xs hover:bg-slate-50/70 transition-colors"
+                          >
+                            <div className="min-w-0">
+                              <span className="font-bold text-slate-800 block truncate">
+                                {acc.name}
+                              </span>
+                              <span className="text-[11px] text-slate-500">
+                                {acc.type === 'e-wallet'
+                                  ? 'Dompet Digital'
+                                  : acc.type === 'cash'
+                                  ? 'Kas Tunai'
+                                  : 'Rekening Bank'}
+                              </span>
+                            </div>
+                            <span className="font-mono tabular-nums font-bold text-slate-900 shrink-0">
+                              {formatValue(acc.currentBalance)}
+                            </span>
+                          </div>
+                        ))}
+                        <div className="px-4 py-3 flex items-center justify-between gap-3 text-xs bg-slate-50/70">
+                          <div className="min-w-0">
+                            <span className="font-bold text-slate-800 block">Dana Darurat</span>
+                            <span className="text-[11px] text-slate-500">
+                              Cadangan likuid khusus kondisi darurat
+                            </span>
+                          </div>
+                          <span className="font-mono tabular-nums font-bold text-blue-700 shrink-0">
+                            {formatValue(totalEmergency)}
+                          </span>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
+
+                {activeNetWorthModal === 'investment' && (
+                  <div className="rounded-xl border border-slate-200 bg-white divide-y divide-slate-100">
+                    {investments.length === 0 ? (
+                      <div className="p-6 text-center text-xs text-slate-500">
+                        Belum ada instrumen investasi aktif. Buka tab Portofolio untuk mencatat aset investasi.
+                      </div>
+                    ) : (
+                      investments.map((inv) => {
+                        const capital =
+                          inv.initialCapital !== undefined ? inv.initialCapital : inv.balance;
+                        const gain = inv.balance - capital;
+                        return (
+                          <div
+                            key={inv.id}
+                            className="px-4 py-3 flex items-center justify-between gap-3 text-xs hover:bg-slate-50/70 transition-colors"
+                          >
+                            <div className="min-w-0">
+                              <span className="font-bold text-slate-800 block truncate">
+                                {inv.name}
+                              </span>
+                              <span className="text-[11px] text-slate-500">
+                                {inv.category}
+                                {inv.quantity || inv.units
+                                  ? ` · ${inv.quantity ?? inv.units} ${inv.unitName || 'unit'}`
+                                  : ''}
+                              </span>
+                            </div>
+                            <div className="text-right shrink-0">
+                              <span className="font-mono tabular-nums font-bold text-slate-900 block">
+                                {formatValue(inv.balance)}
+                              </span>
+                              <span
+                                className={`font-mono tabular-nums text-[11px] font-semibold ${
+                                  gain >= 0 ? 'text-emerald-600' : 'text-rose-600'
+                                }`}
+                              >
+                                {gain >= 0 ? '+' : ''}
+                                {formatValue(gain)}
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                )}
+
+                {activeNetWorthModal === 'fixed' && (
+                  <>
+                    {batchAssetDepreciation.pendingCount > 0 && (
+                      <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                        <div className="space-y-0.5">
+                          <div className="text-xs font-extrabold text-slate-900">
+                            {batchAssetDepreciation.pendingCount} Aset Siap Posting Jurnal Penyusutan
+                          </div>
+                          <p className="text-[11px] text-slate-600 font-medium">
+                            Akumulasi draft penyusutan non-kas (Dr 5960 / Cr 1690):{' '}
+                            <span className="font-mono tabular-nums font-bold text-amber-800">
+                              -{formatValue(batchAssetDepreciation.totalDepreciationAmount)}
+                            </span>
+                          </p>
+                        </div>
+
+                        {(onSyncAllFixedAssetDepreciations || onSyncFixedAssetDepreciation) && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (onSyncAllFixedAssetDepreciations) {
+                                onSyncAllFixedAssetDepreciations();
+                              } else if (onSyncFixedAssetDepreciation) {
+                                batchAssetDepreciation.draftAdjustments.forEach((entry) => {
+                                  onSyncFixedAssetDepreciation(entry.assetId);
+                                });
+                              }
+                            }}
+                            className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold transition cursor-pointer whitespace-nowrap shrink-0"
+                          >
+                            <RefreshCw className="h-3.5 w-3.5" />
+                            <span>Posting Semua Penyusutan</span>
+                          </button>
+                        )}
+                      </div>
+                    )}
+
+                    <div className="rounded-xl border border-slate-200 bg-white divide-y divide-slate-100">
+                      {syncedFixedAssetsList.length === 0 ? (
+                        <div className="p-6 text-center text-xs text-slate-500">
+                          Belum ada aset tetap atau properti KPR tercatat. Tambahkan melalui tab Portofolio &amp; Aset Tetap.
+                        </div>
+                      ) : (
+                        syncedFixedAssetsList.map((asset) => {
+                          const val = calculateFixedAssetValuation(asset, debts, systemTodayStr);
+                          const dep = calculateAssetDepreciation(asset, debts, systemTodayStr);
+                          return (
+                            <div
+                              key={asset.id}
+                              className="px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs hover:bg-slate-50/70 transition-colors"
+                            >
+                              <div className="min-w-0 space-y-0.5">
+                                <span className="font-bold text-slate-800 block truncate">
+                                  {asset.name}
+                                </span>
+                                <span className="text-[11px] text-slate-500 block">
+                                  {asset.category} · Dasar{' '}
+                                  <span className="font-mono tabular-nums font-semibold text-slate-700">
+                                    {formatValue(val.basisValue)}
+                                  </span>{' '}
+                                  · Penyesuaian{' '}
+                                  <span
+                                    className={`font-mono tabular-nums font-semibold ${
+                                      val.totalNetValueChange >= 0
+                                        ? 'text-emerald-600'
+                                        : 'text-amber-700'
+                                    }`}
+                                  >
+                                    {val.totalNetValueChange >= 0 ? '+' : '-'}
+                                    {formatValue(Math.abs(val.totalNetValueChange))}
+                                  </span>
+                                  {asset.isKprLinked && ` · ${val.ownershipPct.toFixed(1)}% lunas`}
+                                </span>
+                              </div>
+
+                              <div className="flex items-center justify-between sm:justify-end gap-2.5 shrink-0">
+                                {onSyncFixedAssetDepreciation &&
+                                  dep.isDepreciable &&
+                                  dep.cappedDepreciationAmount > 0 &&
+                                  dep.draftAdjustment && (
+                                    <button
+                                      type="button"
+                                      onClick={() => onSyncFixedAssetDepreciation(asset.id)}
+                                      title={dep.draftAdjustment.note}
+                                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-amber-200 bg-amber-50 hover:bg-amber-100 text-amber-800 text-[11px] font-bold transition cursor-pointer whitespace-nowrap shrink-0"
+                                    >
+                                      <RefreshCw className="h-3 w-3" />
+                                      <span>
+                                        Posting Susut (-{formatValue(dep.cappedDepreciationAmount)})
+                                      </span>
+                                    </button>
+                                  )}
+                                <span className="font-mono tabular-nums font-bold text-slate-900">
+                                  {formatValue(val.currentBookValue)}
+                                </span>
+                              </div>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  </>
+                )}
+
+                {activeNetWorthModal === 'debt' && (
+                  <div className="rounded-xl border border-slate-200 bg-white divide-y divide-slate-100">
+                    {debts.filter((d) => d.balance > 0).length === 0 &&
+                    creditCardAndPaylaterAccounts.filter((a) => getAccountCreditBill(a) > 0)
+                      .length === 0 ? (
+                      <div className="p-6 text-center text-xs text-slate-500">
+                        Tidak ada kewajiban pinjaman atau tagihan kartu kredit/PayLater aktif saat ini.
+                      </div>
+                    ) : (
+                      <>
+                        {debts
+                          .filter((d) => d.balance > 0)
+                          .map((debt) => (
+                            <div
+                              key={debt.id}
+                              className="px-4 py-3 flex items-center justify-between gap-3 text-xs hover:bg-slate-50/70 transition-colors"
+                            >
+                              <div className="min-w-0">
+                                <span className="font-bold text-slate-800 block truncate">
+                                  {debt.name}
+                                </span>
+                                <span className="text-[11px] text-slate-500">
+                                  {debt.category} · Bunga {debt.interestRate}%/thn
+                                </span>
+                              </div>
+                              <span className="font-mono tabular-nums font-bold text-rose-600 shrink-0">
+                                -{formatValue(debt.balance)}
+                              </span>
+                            </div>
+                          ))}
+                        {creditCardAndPaylaterAccounts
+                          .filter((acc) => getAccountCreditBill(acc) > 0)
+                          .map((acc) => {
+                            const bill = getAccountCreditBill(acc);
+                            return (
+                              <div
+                                key={acc.id}
+                                className="px-4 py-3 flex items-center justify-between gap-3 text-xs hover:bg-slate-50/70 transition-colors"
+                              >
+                                <div className="min-w-0">
+                                  <span className="font-bold text-slate-800 block truncate">
+                                    {acc.name}
+                                  </span>
+                                  <span className="text-[11px] text-slate-500">
+                                    {acc.type === 'credit-card'
+                                      ? 'Tagihan Kartu Kredit'
+                                      : 'Tagihan PayLater'}
+                                  </span>
+                                </div>
+                                <span className="font-mono tabular-nums font-bold text-rose-600 shrink-0">
+                                  -{formatValue(bill)}
+                                </span>
+                              </div>
+                            );
+                          })}
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Modal Footer with Quick Navigation */}
+              <div className="px-5 py-4 border-t border-slate-200 bg-slate-50/70 flex items-center justify-between gap-3">
+                <button
+                  type="button"
+                  onClick={() => setActiveNetWorthModal(null)}
+                  className="px-4 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-100 text-slate-700 text-xs font-bold transition cursor-pointer whitespace-nowrap"
+                >
+                  Tutup
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const targetTab =
+                      activeNetWorthModal === 'liquid'
+                        ? 'accounts'
+                        : activeNetWorthModal === 'debt'
+                        ? 'debts'
+                        : 'investments';
+                    setActiveNetWorthModal(null);
+                    onQuickAction(targetTab);
+                  }}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold transition cursor-pointer whitespace-nowrap shrink-0"
+                >
+                  <span>
+                    {activeNetWorthModal === 'liquid' && 'Kelola Rekening'}
+                    {activeNetWorthModal === 'investment' && 'Buka Portofolio'}
+                    {activeNetWorthModal === 'fixed' && 'Kelola Aset Tetap'}
+                    {activeNetWorthModal === 'debt' && 'Kelola Utang & KPR'}
+                  </span>
+                  <ArrowRight className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </motion.div>
 
       {/* FINANCIAL HEALTH SCORE CARD */}

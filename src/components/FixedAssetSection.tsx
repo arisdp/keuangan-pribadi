@@ -9,6 +9,7 @@ import {
 } from '../types';
 import {
   applyAccountBalanceChange,
+  calculateAssetDepreciation,
   calculateCombinedPortfolioWealth,
   calculateFixedAssetValuation,
   getTransactionAccountDelta,
@@ -37,6 +38,7 @@ import {
   X,
   Check,
   AlertTriangle,
+  RefreshCw,
 } from 'lucide-react';
 
 export interface FixedAssetCreatePayload {
@@ -60,6 +62,7 @@ interface FixedAssetSectionProps {
   onDeleteFixedAsset?: (id: string) => void;
   onAddAdjustment?: (assetId: string, adjustment: Omit<FixedAssetAdjustment, 'id'>) => void;
   onDeleteAdjustment?: (assetId: string, adjustmentId: string) => void;
+  onSyncAssetDepreciation?: (assetId: string) => void;
   showCombinedBanner?: boolean;
 }
 
@@ -115,6 +118,7 @@ export const FixedAssetSection: React.FC<FixedAssetSectionProps> = ({
   onDeleteFixedAsset,
   onAddAdjustment,
   onDeleteAdjustment,
+  onSyncAssetDepreciation,
   showCombinedBanner = true,
 }) => {
   const todayStr = new Date().toISOString().split('T')[0];
@@ -599,6 +603,23 @@ export const FixedAssetSection: React.FC<FixedAssetSectionProps> = ({
 
                     {/* Action Buttons */}
                     <div className="flex flex-wrap items-center gap-2 shrink-0">
+                      {onSyncAssetDepreciation && (() => {
+                        const dep = calculateAssetDepreciation(asset, debts, todayStr);
+                        if (!dep.isDepreciable || dep.cappedDepreciationAmount <= 0 || !dep.draftAdjustment) {
+                          return null;
+                        }
+                        return (
+                          <button
+                            type="button"
+                            onClick={() => onSyncAssetDepreciation(asset.id)}
+                            title={dep.draftAdjustment.note}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-amber-200 dark:border-amber-800 bg-amber-50 hover:bg-amber-100 dark:bg-amber-950/50 dark:hover:bg-amber-950 text-amber-800 dark:text-amber-300 text-xs font-bold transition cursor-pointer"
+                          >
+                            <RefreshCw className="h-3.5 w-3.5" />
+                            <span>Sinkronkan Penyusutan ({formatterIDR.format(dep.cappedDepreciationAmount)})</span>
+                          </button>
+                        );
+                      })()}
                       <button
                         type="button"
                         onClick={() => openRevalModal(asset)}
@@ -1131,37 +1152,64 @@ export const FixedAssetSection: React.FC<FixedAssetSectionProps> = ({
 
             {(() => {
               const liveVal = calculateFixedAssetValuation(revalAsset, debts, todayStr);
+              const depPreview = calculateAssetDepreciation(revalAsset, debts, todayStr);
               return (
-                <div className="p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/40 grid grid-cols-3 gap-3 text-xs">
-                  <div>
-                    <span className="text-[10px] font-bold uppercase text-slate-500 block">
-                      Basis Diakui
-                    </span>
-                    <span className="font-mono tabular-nums font-bold text-slate-900 dark:text-slate-100">
-                      {formatterIDR.format(liveVal.basisValue)}
-                    </span>
+                <div className="space-y-3">
+                  <div className="p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/40 grid grid-cols-3 gap-3 text-xs">
+                    <div>
+                      <span className="text-[10px] font-bold uppercase text-slate-500 block">
+                        Basis Diakui
+                      </span>
+                      <span className="font-mono tabular-nums font-bold text-slate-900 dark:text-slate-100">
+                        {formatterIDR.format(liveVal.basisValue)}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-[10px] font-bold uppercase text-slate-500 block">
+                        Total Penyesuaian
+                      </span>
+                      <span
+                        className={`font-mono tabular-nums font-bold ${
+                          liveVal.totalNetValueChange >= 0 ? 'text-emerald-600' : 'text-rose-600'
+                        }`}
+                      >
+                        {liveVal.totalNetValueChange >= 0 ? '+' : ''}
+                        {formatterIDR.format(liveVal.totalNetValueChange)}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-[10px] font-bold uppercase text-slate-500 block">
+                        Nilai Buku Kini
+                      </span>
+                      <span className="font-mono tabular-nums font-black text-blue-600 dark:text-blue-400">
+                        {formatterIDR.format(liveVal.currentBookValue)}
+                      </span>
+                    </div>
                   </div>
-                  <div>
-                    <span className="text-[10px] font-bold uppercase text-slate-500 block">
-                      Total Penyesuaian
-                    </span>
-                    <span
-                      className={`font-mono tabular-nums font-bold ${
-                        liveVal.totalNetValueChange >= 0 ? 'text-emerald-600' : 'text-rose-600'
-                      }`}
-                    >
-                      {liveVal.totalNetValueChange >= 0 ? '+' : ''}
-                      {formatterIDR.format(liveVal.totalNetValueChange)}
-                    </span>
-                  </div>
-                  <div>
-                    <span className="text-[10px] font-bold uppercase text-slate-500 block">
-                      Nilai Buku Kini
-                    </span>
-                    <span className="font-mono tabular-nums font-black text-blue-600 dark:text-blue-400">
-                      {formatterIDR.format(liveVal.currentBookValue)}
-                    </span>
-                  </div>
+
+                  {onSyncAssetDepreciation &&
+                    depPreview.isDepreciable &&
+                    depPreview.cappedDepreciationAmount > 0 &&
+                    depPreview.draftAdjustment && (
+                      <div className="p-3.5 rounded-xl border border-amber-200 dark:border-amber-800/80 bg-amber-50/70 dark:bg-amber-950/30 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+                        <div className="space-y-0.5">
+                          <span className="font-bold text-amber-900 dark:text-amber-200 block">
+                            Draft Penyusutan Siap Sinkron ({depPreview.annualRatePct}%/thn · {depPreview.elapsedDays} hari)
+                          </span>
+                          <span className="text-[11px] text-amber-800 dark:text-amber-300 font-mono tabular-nums">
+                            Nominal: -{formatterIDR.format(depPreview.cappedDepreciationAmount)} · Proyeksi Buku: {formatterIDR.format(depPreview.projectedBookValueAfter)}
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => onSyncAssetDepreciation(revalAsset.id)}
+                          className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold transition cursor-pointer whitespace-nowrap shrink-0"
+                        >
+                          <RefreshCw className="h-3.5 w-3.5" />
+                          <span>Sinkronkan Sekarang</span>
+                        </button>
+                      </div>
+                    )}
                 </div>
               );
             })()}

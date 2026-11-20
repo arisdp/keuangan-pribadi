@@ -33,6 +33,7 @@ interface InvestmentTabProps {
   onDeleteFixedAsset?: (id: string) => void;
   onAddFixedAssetAdjustment?: (assetId: string, adjustment: Omit<FixedAssetAdjustment, 'id'>) => void;
   onDeleteFixedAssetAdjustment?: (assetId: string, adjustmentId: string) => void;
+  onSyncFixedAssetDepreciation?: (assetId: string) => void;
   onAddTransaction?: (tx: Omit<Transaction, 'id'> & {
     linkedInvestmentId?: string;
     linkedInvestmentAction?: 'buy' | 'sell';
@@ -61,6 +62,7 @@ export const InvestmentTab: React.FC<InvestmentTabProps> = ({
   onDeleteFixedAsset,
   onAddFixedAssetAdjustment,
   onDeleteFixedAssetAdjustment,
+  onSyncFixedAssetDepreciation,
   onAddTransaction,
 }) => {
   const formatterIDR = new Intl.NumberFormat('id-ID', {
@@ -825,6 +827,7 @@ export const InvestmentTab: React.FC<InvestmentTabProps> = ({
           onDeleteFixedAsset={onDeleteFixedAsset}
           onAddAdjustment={onAddFixedAssetAdjustment}
           onDeleteAdjustment={onDeleteFixedAssetAdjustment}
+          onSyncAssetDepreciation={onSyncFixedAssetDepreciation}
           showCombinedBanner={true}
         />
       )}

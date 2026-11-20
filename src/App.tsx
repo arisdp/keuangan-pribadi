@@ -9,6 +9,8 @@ import {
   applyAccountBalanceChange,
   applyCreditBillPayment,
   applyTransactionsToAccounts,
+  buildBatchSyncedFixedAssetDepreciationAdjustments,
+  buildSyncedFixedAssetDepreciationAdjustment,
   calculateTotalEmergencyFund,
   calculateTotalLiquidCash,
   computePendingYearEndFixedAssetDepreciations,
@@ -1884,6 +1886,96 @@ export default function App() {
     );
   };
 
+  const handleSyncFixedAssetDepreciation = (assetId: string) => {
+    const target =
+      fixedAssets.find((fa) => fa.id === assetId) ||
+      syncKprDebtsToFixedAssets(fixedAssets, debts).find((fa) => fa.id === assetId);
+    if (!target) return;
+
+    const now = new Date();
+    const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const synced = buildSyncedFixedAssetDepreciationAdjustment(target, debts, todayStr, {
+      existingTransactions: transactions,
+    });
+
+    if (!synced.applied || !synced.adjustingTransaction || !synced.adjustment) {
+      showToast({
+        type: 'info',
+        title: 'Tidak Ada Penyusutan Tertunda',
+        message: `Penyusutan untuk "${target.name}" sudah tersinkronisasi sampai tanggal ${todayStr}.`,
+      });
+      return;
+    }
+
+    setFixedAssets((prev) =>
+      prev.some((fa) => fa.id === assetId)
+        ? prev.map((fa) => (fa.id === assetId ? synced.updatedAsset : fa))
+        : [...prev, synced.updatedAsset]
+    );
+    setTransactions((prev) => {
+      if (prev.some((t) => t.id === synced.adjustingTransaction!.id)) return prev;
+      return [synced.adjustingTransaction!, ...prev];
+    });
+    showToast({
+      type: 'success',
+      title: 'Penyusutan Aset Tetap Disinkronkan',
+      message: `Penyusutan "${target.name}" sebesar ${formatCurrencyIDR(synced.adjustment.amount)} (${synced.depreciation.elapsedDays} hr) telah dicatat ke riwayat aset & jurnal penyesuaian.`,
+      duration: 4500,
+    });
+  };
+
+  const handleSyncAllFixedAssetDepreciations = () => {
+    const now = new Date();
+    const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const syncedList = syncKprDebtsToFixedAssets(fixedAssets, debts, todayStr);
+    const batch = buildBatchSyncedFixedAssetDepreciationAdjustments(syncedList, debts, todayStr, {
+      existingTransactions: transactions,
+    });
+
+    if (batch.appliedCount === 0 || batch.newAdjustingTransactions.length === 0) {
+      showToast({
+        type: 'info',
+        title: 'Semua Penyusutan Sudah Sinkron',
+        message: `Tidak ada penyusutan tertunda untuk aset tetap bersaldo susut sampai tanggal ${todayStr}.`,
+      });
+      return;
+    }
+
+    const updatedById = new Map<string, FixedAsset>();
+    batch.updatedAssets.forEach((asset) => {
+      updatedById.set(asset.id, asset);
+    });
+    const modifiedIds = new Set<string>(
+      batch.newAdjustingTransactions
+        .map((tx) => tx.linkedFixedAssetId)
+        .filter((id): id is string => Boolean(id))
+    );
+
+    setFixedAssets((prev) => {
+      const existingIds = new Set(prev.map((a) => a.id));
+      const merged = prev.map((a) => (modifiedIds.has(a.id) ? updatedById.get(a.id) || a : a));
+      batch.updatedAssets.forEach((a) => {
+        if (modifiedIds.has(a.id) && !existingIds.has(a.id)) {
+          merged.push(a);
+        }
+      });
+      return merged;
+    });
+
+    setTransactions((prev) => {
+      const existingIds = new Set(prev.map((t) => t.id));
+      const toAdd = batch.newAdjustingTransactions.filter((t) => !existingIds.has(t.id));
+      return toAdd.length > 0 ? [...toAdd, ...prev] : prev;
+    });
+
+    showToast({
+      type: 'success',
+      title: `${batch.appliedCount} Jurnal Penyusutan Diposting`,
+      message: `Total penyusutan sebesar ${formatCurrencyIDR(batch.totalDepreciationPosted)} telah dicatat ke jurnal non-kas (Dr 5960 / Cr 1690) dan nilai buku diperbarui.`,
+      duration: 5000,
+    });
+  };
+
   // Debt tracker handlers
 
   const handleAddDebt = (
@@ -2806,6 +2898,8 @@ export default function App() {
                     onUpdateSavingsGoal={handleUpdateSavingsGoal}
                     onDeleteSavingsGoal={handleDeleteSavingsGoal}
                     onDepositSavingsGoal={handleDepositSavingsGoal}
+                    onSyncFixedAssetDepreciation={handleSyncFixedAssetDepreciation}
+                    onSyncAllFixedAssetDepreciations={handleSyncAllFixedAssetDepreciations}
                     onQuickAction={(tab) => {
                       setActiveTab(tab);
                       scrollWorkspaceToTop();
@@ -2905,6 +2999,7 @@ export default function App() {
                     onDeleteFixedAsset={handleDeleteFixedAsset}
                     onAddFixedAssetAdjustment={handleAddFixedAssetAdjustment}
                     onDeleteFixedAssetAdjustment={handleDeleteFixedAssetAdjustment}
+                    onSyncFixedAssetDepreciation={handleSyncFixedAssetDepreciation}
                     onAddTransaction={handleAddTransaction}
                   />
                 )}
