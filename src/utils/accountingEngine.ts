@@ -2959,6 +2959,9 @@ export interface WeeklyFinancialPrioritiesResult {
   topCategoryAmount: number;
   anomalyCount: number;
   weekRangeLabel: string;
+  weeklyTrendLabel: 'Terkendali' | 'Perlu Penyesuaian' | 'Waspada Lonjakan';
+  weeklyTrendSeverity: WeeklyPrioritySeverity;
+  weeklyTrendScore: string;
 }
 
 function shiftDateStringDays(baseDateStr: string, deltaDays: number): string {
@@ -3421,6 +3424,23 @@ export function calculateWeeklyFinancialPriorities(params: {
       rank: (idx + 1) as 1 | 2 | 3,
     }));
 
+  const highCount = sortedTop3.filter((p) => p.severity === 'high').length;
+  const mediumCount = sortedTop3.filter((p) => p.severity === 'medium').length;
+
+  let weeklyTrendLabel: 'Terkendali' | 'Perlu Penyesuaian' | 'Waspada Lonjakan' = 'Terkendali';
+  let weeklyTrendSeverity: WeeklyPrioritySeverity = 'positive';
+  let weeklyTrendScore = 'Disiplin & Terkendali';
+
+  if (highCount >= 2 || (highCount === 1 && weekDeltaPct >= 25 && weekDeltaAmount >= 250000)) {
+    weeklyTrendLabel = 'Waspada Lonjakan';
+    weeklyTrendSeverity = 'high';
+    weeklyTrendScore = 'Butuh Tindakan Segera';
+  } else if (highCount === 1 || mediumCount >= 2) {
+    weeklyTrendLabel = 'Perlu Penyesuaian';
+    weeklyTrendSeverity = 'medium';
+    weeklyTrendScore = 'Perlu Pengendalian';
+  }
+
   return {
     priorities: sortedTop3,
     thisWeekExpense,
@@ -3434,6 +3454,194 @@ export function calculateWeeklyFinancialPriorities(params: {
     topCategoryAmount,
     anomalyCount,
     weekRangeLabel,
+    weeklyTrendLabel,
+    weeklyTrendSeverity,
+    weeklyTrendScore,
   };
 }
+
+export interface MonthlyIncomeCategoryBreakdown {
+  category: string;
+  amount: number;
+  percentage: number;
+}
+
+export interface MonthlyIncomeStatementPoint {
+  monthKey: string;
+  month: number;
+  year: number;
+  monthLabel: string;
+  fullMonthLabel: string;
+  totalIncome: number;
+  totalExpense: number;
+  netProfitLoss: number;
+  marginPct: number;
+  kprInterestExpense: number;
+  txCount: number;
+  incomeCategories: MonthlyIncomeCategoryBreakdown[];
+  expenseCategories: MonthlyIncomeCategoryBreakdown[];
+}
+
+export interface MonthlyIncomeStatementSeriesResult {
+  months: MonthlyIncomeStatementPoint[];
+  totalIncome6M: number;
+  totalExpense6M: number;
+  netProfitLoss6M: number;
+  avgMarginPct6M: number;
+  surplusMonthsCount: number;
+  deficitMonthsCount: number;
+}
+
+const FULL_MONTHS_ID = [
+  'Januari',
+  'Februari',
+  'Maret',
+  'April',
+  'Mei',
+  'Juni',
+  'Juli',
+  'Agustus',
+  'September',
+  'Oktober',
+  'November',
+  'Desember',
+];
+
+/**
+ * Menghitung Laporan Laba-Rugi bulanan selama N bulan terakhir (default 6 bulan)
+ * menggunakan klasifikasi operasional standar (memisahkan transfer internal & pokok utang,
+ * serta memasukkan porsi bunga KPR sebagai beban operasional).
+ */
+export function calculateMonthlyIncomeStatementSeries(
+  transactions: Transaction[],
+  kprCoaMapping?: KprCoaMappingConfig,
+  monthsBack: number = 6
+): MonthlyIncomeStatementSeriesResult {
+  const safeTxs = Array.isArray(transactions) ? transactions : [];
+  const count = Math.max(1, Math.min(24, Math.round(monthsBack)));
+  const now = new Date();
+  const baseYear = now.getFullYear();
+  const baseMonth = now.getMonth();
+
+  const bucketMap = new Map<string, Transaction[]>();
+  const orderedSlots: Array<{
+    monthKey: string;
+    month: number;
+    year: number;
+    monthLabel: string;
+    fullMonthLabel: string;
+  }> = [];
+
+  for (let i = count - 1; i >= 0; i--) {
+    const dt = new Date(baseYear, baseMonth - i, 1);
+    const y = dt.getFullYear();
+    const mIdx = dt.getMonth();
+    const monthKey = `${y}-${String(mIdx + 1).padStart(2, '0')}`;
+    orderedSlots.push({
+      monthKey,
+      month: mIdx + 1,
+      year: y,
+      monthLabel: `${SHORT_MONTHS_ID[mIdx]} '${String(y).slice(-2)}`,
+      fullMonthLabel: `${FULL_MONTHS_ID[mIdx]} ${y}`,
+    });
+    bucketMap.set(monthKey, []);
+  }
+
+  for (const tx of safeTxs) {
+    if (!tx || !tx.date) continue;
+    const norm = normalizeLedgerDateYYYYMMDD(tx.date);
+    if (!norm) continue;
+    const mKey = norm.slice(0, 7);
+    const bucket = bucketMap.get(mKey);
+    if (bucket) {
+      bucket.push(tx);
+    }
+  }
+
+  const months: MonthlyIncomeStatementPoint[] = orderedSlots.map((slot) => {
+    const monthTxs = bucketMap.get(slot.monthKey) || [];
+    const summary = calculateIncomeStatementSummary(monthTxs);
+
+    const incomeMap: Record<string, number> = {};
+    const expenseMap: Record<string, number> = {};
+
+    for (const tx of monthTxs) {
+      const amt = normalizeAbsAmount(tx.amount);
+      if (isOperatingIncome(tx)) {
+        const cat = tx.category || 'Pendapatan Lainnya';
+        incomeMap[cat] = (incomeMap[cat] || 0) + amt;
+      } else if (isOperatingExpense(tx)) {
+        const cat = tx.category || 'Pengeluaran Lainnya';
+        expenseMap[cat] = (expenseMap[cat] || 0) + amt;
+      } else if (classifyTransaction(tx) === 'debt_principal_pay' && tx.linkedKprBreakdown) {
+        const interestPart = Math.max(0, Number(tx.linkedKprBreakdown.interestPart) || 0);
+        if (interestPart > 0) {
+          const coaCode =
+            tx.linkedKprBreakdown.interestCoaCode || kprCoaMapping?.interestExpenseCode || '5810';
+          const baseCat =
+            tx.linkedKprBreakdown.interestCategory ||
+            kprCoaMapping?.interestExpenseCategory ||
+            'Beban Bunga KPR';
+          const interestCat = `${baseCat} [${coaCode}]`;
+          expenseMap[interestCat] = (expenseMap[interestCat] || 0) + interestPart;
+        }
+      }
+    }
+
+    const totalIncome = summary.operatingIncome;
+    const totalExpense = summary.operatingExpense;
+    const netProfitLoss = totalIncome - totalExpense;
+    const marginPct = totalIncome > 0 ? (netProfitLoss / totalIncome) * 100 : 0;
+
+    const incomeCategories: MonthlyIncomeCategoryBreakdown[] = Object.entries(incomeMap)
+      .map(([category, amount]) => ({
+        category,
+        amount,
+        percentage: totalIncome > 0 ? (amount / totalIncome) * 100 : 0,
+      }))
+      .sort((a, b) => b.amount - a.amount);
+
+    const expenseCategories: MonthlyIncomeCategoryBreakdown[] = Object.entries(expenseMap)
+      .map(([category, amount]) => ({
+        category,
+        amount,
+        percentage: totalExpense > 0 ? (amount / totalExpense) * 100 : 0,
+      }))
+      .sort((a, b) => b.amount - a.amount);
+
+    return {
+      monthKey: slot.monthKey,
+      month: slot.month,
+      year: slot.year,
+      monthLabel: slot.monthLabel,
+      fullMonthLabel: slot.fullMonthLabel,
+      totalIncome,
+      totalExpense,
+      netProfitLoss,
+      marginPct,
+      kprInterestExpense: summary.kprInterestExpense,
+      txCount: monthTxs.length,
+      incomeCategories,
+      expenseCategories,
+    };
+  });
+
+  const totalIncome6M = months.reduce((s, m) => s + m.totalIncome, 0);
+  const totalExpense6M = months.reduce((s, m) => s + m.totalExpense, 0);
+  const netProfitLoss6M = totalIncome6M - totalExpense6M;
+  const avgMarginPct6M = totalIncome6M > 0 ? (netProfitLoss6M / totalIncome6M) * 100 : 0;
+  const surplusMonthsCount = months.filter((m) => m.netProfitLoss >= 0 && m.txCount > 0).length;
+  const deficitMonthsCount = months.filter((m) => m.netProfitLoss < 0).length;
+
+  return {
+    months,
+    totalIncome6M,
+    totalExpense6M,
+    netProfitLoss6M,
+    avgMarginPct6M,
+    surplusMonthsCount,
+    deficitMonthsCount,
+  };
+}
+
 

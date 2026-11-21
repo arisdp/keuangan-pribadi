@@ -1418,7 +1418,7 @@ export const TrendNetWorthChart: React.FC<TrendNetWorthChartProps> = ({
   );
 };
 
-export interface WawasanAiPanelProps {
+export interface WawasanAIProps {
   result: WeeklyFinancialPrioritiesResult;
   lastAnalyzedAt: string;
   isRefreshing: boolean;
@@ -1427,7 +1427,7 @@ export interface WawasanAiPanelProps {
   formatValue: (amount: number, isSensitive?: boolean) => string;
 }
 
-export const WawasanAiPanel: React.FC<WawasanAiPanelProps> = ({
+export const WawasanAI: React.FC<WawasanAIProps> = ({
   result,
   lastAnalyzedAt,
   isRefreshing,
@@ -1442,6 +1442,13 @@ export const WawasanAiPanel: React.FC<WawasanAiPanelProps> = ({
       : result.weekDeltaAmount < 0
       ? 'text-emerald-700'
       : 'text-slate-700';
+
+  const trendScoreTone =
+    result.weeklyTrendSeverity === 'high'
+      ? 'text-rose-700'
+      : result.weeklyTrendSeverity === 'medium'
+      ? 'text-amber-700'
+      : 'text-emerald-700';
 
   return (
     <motion.section
@@ -1466,9 +1473,18 @@ export const WawasanAiPanel: React.FC<WawasanAiPanelProps> = ({
         </div>
 
         <div className="flex flex-wrap items-center justify-between lg:justify-end gap-4 shrink-0">
-          {/* Ringkasan Perbandingan 7 Hari */}
-          <div className="flex items-center gap-4 text-xs">
+          {/* Skor Tren Mingguan & Ringkasan Perbandingan 7 Hari */}
+          <div className="flex flex-wrap items-center gap-4 text-xs">
             <div>
+              <span className="text-[11px] font-medium text-slate-500 block">
+                Skor Tren Mingguan
+              </span>
+              <span className={`font-bold ${trendScoreTone}`}>
+                {result.weeklyTrendLabel} ·{' '}
+                <span className="font-medium text-slate-600">{result.weeklyTrendScore}</span>
+              </span>
+            </div>
+            <div className="border-l border-slate-200 pl-4">
               <span className="text-[11px] font-medium text-slate-500 block">
                 Pengeluaran 7 Hari
               </span>
@@ -1497,7 +1513,7 @@ export const WawasanAiPanel: React.FC<WawasanAiPanelProps> = ({
             className="inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold transition cursor-pointer disabled:opacity-60 whitespace-nowrap shrink-0"
           >
             <RefreshCw className={`h-3.5 w-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
-            <span>{isRefreshing ? 'Menganalisis...' : 'Analisis Ulang'}</span>
+            <span>{isRefreshing ? 'Menganalisis...' : 'Refresh Analisis'}</span>
           </button>
         </div>
       </div>
@@ -1577,6 +1593,21 @@ export const WawasanAiPanel: React.FC<WawasanAiPanelProps> = ({
           })}
         </div>
       )}
+
+      {/* Consolidated Footer Shortcut (absorbs AI Intelligent Advisor CTA) */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-1 text-xs">
+        <p className="text-slate-500 font-medium">
+          Butuh audit pengeluaran mendalam, rekomendasi alokasi anggaran khusus, dan strategi pelunasan utang?
+        </p>
+        <button
+          type="button"
+          onClick={() => onQuickAction('ai-analysis')}
+          className="inline-flex items-center gap-1.5 font-bold text-slate-900 hover:text-blue-700 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+        >
+          <span>Buka Analisis AI Lengkap</span>
+          <ArrowRight className="h-3.5 w-3.5" />
+        </button>
+      </div>
     </motion.section>
   );
 };
@@ -2944,7 +2975,7 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
       />
 
       {/* PANEL WAWASAN AI TERKONSOLIDASI (3 PRIORITAS MINGGU INI) */}
-      <WawasanAiPanel
+      <WawasanAI
         result={weeklyPrioritiesResult}
         lastAnalyzedAt={lastAnalyzedAt}
         isRefreshing={isRefreshingInsights}
@@ -5238,61 +5269,45 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
         </div>
       </div>
 
-      {/* 4. Rekening Likuid & Quick Transaksi */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* List of Accounts */}
-        <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm lg:col-span-2">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="font-semibold text-slate-800 text-sm uppercase tracking-wide">Saldo Akun Keuangan</h3>
-            <button 
-              onClick={() => onQuickAction('budget')}
-              className="text-xs text-blue-600 hover:text-blue-800 font-medium"
+      {/* 4. Saldo Akun Keuangan */}
+      <div className="bg-white p-6 rounded-2xl border border-slate-200 space-y-4">
+        <div className="flex items-center justify-between gap-3">
+          <h3 className="font-semibold text-slate-800 text-sm uppercase tracking-wide">
+            Saldo Akun Keuangan
+          </h3>
+          <button
+            type="button"
+            onClick={() => onQuickAction('accounts')}
+            className="inline-flex items-center gap-1 text-xs text-slate-900 hover:text-blue-700 font-bold cursor-pointer whitespace-nowrap"
+          >
+            <span>Kelola Rekening</span>
+            <ArrowRight className="h-3.5 w-3.5" />
+          </button>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+          {accounts.map((acc) => (
+            <div
+              key={acc.id}
+              className="flex items-center justify-between gap-3 p-3.5 bg-slate-50 rounded-xl hover:bg-slate-100/80 transition border border-slate-200/80"
             >
-              Ubah Saldo Awal →
-            </button>
-          </div>
-          <div className="space-y-3">
-            {accounts.map(acc => (
-              <div key={acc.id} className="flex items-center justify-between p-3 bg-slate-50 rounded-lg hover:bg-slate-100 transition border border-slate-100">
-                <div className="flex items-center space-x-3">
-                  <div className="p-2 bg-white rounded-lg border border-slate-100 text-slate-600 shadow-xs">
-                    <Wallet className="h-4 w-4" />
-                  </div>
-                  <div>
-                    <h4 className="font-semibold text-slate-800 text-sm">{acc.name}</h4>
-                    <span className="text-[10px] uppercase font-bold text-slate-400 px-1.5 py-0.5 bg-slate-200 rounded">
-                      {acc.type}
-                    </span>
-                  </div>
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="p-2 bg-white rounded-lg border border-slate-200 text-slate-600 shrink-0">
+                  <Wallet className="h-4 w-4" />
                 </div>
-                <div className="text-right">
-                  <span className="font-bold text-slate-800 text-sm">
-                    {formatValue(acc.currentBalance)}
+                <div className="min-w-0">
+                  <h4 className="font-semibold text-slate-800 text-sm truncate">{acc.name}</h4>
+                  <span className="text-[11px] uppercase font-semibold text-slate-500">
+                    {acc.type}
                   </span>
                 </div>
               </div>
-            ))}
-          </div>
-        </div>
-
-        {/* Quick Recommendation Prompt Box */}
-        <div className="bg-gradient-to-br from-slate-900 to-slate-800 text-white p-6 rounded-xl flex flex-col justify-between shadow-md">
-          <div className="space-y-3">
-            <div className="inline-flex items-center gap-2 bg-blue-500/20 text-blue-300 px-3 py-1 rounded-full text-xs font-semibold">
-              <ShieldAlert className="h-3 w-3 animate-pulse" />
-              AI Intelligent Advisor
+              <div className="text-right shrink-0">
+                <span className="font-mono tabular-nums font-bold text-slate-900 text-sm">
+                  {formatValue(acc.currentBalance)}
+                </span>
+              </div>
             </div>
-            <h3 className="text-lg font-bold tracking-tight">Kesehatan Keuangan Anda Sedang Dianalisis</h3>
-            <p className="text-xs text-slate-300 leading-relaxed">
-              Mulai analisis pengeluaran otomatis bertenaga AI Gemini untuk mendapatkan tips penghematan, saran anggaran khusus, serta taktik pelunasan hutang optimal.
-            </p>
-          </div>
-          <button
-            onClick={() => onQuickAction('ai-analysis')}
-            className="mt-6 flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white font-bold py-2.5 px-4 rounded-lg transition text-xs cursor-pointer shadow-sm"
-          >
-            Mulai Analisis Keuangan AI <ArrowRight className="h-3 w-3" />
-          </button>
+          ))}
         </div>
       </div>
 
