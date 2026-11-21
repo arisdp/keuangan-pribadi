@@ -2216,35 +2216,36 @@ export interface NetWorthHistoryPoint {
   status: 'Sehat' | 'Waspada' | 'Kritis';
 }
 
-export function calculateNetWorthHistory30Days(
+export interface NetWorthMonthlyTrendPoint extends NetWorthHistoryPoint {
+  monthKey: string;
+  monthLabel: string;
+  cutoffDate: string;
+  deltaFromPrev: number;
+  deltaPctFromPrev: number;
+}
+
+function rollbackAssetsAndDebtsAtDate(
   transactions: Transaction[],
-  accounts: Account[],
+  accountTypeMap: Map<string, Account>,
+  cutoffDateStr: string,
+  systemTodayStr: string,
   currentAssets: number,
-  currentDebts: number,
-  systemTodayStr: string
-): NetWorthHistoryPoint[] {
-  const accountTypeMap = new Map<string, Account>();
-  (accounts || []).forEach((a) => accountTypeMap.set(a.id, a));
+  currentDebts: number
+): {
+  netWorth: number;
+  assets: number;
+  debts: number;
+  ratio: number;
+  status: 'Sehat' | 'Waspada' | 'Kritis';
+} {
+  let rolledAssets = currentAssets;
+  let rolledDebts = currentDebts;
 
-  const today = new Date(`${systemTodayStr}T00:00:00`);
-  const points: NetWorthHistoryPoint[] = [];
-
-  for (let i = 29; i >= 0; i--) {
-    const d = new Date(today);
-    d.setDate(today.getDate() - i);
-    const y = d.getFullYear();
-    const m = String(d.getMonth() + 1).padStart(2, '0');
-    const day = String(d.getDate()).padStart(2, '0');
-    const dateStr = `${y}-${m}-${day}`;
-
-    const txsAfter = (transactions || []).filter(
-      (tx) => tx.date > dateStr && tx.date <= systemTodayStr
-    );
-
-    let rolledAssets = currentAssets;
-    let rolledDebts = currentDebts;
-
-    txsAfter.forEach((tx) => {
+  if (cutoffDateStr < systemTodayStr) {
+    for (const tx of transactions) {
+      if (!tx || !tx.date || tx.date <= cutoffDateStr || tx.date > systemTodayStr) {
+        continue;
+      }
       const amt = normalizeAbsAmount(tx.amount);
       const nature = classifyTransaction(tx);
       const acc = accountTypeMap.get(tx.accountId);
@@ -2254,7 +2255,6 @@ export function calculateNetWorthHistory30Days(
         case 'operating_income':
         case 'equity_injection':
           if (onCreditCard) {
-            // Refund/credit ke kartu kredit mengurangi tagihan utang CC
             rolledDebts += amt;
           } else {
             rolledAssets -= amt;
@@ -2262,14 +2262,12 @@ export function calculateNetWorthHistory30Days(
           break;
         case 'operating_expense':
           if (onCreditCard) {
-            // Belanja kartu kredit meningkatkan utang CC saat terjadi; rollback menguranginya
             rolledDebts -= amt;
           } else {
             rolledAssets += amt;
           }
           break;
         case 'debt_principal_pay': {
-          // Membayar pokok utang mengurangi kas & mengurangi pokok utang; porsi bunga mengurangi kas/Net Worth
           const principalPart = tx.linkedKprBreakdown
             ? Math.max(0, Number(tx.linkedKprBreakdown.principalPart) || 0)
             : amt;
@@ -2288,53 +2286,166 @@ export function calculateNetWorthHistory30Days(
           break;
         case 'internal_transfer':
           if (onCreditCard && tx.type === 'income') {
-            // Transfer pembayaran ke CC menurunkan utang CC & menurunkan kas bank -> netral terhadap Net Worth
             rolledAssets += amt;
             rolledDebts += amt;
           } else if (onCreditCard && tx.type === 'expense') {
             rolledAssets -= amt;
             rolledDebts -= amt;
           }
-          // Transfer antar akun likuid berdampak 0 pada total aset & utang
           break;
         case 'emergency_fund_transfer':
         case 'investment_buy':
         case 'investment_sell':
-          // Pemindahan antar pos aset (Kas <-> Dana Darurat / Investasi) berdampak 0 pada Total Aset & Net Worth
           break;
         case 'fixed_asset_buy':
           if (onCreditCard) {
             rolledAssets -= amt;
             rolledDebts -= amt;
           }
-          // Pembelian tunai dari kas/bank (Kas <-> Aset Tetap) berdampak 0 pada Total Aset & Net Worth
           break;
         case 'non_cash_adjustment':
           if (tx.adjustmentType === 'debt_interest_accrual') {
             rolledDebts -= amt;
+          } else if (tx.type === 'income') {
+            rolledAssets -= amt;
           } else {
             rolledAssets += amt;
           }
           break;
       }
-    });
-
-    const rolledNetWorth = rolledAssets - rolledDebts;
-    const ratio = rolledAssets > 0 ? (rolledDebts / rolledAssets) * 100 : rolledDebts > 0 ? 100 : 0;
-    let status: 'Sehat' | 'Waspada' | 'Kritis' = 'Sehat';
-    if (rolledDebts > 0) {
-      if (ratio <= 35) status = 'Sehat';
-      else if (ratio <= 75) status = 'Waspada';
-      else status = 'Kritis';
     }
+  }
+
+  const netWorth = rolledAssets - rolledDebts;
+  const ratio = rolledAssets > 0 ? (rolledDebts / rolledAssets) * 100 : rolledDebts > 0 ? 100 : 0;
+  let status: 'Sehat' | 'Waspada' | 'Kritis' = 'Sehat';
+  if (rolledDebts > 0) {
+    if (ratio <= 35) status = 'Sehat';
+    else if (ratio <= 75) status = 'Waspada';
+    else status = 'Kritis';
+  }
+
+  return {
+    netWorth,
+    assets: rolledAssets,
+    debts: rolledDebts,
+    ratio,
+    status,
+  };
+}
+
+export function calculateNetWorthHistory30Days(
+  transactions: Transaction[],
+  accounts: Account[],
+  currentAssets: number,
+  currentDebts: number,
+  systemTodayStr: string
+): NetWorthHistoryPoint[] {
+  const accountTypeMap = new Map<string, Account>();
+  (accounts || []).forEach((a) => accountTypeMap.set(a.id, a));
+
+  const safeTxs = Array.isArray(transactions) ? transactions : [];
+  const today = new Date(`${systemTodayStr}T00:00:00`);
+  const points: NetWorthHistoryPoint[] = [];
+
+  for (let i = 29; i >= 0; i--) {
+    const d = new Date(today);
+    d.setDate(today.getDate() - i);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    const dateStr = `${y}-${m}-${day}`;
+
+    const snapshot = rollbackAssetsAndDebtsAtDate(
+      safeTxs,
+      accountTypeMap,
+      dateStr,
+      systemTodayStr,
+      currentAssets,
+      currentDebts
+    );
 
     points.push({
       date: d.toLocaleDateString('id-ID', { day: 'numeric', month: 'short' }),
-      netWorth: rolledNetWorth,
-      assets: rolledAssets,
-      debts: rolledDebts,
-      ratio,
-      status,
+      ...snapshot,
+    });
+  }
+
+  return points;
+}
+
+const SHORT_MONTHS_ID = [
+  'Jan',
+  'Feb',
+  'Mar',
+  'Apr',
+  'Mei',
+  'Jun',
+  'Jul',
+  'Agu',
+  'Sep',
+  'Okt',
+  'Nov',
+  'Des',
+];
+
+/**
+ * Menghitung tren bulanan Total Net Worth, Total Aset, dan Total Kewajiban selama 6 bulan terakhir
+ * menggunakan mesin rollback transaksi terpadu agar sinkron 100% dengan posisi Neraca saat ini.
+ */
+export function calculateNetWorthHistory6Months(
+  transactions: Transaction[],
+  accounts: Account[],
+  currentAssets: number,
+  currentDebts: number,
+  systemTodayStr: string
+): NetWorthMonthlyTrendPoint[] {
+  const accountTypeMap = new Map<string, Account>();
+  (accounts || []).forEach((a) => accountTypeMap.set(a.id, a));
+
+  const safeTxs = Array.isArray(transactions) ? transactions : [];
+  const safeTodayStr =
+    normalizeLedgerDateYYYYMMDD(systemTodayStr) || new Date().toISOString().split('T')[0];
+  const baseYear = parseInt(safeTodayStr.slice(0, 4), 10);
+  const baseMonth = parseInt(safeTodayStr.slice(5, 7), 10); // 1..12
+
+  const points: NetWorthMonthlyTrendPoint[] = [];
+
+  for (let i = 5; i >= 0; i--) {
+    const refDate = new Date(baseYear, baseMonth - 1 - i, 1);
+    const year = refDate.getFullYear();
+    const monthIdx = refDate.getMonth(); // 0..11
+    const monthKey = `${year}-${String(monthIdx + 1).padStart(2, '0')}`;
+    const monthLabel = `${SHORT_MONTHS_ID[monthIdx]} '${String(year).slice(-2)}`;
+
+    const lastDay = new Date(year, monthIdx + 1, 0).getDate();
+    const monthEndStr = `${monthKey}-${String(lastDay).padStart(2, '0')}`;
+    const cutoffDate = i === 0 ? safeTodayStr : monthEndStr < safeTodayStr ? monthEndStr : safeTodayStr;
+
+    const snapshot = rollbackAssetsAndDebtsAtDate(
+      safeTxs,
+      accountTypeMap,
+      cutoffDate,
+      safeTodayStr,
+      currentAssets,
+      currentDebts
+    );
+
+    const prevNetWorth = points.length > 0 ? points[points.length - 1].netWorth : snapshot.netWorth;
+    const deltaFromPrev = points.length > 0 ? snapshot.netWorth - prevNetWorth : 0;
+    const deltaPctFromPrev =
+      points.length > 0 && Math.abs(prevNetWorth) > 0
+        ? (deltaFromPrev / Math.abs(prevNetWorth)) * 100
+        : 0;
+
+    points.push({
+      date: monthLabel,
+      monthKey,
+      monthLabel,
+      cutoffDate,
+      deltaFromPrev,
+      deltaPctFromPrev,
+      ...snapshot,
     });
   }
 

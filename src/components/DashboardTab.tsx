@@ -4,21 +4,23 @@ import { Transaction, Account, CategoryBudget, Debt, EmergencyFundTransaction, F
 import { FormattedNumberInput } from './FormattedNumberInput';
 import { TaxCalculatorCard } from './TaxCalculatorCard';
 import { DashboardFinancialHealthPanel } from './DashboardFinancialHealthPanel';
-import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
-import { TrendingUp, TrendingDown, Wallet, ShieldAlert, CreditCard, PiggyBank, ArrowRight, CheckCircle2, AlertTriangle, Calendar, ChevronLeft, ChevronRight, ChevronDown, ArrowUpRight, ArrowDownRight, Info, Eye, EyeOff, Percent, ArrowDown, Sparkles, Lightbulb, Target, Plus, Trash2, Edit2, Clock, Bell, DollarSign, X, RefreshCw, Activity, BarChart3, Table, GitCommit, Scale, FileCheck, ShieldCheck, Building2 } from 'lucide-react';
+import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell, ReferenceLine } from 'recharts';
+import { TrendingUp, TrendingDown, Wallet, ShieldAlert, CreditCard, PiggyBank, ArrowRight, CheckCircle2, AlertTriangle, Calendar, ChevronLeft, ChevronRight, ArrowUpRight, ArrowDownRight, Info, Eye, EyeOff, Percent, ArrowDown, Sparkles, Lightbulb, Target, Plus, Trash2, Edit2, Clock, Bell, DollarSign, X, RefreshCw, Activity, BarChart3, Table, GitCommit, Scale, FileCheck, ShieldCheck, Building2 } from 'lucide-react';
 import {
+  BatchFixedAssetDepreciationResult,
+  FixedAssetDepreciationResult,
+  FixedAssetValuationResult,
+  NetWorthMonthlyTrendPoint,
   calculateAssetDepreciation,
   calculateCombinedPortfolioWealth,
   calculateFixedAssetValuation,
   calculateTotalLiquidCash,
   calculateCreditPaylaterBills,
   calculateTotalEmergencyFund,
-  calculateTotalInvestments,
-  calculateTotalFixedAssets,
   calculateTotalDebts,
   calculateMonthlyDebtService,
   calculateIncomeStatementSummary,
-  calculateNetWorthHistory30Days,
+  calculateNetWorthHistory6Months,
   getAccountCreditBill,
   getCreditAccounts,
   getCreditOverlimitAmount,
@@ -53,6 +55,945 @@ const cardVariants = {
       ease: 'easeOut' as const,
     },
   },
+};
+
+export type NetWorthModalCategory = 'liquid' | 'investment' | 'fixed' | 'debt';
+
+export interface FixedAssetModalRow {
+  asset: FixedAsset;
+  valuation: FixedAssetValuationResult;
+  depreciation?: FixedAssetDepreciationResult;
+}
+
+export interface NeracaKekayaanBersihProps {
+  netWorth: number;
+  totalCurrentAssets: number;
+  totalDebts: number;
+  totalLiquidAssets: number;
+  totalEmergency: number;
+  totalLiquidWithEmergency: number;
+  totalInvestments: number;
+  totalInvestmentGain: number;
+  totalFixedAssets: number;
+  totalFixedAssetBasis: number;
+  totalFixedAssetNetChange: number;
+  loanDebtsOnly: number;
+  totalCreditCardBills: number;
+  liquidAccounts: Account[];
+  creditCardAndPaylaterAccounts: Account[];
+  investments: InvestmentAsset[];
+  fixedAssetRows: FixedAssetModalRow[];
+  debts: Debt[];
+  batchAssetDepreciation: BatchFixedAssetDepreciationResult;
+  healthStatus: 'Sehat' | 'Waspada' | 'Kritis';
+  healthColor: string;
+  healthRatioText: string;
+  formatValue: (amount: number, isSensitive?: boolean) => string;
+  onSyncFixedAssetDepreciation?: (assetId: string) => void;
+  onSyncAllFixedAssetDepreciations?: () => void;
+  onQuickAction: (tab: string) => void;
+}
+
+export const NeracaKekayaanBersih: React.FC<NeracaKekayaanBersihProps> = ({
+  netWorth,
+  totalCurrentAssets,
+  totalDebts,
+  totalLiquidAssets,
+  totalEmergency,
+  totalLiquidWithEmergency,
+  totalInvestments,
+  totalInvestmentGain,
+  totalFixedAssets,
+  totalFixedAssetBasis,
+  totalFixedAssetNetChange,
+  loanDebtsOnly,
+  totalCreditCardBills,
+  liquidAccounts,
+  creditCardAndPaylaterAccounts,
+  investments,
+  fixedAssetRows,
+  debts,
+  batchAssetDepreciation,
+  healthStatus,
+  healthColor,
+  healthRatioText,
+  formatValue,
+  onSyncFixedAssetDepreciation,
+  onSyncAllFixedAssetDepreciations,
+  onQuickAction,
+}) => {
+  const [activeNetWorthModal, setActiveNetWorthModal] =
+    React.useState<NetWorthModalCategory | null>(null);
+
+  React.useEffect(() => {
+    if (!activeNetWorthModal) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setActiveNetWorthModal(null);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [activeNetWorthModal]);
+
+  const assetSum = Math.max(0, totalCurrentAssets);
+  const liquidPct = assetSum > 0 ? (totalLiquidWithEmergency / assetSum) * 100 : 0;
+  const investPct = assetSum > 0 ? (totalInvestments / assetSum) * 100 : 0;
+  const fixedPct = assetSum > 0 ? (totalFixedAssets / assetSum) * 100 : 0;
+
+  return (
+    <motion.div
+      variants={cardVariants}
+      className="bg-white rounded-2xl border border-slate-200 p-5 sm:p-6 space-y-5"
+    >
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-4">
+        <div className="flex items-start gap-3">
+          <div className="p-2.5 rounded-xl bg-slate-900 text-white shrink-0">
+            <Scale className="h-5 w-5" />
+          </div>
+          <div>
+            <h2 className="text-base font-extrabold text-slate-900 tracking-tight">
+              Neraca Kekayaan Bersih
+            </h2>
+            <p className="text-xs text-slate-500 font-medium mt-0.5">
+              Real-time · Kas Likuid · Investasi · Aset Tetap Setelah Penyusutan − Liabilitas
+            </p>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-3 shrink-0">
+          <span
+            className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs font-bold ${healthColor}`}
+          >
+            {healthStatus === 'Sehat' ? (
+              <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+            ) : (
+              <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+            )}
+            <span>{healthStatus}</span>
+            <span aria-hidden="true">·</span>
+            <span className="font-mono tabular-nums">{healthRatioText}</span>
+          </span>
+
+          <button
+            type="button"
+            onClick={() => onQuickAction('reports')}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold transition cursor-pointer whitespace-nowrap shrink-0"
+          >
+            <span>Laporan Neraca</span>
+            <ArrowRight className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      </div>
+
+      {/* Hero Net Worth Figure & Asset Composition Bar */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-center">
+        <div className="lg:col-span-5 space-y-1.5">
+          <span className="text-xs font-bold text-slate-500 block">
+            Total Kekayaan Bersih (Net Worth)
+          </span>
+          <div
+            className={`text-2xl sm:text-3xl font-black font-mono tabular-nums tracking-tight ${
+              netWorth >= 0 ? 'text-slate-900' : 'text-rose-600'
+            }`}
+          >
+            {formatValue(netWorth)}
+          </div>
+          <p className="text-xs text-slate-500 font-medium font-mono tabular-nums">
+            Total Aset {formatValue(totalCurrentAssets)} − Kewajiban {formatValue(totalDebts)}
+          </p>
+        </div>
+
+        <div className="lg:col-span-7 space-y-2.5">
+          <div className="flex items-center justify-between text-xs text-slate-600 font-medium">
+            <span>Komposisi Bruto Aset Aktif</span>
+            <span className="font-mono tabular-nums font-bold text-slate-900">
+              {formatValue(totalCurrentAssets)}
+            </span>
+          </div>
+          <div className="w-full h-2.5 rounded-full bg-slate-100 overflow-hidden flex">
+            {liquidPct > 0 && (
+              <div
+                className="bg-blue-600 h-full transition-all duration-300"
+                style={{ width: `${liquidPct}%` }}
+                title={`Kas Likuid: ${liquidPct.toFixed(1)}%`}
+              />
+            )}
+            {investPct > 0 && (
+              <div
+                className="bg-indigo-600 h-full transition-all duration-300"
+                style={{ width: `${investPct}%` }}
+                title={`Investasi: ${investPct.toFixed(1)}%`}
+              />
+            )}
+            {fixedPct > 0 && (
+              <div
+                className="bg-amber-500 h-full transition-all duration-300"
+                style={{ width: `${fixedPct}%` }}
+                title={`Aset Tetap Net: ${fixedPct.toFixed(1)}%`}
+              />
+            )}
+          </div>
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-[11px] text-slate-600 font-medium">
+            <span className="inline-flex items-center gap-1.5">
+              <span className="w-2.5 h-2.5 rounded-xs bg-blue-600 inline-block shrink-0" />
+              Kas Likuid{' '}
+              <span className="font-mono tabular-nums font-bold text-slate-800">
+                {liquidPct.toFixed(1)}%
+              </span>
+            </span>
+            <span className="inline-flex items-center gap-1.5">
+              <span className="w-2.5 h-2.5 rounded-xs bg-indigo-600 inline-block shrink-0" />
+              Investasi{' '}
+              <span className="font-mono tabular-nums font-bold text-slate-800">
+                {investPct.toFixed(1)}%
+              </span>
+            </span>
+            <span className="inline-flex items-center gap-1.5">
+              <span className="w-2.5 h-2.5 rounded-xs bg-amber-500 inline-block shrink-0" />
+              Aset Tetap Net{' '}
+              <span className="font-mono tabular-nums font-bold text-slate-800">
+                {fixedPct.toFixed(1)}%
+              </span>
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {/* 4-Column Interactive Balance Sheet Summary Cards */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-px bg-slate-200 border border-slate-200 rounded-xl overflow-hidden">
+        {/* 1. Kas Likuid */}
+        <button
+          type="button"
+          onClick={() => setActiveNetWorthModal('liquid')}
+          className="p-4 flex flex-col justify-between space-y-3 text-left bg-white hover:bg-slate-50 transition cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600"
+        >
+          <div className="space-y-1 w-full">
+            <div className="flex items-center justify-between text-xs font-bold text-slate-600">
+              <span className="flex items-center gap-1.5">
+                <Wallet className="h-3.5 w-3.5 text-blue-600" />
+                Kas Likuid
+              </span>
+              <span className="font-mono tabular-nums text-[11px] text-slate-400">
+                {liquidPct.toFixed(1)}%
+              </span>
+            </div>
+            <div className="text-lg font-black font-mono tabular-nums text-slate-900">
+              {formatValue(totalLiquidWithEmergency)}
+            </div>
+            <div className="text-[11px] text-slate-500 space-y-0.5 pt-1">
+              <div className="flex justify-between gap-2">
+                <span>Kas &amp; Bank ({liquidAccounts.length})</span>
+                <span className="font-mono tabular-nums font-semibold text-slate-700">
+                  {formatValue(totalLiquidAssets)}
+                </span>
+              </div>
+              <div className="flex justify-between gap-2">
+                <span>Dana Darurat</span>
+                <span className="font-mono tabular-nums font-semibold text-slate-700">
+                  {formatValue(totalEmergency)}
+                </span>
+              </div>
+            </div>
+          </div>
+          <span className="inline-flex items-center justify-between w-full text-[11px] font-bold text-blue-600 pt-1">
+            <span>Lihat rincian item</span>
+            <ArrowUpRight className="h-3.5 w-3.5" />
+          </span>
+        </button>
+
+        {/* 2. Aset Investasi */}
+        <button
+          type="button"
+          onClick={() => setActiveNetWorthModal('investment')}
+          className="p-4 flex flex-col justify-between space-y-3 text-left bg-white hover:bg-slate-50 transition cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600"
+        >
+          <div className="space-y-1 w-full">
+            <div className="flex items-center justify-between text-xs font-bold text-slate-600">
+              <span className="flex items-center gap-1.5">
+                <TrendingUp className="h-3.5 w-3.5 text-indigo-600" />
+                Aset Investasi
+              </span>
+              <span className="font-mono tabular-nums text-[11px] text-slate-400">
+                {investPct.toFixed(1)}%
+              </span>
+            </div>
+            <div className="text-lg font-black font-mono tabular-nums text-slate-900">
+              {formatValue(totalInvestments)}
+            </div>
+            <div className="text-[11px] text-slate-500 space-y-0.5 pt-1">
+              <div className="flex justify-between gap-2">
+                <span>Instrumen Aktif</span>
+                <span className="font-mono tabular-nums font-semibold text-slate-700">
+                  {investments.length} aset
+                </span>
+              </div>
+              <div className="flex justify-between gap-2">
+                <span>Gain / Loss</span>
+                <span
+                  className={`font-mono tabular-nums font-semibold ${
+                    totalInvestmentGain >= 0 ? 'text-emerald-600' : 'text-rose-600'
+                  }`}
+                >
+                  {totalInvestmentGain >= 0 ? '+' : ''}
+                  {formatValue(totalInvestmentGain)}
+                </span>
+              </div>
+            </div>
+          </div>
+          <span className="inline-flex items-center justify-between w-full text-[11px] font-bold text-indigo-600 pt-1">
+            <span>Lihat rincian item</span>
+            <ArrowUpRight className="h-3.5 w-3.5" />
+          </span>
+        </button>
+
+        {/* 3. Aset Tetap (Net Penyusutan) */}
+        <button
+          type="button"
+          onClick={() => setActiveNetWorthModal('fixed')}
+          className="p-4 flex flex-col justify-between space-y-3 text-left bg-white hover:bg-slate-50 transition cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-600"
+        >
+          <div className="space-y-1 w-full">
+            <div className="flex items-center justify-between text-xs font-bold text-slate-600">
+              <span className="flex items-center gap-1.5">
+                <Building2 className="h-3.5 w-3.5 text-amber-600" />
+                Aset Tetap (Net)
+              </span>
+              <span className="font-mono tabular-nums text-[11px] text-slate-400">
+                {fixedPct.toFixed(1)}%
+              </span>
+            </div>
+            <div className="text-lg font-black font-mono tabular-nums text-slate-900">
+              {formatValue(totalFixedAssets)}
+            </div>
+            <div className="text-[11px] text-slate-500 space-y-0.5 pt-1">
+              <div className="flex justify-between gap-2">
+                <span>Nilai Dasar / Ekuitas</span>
+                <span className="font-mono tabular-nums font-semibold text-slate-700">
+                  {formatValue(totalFixedAssetBasis)}
+                </span>
+              </div>
+              <div className="flex justify-between gap-2">
+                <span>Penyesuaian / Susut</span>
+                <span
+                  className={`font-mono tabular-nums font-semibold ${
+                    totalFixedAssetNetChange >= 0 ? 'text-emerald-600' : 'text-amber-700'
+                  }`}
+                >
+                  {totalFixedAssetNetChange >= 0 ? '+' : '-'}
+                  {formatValue(Math.abs(totalFixedAssetNetChange))}
+                </span>
+              </div>
+            </div>
+          </div>
+          <span className="inline-flex items-center justify-between w-full text-[11px] font-bold text-amber-700 pt-1">
+            <span>
+              Rincian ({fixedAssetRows.length} aset
+              {batchAssetDepreciation.pendingCount > 0
+                ? ` · ${batchAssetDepreciation.pendingCount} susut`
+                : ''}
+              )
+            </span>
+            <ArrowUpRight className="h-3.5 w-3.5" />
+          </span>
+        </button>
+
+        {/* 4. Total Liabilitas / Utang */}
+        <button
+          type="button"
+          onClick={() => setActiveNetWorthModal('debt')}
+          className="p-4 flex flex-col justify-between space-y-3 text-left bg-white hover:bg-slate-50 transition cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-600"
+        >
+          <div className="space-y-1 w-full">
+            <div className="flex items-center justify-between text-xs font-bold text-slate-600">
+              <span className="flex items-center gap-1.5">
+                <CreditCard className="h-3.5 w-3.5 text-rose-600" />
+                Total Kewajiban
+              </span>
+              <span className="font-mono tabular-nums text-[11px] text-rose-600 font-bold">
+                {totalCurrentAssets > 0
+                  ? `${((totalDebts / totalCurrentAssets) * 100).toFixed(1)}%`
+                  : totalDebts > 0
+                  ? '100.0%'
+                  : '0.0%'}
+              </span>
+            </div>
+            <div className="text-lg font-black font-mono tabular-nums text-rose-600">
+              {totalDebts > 0 ? `-${formatValue(totalDebts)}` : formatValue(0)}
+            </div>
+            <div className="text-[11px] text-slate-500 space-y-0.5 pt-1">
+              <div className="flex justify-between gap-2">
+                <span>Pinjaman &amp; KPR</span>
+                <span className="font-mono tabular-nums font-semibold text-slate-700">
+                  {formatValue(loanDebtsOnly)}
+                </span>
+              </div>
+              <div className="flex justify-between gap-2">
+                <span>Kartu Kredit &amp; PayLater</span>
+                <span className="font-mono tabular-nums font-semibold text-slate-700">
+                  {formatValue(totalCreditCardBills)}
+                </span>
+              </div>
+            </div>
+          </div>
+          <span className="inline-flex items-center justify-between w-full text-[11px] font-bold text-rose-600 pt-1">
+            <span>Lihat rincian item</span>
+            <ArrowUpRight className="h-3.5 w-3.5" />
+          </span>
+        </button>
+      </div>
+
+      {/* Centered Modal Rincian Item & Navigasi Cepat */}
+      {activeNetWorthModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4"
+          onClick={() => setActiveNetWorthModal(null)}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="net-worth-modal-title"
+        >
+          <div
+            className="w-full max-w-2xl rounded-2xl border border-slate-200 bg-white shadow-2xl overflow-hidden flex flex-col max-h-[85vh]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div className="px-5 py-4 border-b border-slate-200 flex items-start justify-between gap-4">
+              <div className="flex items-start gap-3 min-w-0">
+                <div
+                  className={`p-2.5 rounded-xl shrink-0 ${
+                    activeNetWorthModal === 'liquid'
+                      ? 'bg-blue-50 text-blue-600'
+                      : activeNetWorthModal === 'investment'
+                      ? 'bg-indigo-50 text-indigo-600'
+                      : activeNetWorthModal === 'fixed'
+                      ? 'bg-amber-50 text-amber-700'
+                      : 'bg-rose-50 text-rose-600'
+                  }`}
+                >
+                  {activeNetWorthModal === 'liquid' && <Wallet className="h-5 w-5" />}
+                  {activeNetWorthModal === 'investment' && <TrendingUp className="h-5 w-5" />}
+                  {activeNetWorthModal === 'fixed' && <Building2 className="h-5 w-5" />}
+                  {activeNetWorthModal === 'debt' && <CreditCard className="h-5 w-5" />}
+                </div>
+                <div className="min-w-0">
+                  <h3
+                    id="net-worth-modal-title"
+                    className="text-base font-extrabold text-slate-900 tracking-tight"
+                  >
+                    {activeNetWorthModal === 'liquid' && 'Rincian Kas Likuid & Dana Darurat'}
+                    {activeNetWorthModal === 'investment' && 'Rincian Portofolio Investasi'}
+                    {activeNetWorthModal === 'fixed' && 'Rincian Aset Tetap & Penyusutan'}
+                    {activeNetWorthModal === 'debt' && 'Rincian Kewajiban, Utang & Tagihan Kredit'}
+                  </h3>
+                  <p className="text-xs text-slate-500 font-medium mt-0.5">
+                    {activeNetWorthModal === 'liquid' &&
+                      `${liquidAccounts.length} rekening likuid aktif · Dana Darurat tergabung ke likuiditas`}
+                    {activeNetWorthModal === 'investment' &&
+                      `${investments.length} instrumen aktif · Nilai pasar & imbal hasil terkini`}
+                    {activeNetWorthModal === 'fixed' &&
+                      `${fixedAssetRows.length} aset tetap & properti KPR · Nilai buku setelah penyusutan`}
+                    {activeNetWorthModal === 'debt' &&
+                      `${debts.filter((d) => d.balance > 0).length} pinjaman aktif · ${
+                        creditCardAndPaylaterAccounts.filter((a) => getAccountCreditBill(a) > 0).length
+                      } tagihan kredit/PayLater`}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-3 shrink-0">
+                <div className="text-right hidden sm:block">
+                  <span className="text-[11px] font-semibold text-slate-400 block">
+                    Total Kategori
+                  </span>
+                  <span
+                    className={`text-sm font-black font-mono tabular-nums ${
+                      activeNetWorthModal === 'debt' ? 'text-rose-600' : 'text-slate-900'
+                    }`}
+                  >
+                    {activeNetWorthModal === 'liquid' && formatValue(totalLiquidWithEmergency)}
+                    {activeNetWorthModal === 'investment' && formatValue(totalInvestments)}
+                    {activeNetWorthModal === 'fixed' && formatValue(totalFixedAssets)}
+                    {activeNetWorthModal === 'debt' &&
+                      (totalDebts > 0 ? `-${formatValue(totalDebts)}` : formatValue(0))}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setActiveNetWorthModal(null)}
+                  className="p-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-100 text-slate-500 hover:text-slate-800 transition cursor-pointer"
+                  aria-label="Tutup modal rincian"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+
+            {/* Modal Body */}
+            <div className="p-5 overflow-y-auto space-y-4">
+              {activeNetWorthModal === 'liquid' && (
+                <div className="rounded-xl border border-slate-200 bg-white divide-y divide-slate-100">
+                  {liquidAccounts.length === 0 && totalEmergency <= 0 ? (
+                    <div className="p-6 text-center text-xs text-slate-500">
+                      Belum ada rekening likuid atau saldo dana darurat terdaftar.
+                    </div>
+                  ) : (
+                    <>
+                      {liquidAccounts.map((acc) => (
+                        <div
+                          key={acc.id}
+                          className="px-4 py-3 flex items-center justify-between gap-3 text-xs hover:bg-slate-50/70 transition-colors"
+                        >
+                          <div className="min-w-0">
+                            <span className="font-bold text-slate-800 block truncate">
+                              {acc.name}
+                            </span>
+                            <span className="text-[11px] text-slate-500">
+                              {acc.type === 'e-wallet'
+                                ? 'Dompet Digital'
+                                : acc.type === 'cash'
+                                ? 'Kas Tunai'
+                                : 'Rekening Bank'}
+                            </span>
+                          </div>
+                          <span className="font-mono tabular-nums font-bold text-slate-900 shrink-0">
+                            {formatValue(acc.currentBalance)}
+                          </span>
+                        </div>
+                      ))}
+                      <div className="px-4 py-3 flex items-center justify-between gap-3 text-xs bg-slate-50/70">
+                        <div className="min-w-0">
+                          <span className="font-bold text-slate-800 block">Dana Darurat</span>
+                          <span className="text-[11px] text-slate-500">
+                            Cadangan likuid khusus kondisi darurat
+                          </span>
+                        </div>
+                        <span className="font-mono tabular-nums font-bold text-blue-700 shrink-0">
+                          {formatValue(totalEmergency)}
+                        </span>
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+
+              {activeNetWorthModal === 'investment' && (
+                <div className="rounded-xl border border-slate-200 bg-white divide-y divide-slate-100">
+                  {investments.length === 0 ? (
+                    <div className="p-6 text-center text-xs text-slate-500">
+                      Belum ada instrumen investasi aktif. Buka tab Portofolio untuk mencatat aset investasi.
+                    </div>
+                  ) : (
+                    investments.map((inv) => {
+                      const capital =
+                        inv.initialCapital !== undefined ? inv.initialCapital : inv.balance;
+                      const gain = inv.balance - capital;
+                      return (
+                        <div
+                          key={inv.id}
+                          className="px-4 py-3 flex items-center justify-between gap-3 text-xs hover:bg-slate-50/70 transition-colors"
+                        >
+                          <div className="min-w-0">
+                            <span className="font-bold text-slate-800 block truncate">
+                              {inv.name}
+                            </span>
+                            <span className="text-[11px] text-slate-500">
+                              {inv.category}
+                              {inv.quantity || inv.units
+                                ? ` · ${inv.quantity ?? inv.units} ${inv.unitName || 'unit'}`
+                                : ''}
+                            </span>
+                          </div>
+                          <div className="text-right shrink-0">
+                            <span className="font-mono tabular-nums font-bold text-slate-900 block">
+                              {formatValue(inv.balance)}
+                            </span>
+                            <span
+                              className={`font-mono tabular-nums text-[11px] font-semibold ${
+                                gain >= 0 ? 'text-emerald-600' : 'text-rose-600'
+                              }`}
+                            >
+                              {gain >= 0 ? '+' : ''}
+                              {formatValue(gain)}
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              )}
+
+              {activeNetWorthModal === 'fixed' && (
+                <>
+                  {batchAssetDepreciation.pendingCount > 0 && (
+                    <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div className="space-y-0.5">
+                        <div className="text-xs font-extrabold text-slate-900">
+                          {batchAssetDepreciation.pendingCount} Aset Siap Posting Jurnal Penyusutan
+                        </div>
+                        <p className="text-[11px] text-slate-600 font-medium">
+                          Akumulasi draft penyusutan non-kas (Dr 5960 / Cr 1690):{' '}
+                          <span className="font-mono tabular-nums font-bold text-amber-800">
+                            -{formatValue(batchAssetDepreciation.totalDepreciationAmount)}
+                          </span>
+                        </p>
+                      </div>
+
+                      {(onSyncAllFixedAssetDepreciations || onSyncFixedAssetDepreciation) && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (onSyncAllFixedAssetDepreciations) {
+                              onSyncAllFixedAssetDepreciations();
+                            } else if (onSyncFixedAssetDepreciation) {
+                              batchAssetDepreciation.draftAdjustments.forEach((entry) => {
+                                onSyncFixedAssetDepreciation(entry.assetId);
+                              });
+                            }
+                          }}
+                          className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold transition cursor-pointer whitespace-nowrap shrink-0"
+                        >
+                          <RefreshCw className="h-3.5 w-3.5" />
+                          <span>Posting Semua Penyusutan</span>
+                        </button>
+                      )}
+                    </div>
+                  )}
+
+                  <div className="rounded-xl border border-slate-200 bg-white divide-y divide-slate-100">
+                    {fixedAssetRows.length === 0 ? (
+                      <div className="p-6 text-center text-xs text-slate-500">
+                        Belum ada aset tetap atau properti KPR tercatat. Tambahkan melalui tab Portofolio &amp; Aset Tetap.
+                      </div>
+                    ) : (
+                      fixedAssetRows.map(({ asset, valuation: val, depreciation: dep }) => (
+                        <div
+                          key={asset.id}
+                          className="px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs hover:bg-slate-50/70 transition-colors"
+                        >
+                          <div className="min-w-0 space-y-0.5">
+                            <span className="font-bold text-slate-800 block truncate">
+                              {asset.name}
+                            </span>
+                            <span className="text-[11px] text-slate-500 block">
+                              {asset.category} · Dasar{' '}
+                              <span className="font-mono tabular-nums font-semibold text-slate-700">
+                                {formatValue(val.basisValue)}
+                              </span>{' '}
+                              · Penyesuaian{' '}
+                              <span
+                                className={`font-mono tabular-nums font-semibold ${
+                                  val.totalNetValueChange >= 0
+                                    ? 'text-emerald-600'
+                                    : 'text-amber-700'
+                                }`}
+                              >
+                                {val.totalNetValueChange >= 0 ? '+' : '-'}
+                                {formatValue(Math.abs(val.totalNetValueChange))}
+                              </span>
+                              {asset.isKprLinked && ` · ${val.ownershipPct.toFixed(1)}% lunas`}
+                            </span>
+                          </div>
+
+                          <div className="flex items-center justify-between sm:justify-end gap-2.5 shrink-0">
+                            {onSyncFixedAssetDepreciation &&
+                              dep &&
+                              dep.isDepreciable &&
+                              dep.cappedDepreciationAmount > 0 &&
+                              dep.draftAdjustment && (
+                                <button
+                                  type="button"
+                                  onClick={() => onSyncFixedAssetDepreciation(asset.id)}
+                                  title={dep.draftAdjustment.note}
+                                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-amber-200 bg-amber-50 hover:bg-amber-100 text-amber-800 text-[11px] font-bold transition cursor-pointer whitespace-nowrap shrink-0"
+                                >
+                                  <RefreshCw className="h-3 w-3" />
+                                  <span>
+                                    Posting Susut (-{formatValue(dep.cappedDepreciationAmount)})
+                                  </span>
+                                </button>
+                              )}
+                            <span className="font-mono tabular-nums font-bold text-slate-900">
+                              {formatValue(val.currentBookValue)}
+                            </span>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </>
+              )}
+
+              {activeNetWorthModal === 'debt' && (
+                <div className="rounded-xl border border-slate-200 bg-white divide-y divide-slate-100">
+                  {debts.filter((d) => d.balance > 0).length === 0 &&
+                  creditCardAndPaylaterAccounts.filter((a) => getAccountCreditBill(a) > 0).length ===
+                    0 ? (
+                    <div className="p-6 text-center text-xs text-slate-500">
+                      Tidak ada kewajiban pinjaman atau tagihan kartu kredit/PayLater aktif saat ini.
+                    </div>
+                  ) : (
+                    <>
+                      {debts
+                        .filter((d) => d.balance > 0)
+                        .map((debt) => (
+                          <div
+                            key={debt.id}
+                            className="px-4 py-3 flex items-center justify-between gap-3 text-xs hover:bg-slate-50/70 transition-colors"
+                          >
+                            <div className="min-w-0">
+                              <span className="font-bold text-slate-800 block truncate">
+                                {debt.name}
+                              </span>
+                              <span className="text-[11px] text-slate-500">
+                                {debt.category} · Bunga {debt.interestRate}%/thn
+                              </span>
+                            </div>
+                            <span className="font-mono tabular-nums font-bold text-rose-600 shrink-0">
+                              -{formatValue(debt.balance)}
+                            </span>
+                          </div>
+                        ))}
+                      {creditCardAndPaylaterAccounts
+                        .filter((acc) => getAccountCreditBill(acc) > 0)
+                        .map((acc) => {
+                          const bill = getAccountCreditBill(acc);
+                          return (
+                            <div
+                              key={acc.id}
+                              className="px-4 py-3 flex items-center justify-between gap-3 text-xs hover:bg-slate-50/70 transition-colors"
+                            >
+                              <div className="min-w-0">
+                                <span className="font-bold text-slate-800 block truncate">
+                                  {acc.name}
+                                </span>
+                                <span className="text-[11px] text-slate-500">
+                                  {acc.type === 'credit-card'
+                                    ? 'Tagihan Kartu Kredit'
+                                    : 'Tagihan PayLater'}
+                                </span>
+                              </div>
+                              <span className="font-mono tabular-nums font-bold text-rose-600 shrink-0">
+                                -{formatValue(bill)}
+                              </span>
+                            </div>
+                          );
+                        })}
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Modal Footer with Quick Navigation */}
+            <div className="px-5 py-4 border-t border-slate-200 bg-slate-50/70 flex items-center justify-between gap-3">
+              <button
+                type="button"
+                onClick={() => setActiveNetWorthModal(null)}
+                className="px-4 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-100 text-slate-700 text-xs font-bold transition cursor-pointer whitespace-nowrap"
+              >
+                Tutup
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const targetTab =
+                    activeNetWorthModal === 'liquid'
+                      ? 'accounts'
+                      : activeNetWorthModal === 'debt'
+                      ? 'debts'
+                      : 'investments';
+                  setActiveNetWorthModal(null);
+                  onQuickAction(targetTab);
+                }}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold transition cursor-pointer whitespace-nowrap shrink-0"
+              >
+                <span>
+                  {activeNetWorthModal === 'liquid' && 'Kelola Rekening'}
+                  {activeNetWorthModal === 'investment' && 'Buka Portofolio'}
+                  {activeNetWorthModal === 'fixed' && 'Kelola Aset Tetap'}
+                  {activeNetWorthModal === 'debt' && 'Kelola Utang & KPR'}
+                </span>
+                <ArrowRight className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </motion.div>
+  );
+};
+
+interface TrendNetWorthChartProps {
+  data: NetWorthMonthlyTrendPoint[];
+  currentNetWorth: number;
+  isFocusMode: boolean;
+  formatValue: (amount: number, isSensitive?: boolean) => string;
+  formatCompactValue: (num: number, isSensitive?: boolean) => string;
+}
+
+export const TrendNetWorthChart: React.FC<TrendNetWorthChartProps> = ({
+  data,
+  currentNetWorth,
+  isFocusMode,
+  formatValue,
+  formatCompactValue,
+}) => {
+  const firstPoint = data[0];
+  const latestPoint = data[data.length - 1];
+  const sixMonthDelta =
+    firstPoint && latestPoint ? latestPoint.netWorth - firstPoint.netWorth : 0;
+  const sixMonthDeltaPct =
+    firstPoint && Math.abs(firstPoint.netWorth) > 0
+      ? (sixMonthDelta / Math.abs(firstPoint.netWorth)) * 100
+      : 0;
+  const hasNegativeValues = data.some((p) => p.netWorth < 0);
+
+  return (
+    <motion.div
+      variants={cardVariants}
+      className="bg-white rounded-2xl border border-slate-200 p-5 sm:p-6 space-y-4"
+    >
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-4">
+        <div className="flex items-start gap-3">
+          <div className="p-2.5 rounded-xl bg-blue-50 text-blue-600 shrink-0">
+            <TrendingUp className="h-5 w-5" />
+          </div>
+          <div>
+            <h2 className="text-base font-extrabold text-slate-900 tracking-tight">
+              Trend Net Worth (6 Bulan Terakhir)
+            </h2>
+            <p className="text-xs text-slate-500 font-medium mt-0.5">
+              Perkembangan Kekayaan Bersih, Total Aset &amp; Total Kewajiban dari riwayat transaksi historis
+            </p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-4 shrink-0">
+          <div className="text-left sm:text-right">
+            <span className="text-[11px] font-semibold text-slate-500 block">
+              Perubahan 6 Bulan
+            </span>
+            <div className="flex items-center gap-1.5 sm:justify-end">
+              {sixMonthDelta >= 0 ? (
+                <ArrowUpRight className="h-4 w-4 text-emerald-600 shrink-0" />
+              ) : (
+                <ArrowDownRight className="h-4 w-4 text-rose-600 shrink-0" />
+              )}
+              <span
+                className={`text-sm font-black font-mono tabular-nums ${
+                  sixMonthDelta >= 0 ? 'text-emerald-600' : 'text-rose-600'
+                }`}
+              >
+                {sixMonthDelta >= 0 ? '+' : ''}
+                {formatValue(sixMonthDelta)}
+              </span>
+              <span className="text-xs font-mono tabular-nums font-bold text-slate-500">
+                ({sixMonthDeltaPct >= 0 ? '+' : ''}
+                {sixMonthDeltaPct.toFixed(1)}%)
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="h-72 w-full">
+        <ResponsiveContainer width="100%" height="100%">
+          <LineChart data={data} margin={{ top: 10, right: 20, left: 0, bottom: 5 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
+            <XAxis
+              dataKey="monthLabel"
+              tick={{ fill: '#64748b', fontSize: 11, fontWeight: 600 }}
+              axisLine={{ stroke: '#e2e8f0' }}
+              tickLine={false}
+            />
+            <YAxis
+              tickFormatter={(val) =>
+                isFocusMode ? '•••' : formatCompactValue(Number(val)) || '0'
+              }
+              tick={{ fill: '#64748b', fontSize: 11 }}
+              axisLine={{ stroke: '#e2e8f0' }}
+              tickLine={false}
+              width={64}
+            />
+            {hasNegativeValues && (
+              <ReferenceLine y={0} stroke="#cbd5e1" strokeDasharray="4 4" />
+            )}
+            <Tooltip
+              content={({ active, payload }) => {
+                if (!active || !payload || payload.length === 0) return null;
+                const point = payload[0].payload as NetWorthMonthlyTrendPoint;
+                return (
+                  <div className="bg-white border border-slate-200 rounded-xl shadow-lg p-3 text-xs space-y-1.5 min-w-[210px]">
+                    <div className="flex items-center justify-between border-b border-slate-100 pb-1.5">
+                      <span className="font-extrabold text-slate-900">{point.monthLabel}</span>
+                      <span className="text-[11px] font-mono tabular-nums text-slate-400">
+                        s.d. {point.cutoffDate}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between gap-4">
+                      <span className="text-slate-600 font-semibold">Net Worth</span>
+                      <span
+                        className={`font-mono tabular-nums font-black ${
+                          point.netWorth >= 0 ? 'text-slate-900' : 'text-rose-600'
+                        }`}
+                      >
+                        {formatValue(point.netWorth)}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between gap-4">
+                      <span className="text-blue-600 font-semibold">Total Aset</span>
+                      <span className="font-mono tabular-nums font-bold text-blue-700">
+                        {formatValue(point.assets)}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between gap-4">
+                      <span className="text-rose-600 font-semibold">Total Kewajiban</span>
+                      <span className="font-mono tabular-nums font-bold text-rose-600">
+                        {formatValue(point.debts)}
+                      </span>
+                    </div>
+                  </div>
+                );
+              }}
+            />
+            <Legend
+              iconType="plainline"
+              wrapperStyle={{ fontSize: '12px', fontWeight: 600, paddingTop: '10px' }}
+            />
+            <Line
+              type="monotone"
+              dataKey="netWorth"
+              name="Net Worth (Bersih)"
+              stroke={currentNetWorth >= 0 ? '#0f172a' : '#dc2626'}
+              strokeWidth={3}
+              dot={{ r: 4, fill: '#ffffff', strokeWidth: 2 }}
+              activeDot={{ r: 6 }}
+            />
+            <Line
+              type="monotone"
+              dataKey="assets"
+              name="Total Aset"
+              stroke="#2563eb"
+              strokeWidth={2}
+              dot={{ r: 3, fill: '#ffffff', strokeWidth: 2 }}
+              activeDot={{ r: 5 }}
+            />
+            <Line
+              type="monotone"
+              dataKey="debts"
+              name="Total Kewajiban"
+              stroke="#e11d48"
+              strokeWidth={2}
+              strokeDasharray="5 4"
+              dot={{ r: 3, fill: '#ffffff', strokeWidth: 2 }}
+              activeDot={{ r: 5 }}
+            />
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+    </motion.div>
+  );
 };
 
 interface DashboardTabProps {
@@ -90,42 +1031,53 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
   onSyncAllFixedAssetDepreciations,
   onQuickAction,
 }) => {
+  // Dynamically calculate actual date from system
+  const actualDate = React.useMemo(() => new Date(), []);
+  const actualYear = actualDate.getFullYear();
+  const actualMonth = actualDate.getMonth() + 1;
+  const actualDay = actualDate.getDate();
+
+  // Format current actual date dynamically (e.g. '2026-07-21')
+  const systemTodayStr = `${actualYear}-${String(actualMonth).padStart(2, '0')}-${String(actualDay).padStart(2, '0')}`;
+
   // 1. Calculate Net Worth (Liquid Accounts + Emergency Funds + Investments + Fixed Assets/KPR - Debts)
-  const liquidAccounts = getLiquidAccounts(accounts);
-  const creditCardAndPaylaterAccounts = getCreditAccounts(accounts);
+  const liquidAccounts = React.useMemo(() => getLiquidAccounts(accounts), [accounts]);
+  const creditCardAndPaylaterAccounts = React.useMemo(() => getCreditAccounts(accounts), [accounts]);
 
   const totalLiquidAssets = calculateTotalLiquidCash(accounts);
   const totalCreditCardBills = calculateCreditPaylaterBills(accounts);
   const totalDebts = calculateTotalDebts(accounts, debts);
-  
+
   // Total emergency fund
   const totalEmergency = calculateTotalEmergencyFund(emergencyTransactions);
 
-  // Total active investments & fixed assets (including proportional KPR equity & depreciation)
-  const totalInvestments = calculateTotalInvestments(investments);
-  const totalFixedAssets = calculateTotalFixedAssets(fixedAssets, debts);
-  const combinedPortfolioWealth = React.useMemo(
-    () => calculateCombinedPortfolioWealth(investments, fixedAssets, debts),
-    [investments, fixedAssets, debts]
-  );
+  // Single-pass synchronized KPR + fixed asset + portfolio summary
   const syncedFixedAssetsList = React.useMemo(
-    () => syncKprDebtsToFixedAssets(fixedAssets, debts),
-    [fixedAssets, debts]
+    () => syncKprDebtsToFixedAssets(fixedAssets, debts, systemTodayStr),
+    [fixedAssets, debts, systemTodayStr]
   );
-  const [activeNetWorthModal, setActiveNetWorthModal] = React.useState<
-    'liquid' | 'investment' | 'fixed' | 'debt' | null
-  >(null);
+  const combinedPortfolioWealth = React.useMemo(
+    () => calculateCombinedPortfolioWealth(investments, syncedFixedAssetsList, debts, systemTodayStr),
+    [investments, syncedFixedAssetsList, debts, systemTodayStr]
+  );
+  const batchAssetDepreciation = React.useMemo(
+    () => calculateAssetDepreciation(syncedFixedAssetsList, debts, systemTodayStr),
+    [syncedFixedAssetsList, debts, systemTodayStr]
+  );
+  const fixedAssetModalRows = React.useMemo<FixedAssetModalRow[]>(() => {
+    const depById = new Map<string, FixedAssetDepreciationResult>();
+    batchAssetDepreciation.items.forEach((item) => {
+      depById.set(item.assetId, item);
+    });
+    return syncedFixedAssetsList.map((asset) => ({
+      asset,
+      valuation: calculateFixedAssetValuation(asset, debts, systemTodayStr),
+      depreciation: depById.get(asset.id),
+    }));
+  }, [syncedFixedAssetsList, debts, systemTodayStr, batchAssetDepreciation]);
 
-  React.useEffect(() => {
-    if (!activeNetWorthModal) return;
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        setActiveNetWorthModal(null);
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [activeNetWorthModal]);
+  const totalInvestments = combinedPortfolioWealth.totalInvestmentValue;
+  const totalFixedAssets = combinedPortfolioWealth.totalFixedAssetBookValue;
   const totalLiquidWithEmergency = totalLiquidAssets + totalEmergency;
   const loanDebtsOnly = React.useMemo(
     () => (debts || []).reduce((sum, d) => sum + Math.max(0, d.balance || 0), 0),
@@ -165,24 +1117,12 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
     healthRatioText = 'Rasio Utang 0%';
   }
 
-  // Dynamically calculate actual date from system
-  const actualDate = React.useMemo(() => new Date(), []);
-  const actualYear = actualDate.getFullYear();
-  const actualMonth = actualDate.getMonth() + 1;
-  const actualDay = actualDate.getDate();
-
-  // Format current actual date dynamically (e.g. '2026-07-21')
-  const systemTodayStr = `${actualYear}-${String(actualMonth).padStart(2, '0')}-${String(actualDay).padStart(2, '0')}`;
-
-  const batchAssetDepreciation = React.useMemo(
-    () => calculateAssetDepreciation(syncedFixedAssetsList, debts, systemTodayStr),
-    [syncedFixedAssetsList, debts, systemTodayStr]
-  );
-
   // 2. Calculate current month dynamically
-  // Let's filter transactions for current active month (e.g., 2026-07)
   const activeMonthStr = `${actualYear}-${String(actualMonth).padStart(2, '0')}`;
-  const monthlyTxs = transactions.filter(tx => tx.date.startsWith(activeMonthStr));
+  const monthlyTxs = React.useMemo(
+    () => transactions.filter(tx => tx.date.startsWith(activeMonthStr)),
+    [transactions, activeMonthStr]
+  );
 
   const monthlySummary = React.useMemo(
     () => calculateIncomeStatementSummary(monthlyTxs),
@@ -194,9 +1134,9 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
   const monthlySaving = monthlySummary.emergencyAdditions;
   const monthlyInvestment = monthlySummary.investmentPurchases;
 
-  // Generate 30-day daily Net Worth trend using centralized accounting engine
-  const sparklineData = React.useMemo(() => {
-    return calculateNetWorthHistory30Days(
+  // Unified 6-month historical Net Worth trend (Net Worth, Total Assets, Total Liabilities)
+  const netWorthTrend6Months = React.useMemo(() => {
+    return calculateNetWorthHistory6Months(
       transactions,
       accounts,
       totalCurrentAssets,
@@ -289,23 +1229,6 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
   } else {
     projectedHealthDesc = 'Sempurna! Tanpa utang dan pertumbuhan dana lancar yang konsisten, posisi finansial Anda diproyeksikan sangat prima.';
   }
-
-  // Assets vs Debts Composition Chart Data
-  const assetDebtChartData = [
-    {
-      category: 'Total Aset',
-      'Kas & Bank': totalLiquidAssets,
-      'Dana Darurat': totalEmergency,
-      'Portofolio Investasi': totalInvestments,
-      'Aset Tetap & KPR': totalFixedAssets,
-      total: totalCurrentAssets,
-    },
-    {
-      category: 'Utang/Kewajiban',
-      'Total Utang': totalDebts,
-      total: totalDebts,
-    }
-  ];
 
   // 3. Prepare Chart Data: Income vs Expense comparison
   const comparisonData = [
@@ -842,7 +1765,7 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
    .sort((a, b) => a.daysLeft - b.daysLeft);
 
   // Reconstruct chronological liquid cash balance trend from transaction history
-  const getLineChartData = () => {
+  const lineChartData = React.useMemo(() => {
     const accountMap = new Map<string, Account>();
     accounts.forEach(a => accountMap.set(a.id, a));
 
@@ -912,9 +1835,7 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
     });
     
     return data;
-  };
-
-  const lineChartData = getLineChartData();
+  }, [accounts, transactions, totalLiquidAssets, liquidAccounts]);
 
   // 6-Month Monthly Spending Trend Data (Operating Income & Expense)
   const monthlySpendingTrend6Months = React.useMemo(() => {
@@ -1531,698 +2452,43 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
       </motion.div>
 
       {/* PANEL RINGKASAN UTAMA: NERACA KEKAYAAN BERSIH REAL-TIME */}
-      <motion.div
-        variants={cardVariants}
-        className="bg-white rounded-2xl border border-slate-200 p-5 sm:p-6 space-y-5"
-      >
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-4">
-          <div className="flex items-start gap-3">
-            <div className="p-2.5 rounded-xl bg-slate-900 text-white shrink-0">
-              <Scale className="h-5 w-5" />
-            </div>
-            <div>
-              <h2 className="text-base font-extrabold text-slate-900 tracking-tight">
-                Neraca Kekayaan Bersih
-              </h2>
-              <p className="text-xs text-slate-500 font-medium mt-0.5">
-                Real-time · Kas Likuid · Investasi · Aset Tetap Setelah Penyusutan − Liabilitas
-              </p>
-            </div>
-          </div>
+      <NeracaKekayaanBersih
+        netWorth={netWorth}
+        totalCurrentAssets={totalCurrentAssets}
+        totalDebts={totalDebts}
+        totalLiquidAssets={totalLiquidAssets}
+        totalEmergency={totalEmergency}
+        totalLiquidWithEmergency={totalLiquidWithEmergency}
+        totalInvestments={totalInvestments}
+        totalInvestmentGain={combinedPortfolioWealth.totalInvestmentGain}
+        totalFixedAssets={totalFixedAssets}
+        totalFixedAssetBasis={combinedPortfolioWealth.totalFixedAssetBasis}
+        totalFixedAssetNetChange={combinedPortfolioWealth.totalFixedAssetNetChange}
+        loanDebtsOnly={loanDebtsOnly}
+        totalCreditCardBills={totalCreditCardBills}
+        liquidAccounts={liquidAccounts}
+        creditCardAndPaylaterAccounts={creditCardAndPaylaterAccounts}
+        investments={investments}
+        fixedAssetRows={fixedAssetModalRows}
+        debts={debts}
+        batchAssetDepreciation={batchAssetDepreciation}
+        healthStatus={healthStatus}
+        healthColor={healthColor}
+        healthRatioText={healthRatioText}
+        formatValue={formatValue}
+        onSyncFixedAssetDepreciation={onSyncFixedAssetDepreciation}
+        onSyncAllFixedAssetDepreciations={onSyncAllFixedAssetDepreciations}
+        onQuickAction={onQuickAction}
+      />
 
-          <div className="flex flex-wrap items-center gap-3 shrink-0">
-            <span
-              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs font-bold ${healthColor}`}
-            >
-              {healthStatus === 'Sehat' ? (
-                <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
-              ) : (
-                <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-              )}
-              <span>{healthStatus}</span>
-              <span aria-hidden="true">·</span>
-              <span className="font-mono tabular-nums">{healthRatioText}</span>
-            </span>
-
-            <button
-              type="button"
-              onClick={() => onQuickAction('reports')}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold transition cursor-pointer whitespace-nowrap shrink-0"
-            >
-              <span>Laporan Neraca</span>
-              <ArrowRight className="h-3.5 w-3.5" />
-            </button>
-          </div>
-        </div>
-
-        {/* Hero Net Worth Figure & Asset Composition Bar */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-center">
-          <div className="lg:col-span-5 space-y-1.5">
-            <span className="text-xs font-bold text-slate-500 block">
-              Total Kekayaan Bersih (Net Worth)
-            </span>
-            <div
-              className={`text-2xl sm:text-3xl font-black font-mono tabular-nums tracking-tight ${
-                netWorth >= 0 ? 'text-slate-900' : 'text-rose-600'
-              }`}
-            >
-              {formatValue(netWorth)}
-            </div>
-            <p className="text-xs text-slate-500 font-medium font-mono tabular-nums">
-              Total Aset {formatValue(totalCurrentAssets)} − Kewajiban {formatValue(totalDebts)}
-            </p>
-          </div>
-
-          <div className="lg:col-span-7 space-y-2.5">
-            {(() => {
-              const assetSum = Math.max(0, totalCurrentAssets);
-              const liquidPct = assetSum > 0 ? (totalLiquidWithEmergency / assetSum) * 100 : 0;
-              const investPct = assetSum > 0 ? (totalInvestments / assetSum) * 100 : 0;
-              const fixedPct = assetSum > 0 ? (totalFixedAssets / assetSum) * 100 : 0;
-              return (
-                <>
-                  <div className="flex items-center justify-between text-xs text-slate-600 font-medium">
-                    <span>Komposisi Bruto Aset Aktif</span>
-                    <span className="font-mono tabular-nums font-bold text-slate-900">
-                      {formatValue(totalCurrentAssets)}
-                    </span>
-                  </div>
-                  <div className="w-full h-2.5 rounded-full bg-slate-100 overflow-hidden flex">
-                    {liquidPct > 0 && (
-                      <div
-                        className="bg-blue-600 h-full transition-all duration-300"
-                        style={{ width: `${liquidPct}%` }}
-                        title={`Kas Likuid: ${liquidPct.toFixed(1)}%`}
-                      />
-                    )}
-                    {investPct > 0 && (
-                      <div
-                        className="bg-indigo-600 h-full transition-all duration-300"
-                        style={{ width: `${investPct}%` }}
-                        title={`Investasi: ${investPct.toFixed(1)}%`}
-                      />
-                    )}
-                    {fixedPct > 0 && (
-                      <div
-                        className="bg-amber-500 h-full transition-all duration-300"
-                        style={{ width: `${fixedPct}%` }}
-                        title={`Aset Tetap Net: ${fixedPct.toFixed(1)}%`}
-                      />
-                    )}
-                  </div>
-                  <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-[11px] text-slate-600 font-medium">
-                    <span className="inline-flex items-center gap-1.5">
-                      <span className="w-2.5 h-2.5 rounded-xs bg-blue-600 inline-block shrink-0" />
-                      Kas Likuid <span className="font-mono tabular-nums font-bold text-slate-800">{liquidPct.toFixed(1)}%</span>
-                    </span>
-                    <span className="inline-flex items-center gap-1.5">
-                      <span className="w-2.5 h-2.5 rounded-xs bg-indigo-600 inline-block shrink-0" />
-                      Investasi <span className="font-mono tabular-nums font-bold text-slate-800">{investPct.toFixed(1)}%</span>
-                    </span>
-                    <span className="inline-flex items-center gap-1.5">
-                      <span className="w-2.5 h-2.5 rounded-xs bg-amber-500 inline-block shrink-0" />
-                      Aset Tetap Net <span className="font-mono tabular-nums font-bold text-slate-800">{fixedPct.toFixed(1)}%</span>
-                    </span>
-                  </div>
-                </>
-              );
-            })()}
-          </div>
-        </div>
-
-        {/* 4-Column Interactive Balance Sheet Summary Cards */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-px bg-slate-200 border border-slate-200 rounded-xl overflow-hidden">
-          {/* 1. Kas Likuid */}
-          <button
-            type="button"
-            onClick={() => setActiveNetWorthModal('liquid')}
-            className="p-4 flex flex-col justify-between space-y-3 text-left bg-white hover:bg-slate-50 transition cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600"
-          >
-            <div className="space-y-1 w-full">
-              <div className="flex items-center justify-between text-xs font-bold text-slate-600">
-                <span className="flex items-center gap-1.5">
-                  <Wallet className="h-3.5 w-3.5 text-blue-600" />
-                  Kas Likuid
-                </span>
-                <span className="font-mono tabular-nums text-[11px] text-slate-400">
-                  {totalCurrentAssets > 0
-                    ? `${((totalLiquidWithEmergency / totalCurrentAssets) * 100).toFixed(1)}%`
-                    : '0.0%'}
-                </span>
-              </div>
-              <div className="text-lg font-black font-mono tabular-nums text-slate-900">
-                {formatValue(totalLiquidWithEmergency)}
-              </div>
-              <div className="text-[11px] text-slate-500 space-y-0.5 pt-1">
-                <div className="flex justify-between gap-2">
-                  <span>Kas &amp; Bank ({liquidAccounts.length})</span>
-                  <span className="font-mono tabular-nums font-semibold text-slate-700">
-                    {formatValue(totalLiquidAssets)}
-                  </span>
-                </div>
-                <div className="flex justify-between gap-2">
-                  <span>Dana Darurat</span>
-                  <span className="font-mono tabular-nums font-semibold text-slate-700">
-                    {formatValue(totalEmergency)}
-                  </span>
-                </div>
-              </div>
-            </div>
-            <span className="inline-flex items-center justify-between w-full text-[11px] font-bold text-blue-600 pt-1">
-              <span>Lihat rincian item</span>
-              <ArrowUpRight className="h-3.5 w-3.5" />
-            </span>
-          </button>
-
-          {/* 2. Aset Investasi */}
-          <button
-            type="button"
-            onClick={() => setActiveNetWorthModal('investment')}
-            className="p-4 flex flex-col justify-between space-y-3 text-left bg-white hover:bg-slate-50 transition cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600"
-          >
-            <div className="space-y-1 w-full">
-              <div className="flex items-center justify-between text-xs font-bold text-slate-600">
-                <span className="flex items-center gap-1.5">
-                  <TrendingUp className="h-3.5 w-3.5 text-indigo-600" />
-                  Aset Investasi
-                </span>
-                <span className="font-mono tabular-nums text-[11px] text-slate-400">
-                  {totalCurrentAssets > 0
-                    ? `${((totalInvestments / totalCurrentAssets) * 100).toFixed(1)}%`
-                    : '0.0%'}
-                </span>
-              </div>
-              <div className="text-lg font-black font-mono tabular-nums text-slate-900">
-                {formatValue(totalInvestments)}
-              </div>
-              <div className="text-[11px] text-slate-500 space-y-0.5 pt-1">
-                <div className="flex justify-between gap-2">
-                  <span>Instrumen Aktif</span>
-                  <span className="font-mono tabular-nums font-semibold text-slate-700">
-                    {investments.length} aset
-                  </span>
-                </div>
-                <div className="flex justify-between gap-2">
-                  <span>Gain / Loss</span>
-                  <span
-                    className={`font-mono tabular-nums font-semibold ${
-                      combinedPortfolioWealth.totalInvestmentGain >= 0
-                        ? 'text-emerald-600'
-                        : 'text-rose-600'
-                    }`}
-                  >
-                    {combinedPortfolioWealth.totalInvestmentGain >= 0 ? '+' : ''}
-                    {formatValue(combinedPortfolioWealth.totalInvestmentGain)}
-                  </span>
-                </div>
-              </div>
-            </div>
-            <span className="inline-flex items-center justify-between w-full text-[11px] font-bold text-indigo-600 pt-1">
-              <span>Lihat rincian item</span>
-              <ArrowUpRight className="h-3.5 w-3.5" />
-            </span>
-          </button>
-
-          {/* 3. Aset Tetap (Net Penyusutan) */}
-          <button
-            type="button"
-            onClick={() => setActiveNetWorthModal('fixed')}
-            className="p-4 flex flex-col justify-between space-y-3 text-left bg-white hover:bg-slate-50 transition cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-600"
-          >
-            <div className="space-y-1 w-full">
-              <div className="flex items-center justify-between text-xs font-bold text-slate-600">
-                <span className="flex items-center gap-1.5">
-                  <Building2 className="h-3.5 w-3.5 text-amber-600" />
-                  Aset Tetap (Net)
-                </span>
-                <span className="font-mono tabular-nums text-[11px] text-slate-400">
-                  {totalCurrentAssets > 0
-                    ? `${((totalFixedAssets / totalCurrentAssets) * 100).toFixed(1)}%`
-                    : '0.0%'}
-                </span>
-              </div>
-              <div className="text-lg font-black font-mono tabular-nums text-slate-900">
-                {formatValue(combinedPortfolioWealth.totalFixedAssetBookValue)}
-              </div>
-              <div className="text-[11px] text-slate-500 space-y-0.5 pt-1">
-                <div className="flex justify-between gap-2">
-                  <span>Nilai Dasar / Ekuitas</span>
-                  <span className="font-mono tabular-nums font-semibold text-slate-700">
-                    {formatValue(combinedPortfolioWealth.totalFixedAssetBasis)}
-                  </span>
-                </div>
-                <div className="flex justify-between gap-2">
-                  <span>Penyesuaian / Susut</span>
-                  <span
-                    className={`font-mono tabular-nums font-semibold ${
-                      combinedPortfolioWealth.totalFixedAssetNetChange >= 0
-                        ? 'text-emerald-600'
-                        : 'text-amber-700'
-                    }`}
-                  >
-                    {combinedPortfolioWealth.totalFixedAssetNetChange >= 0 ? '+' : '-'}
-                    {formatValue(Math.abs(combinedPortfolioWealth.totalFixedAssetNetChange))}
-                  </span>
-                </div>
-              </div>
-            </div>
-            <span className="inline-flex items-center justify-between w-full text-[11px] font-bold text-amber-700 pt-1">
-              <span>
-                Rincian ({syncedFixedAssetsList.length} aset
-                {batchAssetDepreciation.pendingCount > 0
-                  ? ` · ${batchAssetDepreciation.pendingCount} susut`
-                  : ''}
-                )
-              </span>
-              <ArrowUpRight className="h-3.5 w-3.5" />
-            </span>
-          </button>
-
-          {/* 4. Total Liabilitas / Utang */}
-          <button
-            type="button"
-            onClick={() => setActiveNetWorthModal('debt')}
-            className="p-4 flex flex-col justify-between space-y-3 text-left bg-white hover:bg-slate-50 transition cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-600"
-          >
-            <div className="space-y-1 w-full">
-              <div className="flex items-center justify-between text-xs font-bold text-slate-600">
-                <span className="flex items-center gap-1.5">
-                  <CreditCard className="h-3.5 w-3.5 text-rose-600" />
-                  Total Kewajiban
-                </span>
-                <span className="font-mono tabular-nums text-[11px] text-rose-600 font-bold">
-                  {totalCurrentAssets > 0
-                    ? `${((totalDebts / totalCurrentAssets) * 100).toFixed(1)}%`
-                    : totalDebts > 0
-                    ? '100.0%'
-                    : '0.0%'}
-                </span>
-              </div>
-              <div className="text-lg font-black font-mono tabular-nums text-rose-600">
-                {totalDebts > 0 ? `-${formatValue(totalDebts)}` : formatValue(0)}
-              </div>
-              <div className="text-[11px] text-slate-500 space-y-0.5 pt-1">
-                <div className="flex justify-between gap-2">
-                  <span>Pinjaman &amp; KPR</span>
-                  <span className="font-mono tabular-nums font-semibold text-slate-700">
-                    {formatValue(loanDebtsOnly)}
-                  </span>
-                </div>
-                <div className="flex justify-between gap-2">
-                  <span>Kartu Kredit &amp; PayLater</span>
-                  <span className="font-mono tabular-nums font-semibold text-slate-700">
-                    {formatValue(totalCreditCardBills)}
-                  </span>
-                </div>
-              </div>
-            </div>
-            <span className="inline-flex items-center justify-between w-full text-[11px] font-bold text-rose-600 pt-1">
-              <span>Lihat rincian item</span>
-              <ArrowUpRight className="h-3.5 w-3.5" />
-            </span>
-          </button>
-        </div>
-
-        {/* Centered Modal Rincian Item & Navigasi Cepat */}
-        {activeNetWorthModal && (
-          <div
-            className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4"
-            onClick={() => setActiveNetWorthModal(null)}
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="net-worth-modal-title"
-          >
-            <div
-              className="w-full max-w-2xl rounded-2xl border border-slate-200 bg-white shadow-2xl overflow-hidden flex flex-col max-h-[85vh]"
-              onClick={(e) => e.stopPropagation()}
-            >
-              {/* Modal Header */}
-              <div className="px-5 py-4 border-b border-slate-200 flex items-start justify-between gap-4">
-                <div className="flex items-start gap-3 min-w-0">
-                  <div
-                    className={`p-2.5 rounded-xl shrink-0 ${
-                      activeNetWorthModal === 'liquid'
-                        ? 'bg-blue-50 text-blue-600'
-                        : activeNetWorthModal === 'investment'
-                        ? 'bg-indigo-50 text-indigo-600'
-                        : activeNetWorthModal === 'fixed'
-                        ? 'bg-amber-50 text-amber-700'
-                        : 'bg-rose-50 text-rose-600'
-                    }`}
-                  >
-                    {activeNetWorthModal === 'liquid' && <Wallet className="h-5 w-5" />}
-                    {activeNetWorthModal === 'investment' && <TrendingUp className="h-5 w-5" />}
-                    {activeNetWorthModal === 'fixed' && <Building2 className="h-5 w-5" />}
-                    {activeNetWorthModal === 'debt' && <CreditCard className="h-5 w-5" />}
-                  </div>
-                  <div className="min-w-0">
-                    <h3
-                      id="net-worth-modal-title"
-                      className="text-base font-extrabold text-slate-900 tracking-tight"
-                    >
-                      {activeNetWorthModal === 'liquid' && 'Rincian Kas Likuid & Dana Darurat'}
-                      {activeNetWorthModal === 'investment' && 'Rincian Portofolio Investasi'}
-                      {activeNetWorthModal === 'fixed' && 'Rincian Aset Tetap & Penyusutan'}
-                      {activeNetWorthModal === 'debt' && 'Rincian Kewajiban, Utang & Tagihan Kredit'}
-                    </h3>
-                    <p className="text-xs text-slate-500 font-medium mt-0.5">
-                      {activeNetWorthModal === 'liquid' &&
-                        `${liquidAccounts.length} rekening likuid aktif · Dana Darurat tergabung ke likuiditas`}
-                      {activeNetWorthModal === 'investment' &&
-                        `${investments.length} instrumen aktif · Nilai pasar & imbal hasil terkini`}
-                      {activeNetWorthModal === 'fixed' &&
-                        `${syncedFixedAssetsList.length} aset tetap & properti KPR · Nilai buku setelah penyusutan`}
-                      {activeNetWorthModal === 'debt' &&
-                        `${debts.filter((d) => d.balance > 0).length} pinjaman aktif · ${creditCardAndPaylaterAccounts.filter((a) => getAccountCreditBill(a) > 0).length} tagihan kredit/PayLater`}
-                    </p>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-3 shrink-0">
-                  <div className="text-right hidden sm:block">
-                    <span className="text-[11px] font-semibold text-slate-400 block">
-                      Total Kategori
-                    </span>
-                    <span
-                      className={`text-sm font-black font-mono tabular-nums ${
-                        activeNetWorthModal === 'debt' ? 'text-rose-600' : 'text-slate-900'
-                      }`}
-                    >
-                      {activeNetWorthModal === 'liquid' && formatValue(totalLiquidWithEmergency)}
-                      {activeNetWorthModal === 'investment' && formatValue(totalInvestments)}
-                      {activeNetWorthModal === 'fixed' &&
-                        formatValue(combinedPortfolioWealth.totalFixedAssetBookValue)}
-                      {activeNetWorthModal === 'debt' &&
-                        (totalDebts > 0 ? `-${formatValue(totalDebts)}` : formatValue(0))}
-                    </span>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setActiveNetWorthModal(null)}
-                    className="p-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-100 text-slate-500 hover:text-slate-800 transition cursor-pointer"
-                    aria-label="Tutup modal rincian"
-                  >
-                    <X className="h-4 w-4" />
-                  </button>
-                </div>
-              </div>
-
-              {/* Modal Body */}
-              <div className="p-5 overflow-y-auto space-y-4">
-                {activeNetWorthModal === 'liquid' && (
-                  <div className="rounded-xl border border-slate-200 bg-white divide-y divide-slate-100">
-                    {liquidAccounts.length === 0 && totalEmergency <= 0 ? (
-                      <div className="p-6 text-center text-xs text-slate-500">
-                        Belum ada rekening likuid atau saldo dana darurat terdaftar.
-                      </div>
-                    ) : (
-                      <>
-                        {liquidAccounts.map((acc) => (
-                          <div
-                            key={acc.id}
-                            className="px-4 py-3 flex items-center justify-between gap-3 text-xs hover:bg-slate-50/70 transition-colors"
-                          >
-                            <div className="min-w-0">
-                              <span className="font-bold text-slate-800 block truncate">
-                                {acc.name}
-                              </span>
-                              <span className="text-[11px] text-slate-500">
-                                {acc.type === 'e-wallet'
-                                  ? 'Dompet Digital'
-                                  : acc.type === 'cash'
-                                  ? 'Kas Tunai'
-                                  : 'Rekening Bank'}
-                              </span>
-                            </div>
-                            <span className="font-mono tabular-nums font-bold text-slate-900 shrink-0">
-                              {formatValue(acc.currentBalance)}
-                            </span>
-                          </div>
-                        ))}
-                        <div className="px-4 py-3 flex items-center justify-between gap-3 text-xs bg-slate-50/70">
-                          <div className="min-w-0">
-                            <span className="font-bold text-slate-800 block">Dana Darurat</span>
-                            <span className="text-[11px] text-slate-500">
-                              Cadangan likuid khusus kondisi darurat
-                            </span>
-                          </div>
-                          <span className="font-mono tabular-nums font-bold text-blue-700 shrink-0">
-                            {formatValue(totalEmergency)}
-                          </span>
-                        </div>
-                      </>
-                    )}
-                  </div>
-                )}
-
-                {activeNetWorthModal === 'investment' && (
-                  <div className="rounded-xl border border-slate-200 bg-white divide-y divide-slate-100">
-                    {investments.length === 0 ? (
-                      <div className="p-6 text-center text-xs text-slate-500">
-                        Belum ada instrumen investasi aktif. Buka tab Portofolio untuk mencatat aset investasi.
-                      </div>
-                    ) : (
-                      investments.map((inv) => {
-                        const capital =
-                          inv.initialCapital !== undefined ? inv.initialCapital : inv.balance;
-                        const gain = inv.balance - capital;
-                        return (
-                          <div
-                            key={inv.id}
-                            className="px-4 py-3 flex items-center justify-between gap-3 text-xs hover:bg-slate-50/70 transition-colors"
-                          >
-                            <div className="min-w-0">
-                              <span className="font-bold text-slate-800 block truncate">
-                                {inv.name}
-                              </span>
-                              <span className="text-[11px] text-slate-500">
-                                {inv.category}
-                                {inv.quantity || inv.units
-                                  ? ` · ${inv.quantity ?? inv.units} ${inv.unitName || 'unit'}`
-                                  : ''}
-                              </span>
-                            </div>
-                            <div className="text-right shrink-0">
-                              <span className="font-mono tabular-nums font-bold text-slate-900 block">
-                                {formatValue(inv.balance)}
-                              </span>
-                              <span
-                                className={`font-mono tabular-nums text-[11px] font-semibold ${
-                                  gain >= 0 ? 'text-emerald-600' : 'text-rose-600'
-                                }`}
-                              >
-                                {gain >= 0 ? '+' : ''}
-                                {formatValue(gain)}
-                              </span>
-                            </div>
-                          </div>
-                        );
-                      })
-                    )}
-                  </div>
-                )}
-
-                {activeNetWorthModal === 'fixed' && (
-                  <>
-                    {batchAssetDepreciation.pendingCount > 0 && (
-                      <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                        <div className="space-y-0.5">
-                          <div className="text-xs font-extrabold text-slate-900">
-                            {batchAssetDepreciation.pendingCount} Aset Siap Posting Jurnal Penyusutan
-                          </div>
-                          <p className="text-[11px] text-slate-600 font-medium">
-                            Akumulasi draft penyusutan non-kas (Dr 5960 / Cr 1690):{' '}
-                            <span className="font-mono tabular-nums font-bold text-amber-800">
-                              -{formatValue(batchAssetDepreciation.totalDepreciationAmount)}
-                            </span>
-                          </p>
-                        </div>
-
-                        {(onSyncAllFixedAssetDepreciations || onSyncFixedAssetDepreciation) && (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              if (onSyncAllFixedAssetDepreciations) {
-                                onSyncAllFixedAssetDepreciations();
-                              } else if (onSyncFixedAssetDepreciation) {
-                                batchAssetDepreciation.draftAdjustments.forEach((entry) => {
-                                  onSyncFixedAssetDepreciation(entry.assetId);
-                                });
-                              }
-                            }}
-                            className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold transition cursor-pointer whitespace-nowrap shrink-0"
-                          >
-                            <RefreshCw className="h-3.5 w-3.5" />
-                            <span>Posting Semua Penyusutan</span>
-                          </button>
-                        )}
-                      </div>
-                    )}
-
-                    <div className="rounded-xl border border-slate-200 bg-white divide-y divide-slate-100">
-                      {syncedFixedAssetsList.length === 0 ? (
-                        <div className="p-6 text-center text-xs text-slate-500">
-                          Belum ada aset tetap atau properti KPR tercatat. Tambahkan melalui tab Portofolio &amp; Aset Tetap.
-                        </div>
-                      ) : (
-                        syncedFixedAssetsList.map((asset) => {
-                          const val = calculateFixedAssetValuation(asset, debts, systemTodayStr);
-                          const dep = calculateAssetDepreciation(asset, debts, systemTodayStr);
-                          return (
-                            <div
-                              key={asset.id}
-                              className="px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs hover:bg-slate-50/70 transition-colors"
-                            >
-                              <div className="min-w-0 space-y-0.5">
-                                <span className="font-bold text-slate-800 block truncate">
-                                  {asset.name}
-                                </span>
-                                <span className="text-[11px] text-slate-500 block">
-                                  {asset.category} · Dasar{' '}
-                                  <span className="font-mono tabular-nums font-semibold text-slate-700">
-                                    {formatValue(val.basisValue)}
-                                  </span>{' '}
-                                  · Penyesuaian{' '}
-                                  <span
-                                    className={`font-mono tabular-nums font-semibold ${
-                                      val.totalNetValueChange >= 0
-                                        ? 'text-emerald-600'
-                                        : 'text-amber-700'
-                                    }`}
-                                  >
-                                    {val.totalNetValueChange >= 0 ? '+' : '-'}
-                                    {formatValue(Math.abs(val.totalNetValueChange))}
-                                  </span>
-                                  {asset.isKprLinked && ` · ${val.ownershipPct.toFixed(1)}% lunas`}
-                                </span>
-                              </div>
-
-                              <div className="flex items-center justify-between sm:justify-end gap-2.5 shrink-0">
-                                {onSyncFixedAssetDepreciation &&
-                                  dep.isDepreciable &&
-                                  dep.cappedDepreciationAmount > 0 &&
-                                  dep.draftAdjustment && (
-                                    <button
-                                      type="button"
-                                      onClick={() => onSyncFixedAssetDepreciation(asset.id)}
-                                      title={dep.draftAdjustment.note}
-                                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-amber-200 bg-amber-50 hover:bg-amber-100 text-amber-800 text-[11px] font-bold transition cursor-pointer whitespace-nowrap shrink-0"
-                                    >
-                                      <RefreshCw className="h-3 w-3" />
-                                      <span>
-                                        Posting Susut (-{formatValue(dep.cappedDepreciationAmount)})
-                                      </span>
-                                    </button>
-                                  )}
-                                <span className="font-mono tabular-nums font-bold text-slate-900">
-                                  {formatValue(val.currentBookValue)}
-                                </span>
-                              </div>
-                            </div>
-                          );
-                        })
-                      )}
-                    </div>
-                  </>
-                )}
-
-                {activeNetWorthModal === 'debt' && (
-                  <div className="rounded-xl border border-slate-200 bg-white divide-y divide-slate-100">
-                    {debts.filter((d) => d.balance > 0).length === 0 &&
-                    creditCardAndPaylaterAccounts.filter((a) => getAccountCreditBill(a) > 0)
-                      .length === 0 ? (
-                      <div className="p-6 text-center text-xs text-slate-500">
-                        Tidak ada kewajiban pinjaman atau tagihan kartu kredit/PayLater aktif saat ini.
-                      </div>
-                    ) : (
-                      <>
-                        {debts
-                          .filter((d) => d.balance > 0)
-                          .map((debt) => (
-                            <div
-                              key={debt.id}
-                              className="px-4 py-3 flex items-center justify-between gap-3 text-xs hover:bg-slate-50/70 transition-colors"
-                            >
-                              <div className="min-w-0">
-                                <span className="font-bold text-slate-800 block truncate">
-                                  {debt.name}
-                                </span>
-                                <span className="text-[11px] text-slate-500">
-                                  {debt.category} · Bunga {debt.interestRate}%/thn
-                                </span>
-                              </div>
-                              <span className="font-mono tabular-nums font-bold text-rose-600 shrink-0">
-                                -{formatValue(debt.balance)}
-                              </span>
-                            </div>
-                          ))}
-                        {creditCardAndPaylaterAccounts
-                          .filter((acc) => getAccountCreditBill(acc) > 0)
-                          .map((acc) => {
-                            const bill = getAccountCreditBill(acc);
-                            return (
-                              <div
-                                key={acc.id}
-                                className="px-4 py-3 flex items-center justify-between gap-3 text-xs hover:bg-slate-50/70 transition-colors"
-                              >
-                                <div className="min-w-0">
-                                  <span className="font-bold text-slate-800 block truncate">
-                                    {acc.name}
-                                  </span>
-                                  <span className="text-[11px] text-slate-500">
-                                    {acc.type === 'credit-card'
-                                      ? 'Tagihan Kartu Kredit'
-                                      : 'Tagihan PayLater'}
-                                  </span>
-                                </div>
-                                <span className="font-mono tabular-nums font-bold text-rose-600 shrink-0">
-                                  -{formatValue(bill)}
-                                </span>
-                              </div>
-                            );
-                          })}
-                      </>
-                    )}
-                  </div>
-                )}
-              </div>
-
-              {/* Modal Footer with Quick Navigation */}
-              <div className="px-5 py-4 border-t border-slate-200 bg-slate-50/70 flex items-center justify-between gap-3">
-                <button
-                  type="button"
-                  onClick={() => setActiveNetWorthModal(null)}
-                  className="px-4 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-100 text-slate-700 text-xs font-bold transition cursor-pointer whitespace-nowrap"
-                >
-                  Tutup
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const targetTab =
-                      activeNetWorthModal === 'liquid'
-                        ? 'accounts'
-                        : activeNetWorthModal === 'debt'
-                        ? 'debts'
-                        : 'investments';
-                    setActiveNetWorthModal(null);
-                    onQuickAction(targetTab);
-                  }}
-                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold transition cursor-pointer whitespace-nowrap shrink-0"
-                >
-                  <span>
-                    {activeNetWorthModal === 'liquid' && 'Kelola Rekening'}
-                    {activeNetWorthModal === 'investment' && 'Buka Portofolio'}
-                    {activeNetWorthModal === 'fixed' && 'Kelola Aset Tetap'}
-                    {activeNetWorthModal === 'debt' && 'Kelola Utang & KPR'}
-                  </span>
-                  <ArrowRight className="h-3.5 w-3.5" />
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-      </motion.div>
+      {/* GRAFIK TREND NET WORTH 6 BULAN TERAKHIR */}
+      <TrendNetWorthChart
+        data={netWorthTrend6Months}
+        currentNetWorth={netWorth}
+        isFocusMode={isFocusMode}
+        formatValue={formatValue}
+        formatCompactValue={formatCompactValue}
+      />
 
       {/* FINANCIAL HEALTH SCORE CARD */}
       <motion.div variants={cardVariants} className="bg-gradient-to-br from-slate-900 via-slate-950 to-indigo-950 p-6 rounded-2xl text-white shadow-xl border border-indigo-900/50 space-y-6">
@@ -2840,331 +3106,249 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
         </div>
       </motion.div>
 
-      {/* RESTRUCTURED MAIN GRID LAYOUT */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        
-        {/* LEFT COLUMN: RINGKASAN SALDO & TARGET TABUNGAN (lg:col-span-4) */}
-        <div className="lg:col-span-4 space-y-6">
-          
-          {/* Ringkasan Saldo Header Card */}
-          <motion.div variants={cardVariants} className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm space-y-4 transition-all duration-300 hover:scale-[1.015] hover:shadow-md hover:border-blue-300/80">
-            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-              <h3 className="font-bold text-slate-800 text-xs uppercase tracking-wider flex items-center gap-1.5">
-                <Wallet className="h-4 w-4 text-blue-600" />
-                Ringkasan Saldo
-              </h3>
-              <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[9px] font-bold border ${healthColor}`}>
-                {healthStatus}
-              </span>
-            </div>
-
-            {/* Net Worth */}
-            <div className="space-y-1">
-              <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Kekayaan Bersih</span>
-              <h4 className={`text-2xl font-black tracking-tight ${netWorth >= 0 ? 'text-slate-800' : 'text-rose-600'}`}>
-                {isFocusMode ? 'Rp ••••••' : formatterIDR.format(netWorth)}
-              </h4>
-              <p className="text-[10px] text-slate-400 font-medium">
-                Aset Likuid + Darurat + Investasi + Aset Tetap - Utang
+      {/* BALANCED ANALYTICS CHARTS & WEEKLY/BUDGET MONITORING */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* 6-Month Monthly Spending Trend Line Chart */}
+        <motion.div variants={cardVariants} className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm transition-all duration-300 hover:shadow-md hover:border-rose-200/80">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
+            <div>
+              <div className="flex items-center gap-2">
+                <TrendingUp className="h-4 w-4 text-rose-500 shrink-0" />
+                <h3 className="font-extrabold text-slate-800 text-xs uppercase tracking-wider">Tren Pengeluaran Bulanan (6 Bulan Terakhir)</h3>
+              </div>
+              <p className="text-[11px] text-slate-400 mt-0.5 font-medium leading-relaxed">
+                Evaluasi fluktuasi total konsumsi dan pengeluaran bulanan Anda untuk menjaga kestabilan finansial.
               </p>
             </div>
-
-            {/* Sparkline for Net Worth Trend */}
-            <div className="h-10 pt-1">
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={sparklineData} margin={{ top: 2, right: 2, left: 2, bottom: 2 }}>
-                  <Tooltip 
-                    content={({ active, payload }) => {
-                      if (active && payload && payload.length) {
-                        const data = payload[0].payload;
-                        return (
-                          <div className="bg-white text-slate-800 p-2.5 rounded-lg shadow-md border border-slate-150 text-[10px]">
-                            <p className="font-bold text-slate-600">{data.date}</p>
-                            <p className="mt-0.5 font-semibold text-blue-600">Kekayaan: {isFocusMode ? 'Rp ••••••' : formatCompactIDR(data.netWorth)}</p>
-                          </div>
-                        );
-                      }
-                      return null;
-                    }}
-                  />
-                  <Line 
-                    type="monotone" 
-                    dataKey="netWorth" 
-                    stroke={netWorth >= 0 ? "#10b981" : "#f43f5e"} 
-                    strokeWidth={2} 
-                    dot={false} 
-                  />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
-
-            {/* Balance Breakdown Grid */}
-            <div className="grid grid-cols-2 gap-3 pt-2 border-t border-slate-100 text-xs">
-              <div className="space-y-0.5">
-                <span className="text-[9px] text-slate-400 font-bold uppercase block">Pemasukan</span>
-                <span className="font-extrabold text-emerald-600 block">{isFocusMode ? 'Rp ••••••' : formatterIDR.format(monthlyIncome)}</span>
-              </div>
-              <div className="space-y-0.5">
-                <span className="text-[9px] text-slate-400 font-bold uppercase block">Pengeluaran</span>
-                <span className="font-extrabold text-slate-700 block">{isFocusMode ? 'Rp ••••••' : formatterIDR.format(monthlyExpense)}</span>
-              </div>
-              <div className="space-y-0.5">
-                <span className="text-[9px] text-slate-400 font-bold uppercase block">Aset Likuid</span>
-                <span className="font-extrabold text-blue-600 block">{isFocusMode ? 'Rp ••••••' : formatterIDR.format(totalLiquidAssets)}</span>
-              </div>
-              <div className="space-y-0.5">
-                <span className="text-[9px] text-slate-400 font-bold uppercase block">Total Utang</span>
-                <span className="font-extrabold text-rose-600 block">{isFocusMode ? 'Rp ••••••' : formatterIDR.format(totalDebts)}</span>
-              </div>
-            </div>
-          </motion.div>
-
-          {/* PERBANDINGAN PENGELUARAN MINGGUAN CARD */}
-          <motion.div variants={cardVariants} className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm space-y-3 transition-all hover:shadow-md hover:border-blue-300">
-            <div className="flex items-center justify-between border-b border-slate-100 pb-2.5">
-              <div className="flex items-center gap-2">
-                <div className="p-2 bg-blue-50 text-blue-600 rounded-xl">
-                  <TrendingUp className="h-4 w-4" />
-                </div>
-                <div>
-                  <h3 className="font-bold text-slate-800 text-xs uppercase tracking-wider">
-                    Perbandingan Pengeluaran Mingguan
-                  </h3>
-                  <p className="text-[10px] text-slate-400 font-medium">Minggu Ini vs Minggu Lalu</p>
-                </div>
-              </div>
-              <span className={`px-2.5 py-1 rounded-full text-[10px] font-black uppercase flex items-center gap-1 ${
-                weeklyExpenseComparison.isIncrease
-                  ? 'bg-rose-100 text-rose-700 border border-rose-200'
-                  : weeklyExpenseComparison.isEqual
-                  ? 'bg-slate-100 text-slate-700 border border-slate-200'
-                  : 'bg-emerald-100 text-emerald-700 border border-emerald-200'
-              }`}>
-                {weeklyExpenseComparison.isIncrease ? (
-                  <ArrowUpRight className="h-3 w-3" />
-                ) : weeklyExpenseComparison.isEqual ? null : (
-                  <ArrowDownRight className="h-3 w-3" />
-                )}
-                {weeklyExpenseComparison.isIncrease ? '+' : ''}{weeklyExpenseComparison.pctChange.toFixed(1)}%
+            <div className="flex items-center gap-1.5 shrink-0">
+              <span className="text-[9px] bg-rose-50 text-rose-600 border border-rose-100 px-2.5 py-1 rounded-full font-bold uppercase tracking-wider">
+                Pengeluaran
+              </span>
+              <span className="text-[9px] bg-emerald-50 text-emerald-600 border border-emerald-100 px-2.5 py-1 rounded-full font-bold uppercase tracking-wider">
+                Pemasukan
               </span>
             </div>
+          </div>
+          <div className="h-72">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={monthlySpendingTrend6Months} margin={{ top: 15, right: 20, left: -10, bottom: 5 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#f8fafc" vertical={false} />
+                <XAxis 
+                  dataKey="monthLabel" 
+                  tick={{ fill: '#64748b', fontSize: 10, fontWeight: 'bold' }}
+                  axisLine={{ stroke: '#e2e8f0' }}
+                  tickLine={false}
+                />
+                <YAxis 
+                  domain={[0, (dataMax: number) => (dataMax <= 0 ? 1000000 : Math.ceil(dataMax * 1.15))]}
+                  tickFormatter={(val) => `${val >= 1000000 ? `${(val / 1000000).toFixed(1)}M` : `${(val / 1000).toFixed(0)}K`}`}
+                  tick={{ fill: '#64748b', fontSize: 10 }}
+                  axisLine={{ stroke: '#e2e8f0' }}
+                  tickLine={false}
+                />
+                <Tooltip 
+                  formatter={(value, name) => [isFocusMode ? 'Rp ••••••' : formatterIDR.format(Number(value)), name]}
+                  contentStyle={{ backgroundColor: '#ffffff', borderRadius: '8px', border: '1px solid #e2e8f0', color: '#1e293b', fontSize: '12px', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
+                  itemStyle={{ fontWeight: 'bold' }}
+                  labelStyle={{ color: '#64748b', fontWeight: 'bold' }}
+                />
+                <Legend iconSize={8} wrapperStyle={{ fontSize: '10px', fontWeight: 'bold', paddingTop: '10px' }} />
+                <Line 
+                  type="monotone" 
+                  dataKey="Pengeluaran" 
+                  name="Total Pengeluaran"
+                  stroke="#e11d48" 
+                  strokeWidth={3} 
+                  dot={{ r: 4, strokeWidth: 2, fill: '#ffffff', stroke: '#e11d48' }} 
+                  activeDot={{ r: 7, strokeWidth: 0, fill: '#e11d48' }}
+                />
+                <Line 
+                  type="monotone" 
+                  dataKey="Pemasukan" 
+                  name="Total Pemasukan"
+                  stroke="#10b981" 
+                  strokeWidth={2} 
+                  strokeDasharray="4 4"
+                  dot={{ r: 3, strokeWidth: 1 }} 
+                  activeDot={{ r: 5, strokeWidth: 0 }}
+                />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        </motion.div>
 
-            <div className="grid grid-cols-2 gap-3 text-xs font-medium bg-slate-50 p-3 rounded-xl border border-slate-150">
-              <div>
-                <span className="text-[9px] text-slate-400 font-extrabold uppercase block">Minggu Ini (7 Hr)</span>
-                <span className="font-black text-slate-800 text-sm font-mono block">
-                  {formatValue(weeklyExpenseComparison.thisWeekTotal)}
-                </span>
-              </div>
-              <div>
-                <span className="text-[9px] text-slate-400 font-extrabold uppercase block">Minggu Lalu</span>
-                <span className="font-bold text-slate-600 text-xs font-mono block">
-                  {formatValue(weeklyExpenseComparison.lastWeekTotal)}
-                </span>
-              </div>
+        {/* 30-Day Cash Flow Trend Chart */}
+        <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm animate-fadeIn transition-all duration-300 hover:shadow-md">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
+            <div>
+              <h3 className="font-bold text-slate-800 text-xs uppercase tracking-wider">Tren Arus Kas 30 Hari Terakhir</h3>
+              <p className="text-[11px] text-slate-400 mt-0.5 font-medium leading-relaxed">
+                Perbandingan harian antara total uang masuk (Pemasukan) dan uang keluar (Pengeluaran, Tabungan, & Investasi).
+              </p>
             </div>
-
-            <p className="text-[11px] text-slate-600 font-medium leading-relaxed bg-blue-50/60 p-2.5 rounded-lg border border-blue-100">
-              {weeklyExpenseComparison.isIncrease ? (
-                <>⚠️ Pengeluaran minggu ini <strong className="text-rose-600">naik {formatValue(weeklyExpenseComparison.diff)}</strong> dibandingkan minggu lalu. Harap jaga ritme belanja harian Anda.</>
-              ) : weeklyExpenseComparison.isEqual ? (
-                <>Pengeluaran minggu ini relatif stabil sama dengan minggu lalu.</>
-              ) : (
-                <> Bagus! Pengeluaran minggu ini <strong className="text-emerald-600">hemat {formatValue(Math.abs(weeklyExpenseComparison.diff))}</strong> dibandingkan minggu lalu. Disiplin finansial berjalan baik!</>
-              )}
-            </p>
-          </motion.div>
-
+            <div className="flex items-center gap-1.5 shrink-0">
+              <span className="text-[9px] bg-emerald-50 text-emerald-600 border border-emerald-100 px-2 py-0.5 rounded-full font-bold uppercase tracking-wider">
+                Masuk
+              </span>
+              <span className="text-[9px] bg-rose-50 text-rose-600 border border-rose-100 px-2 py-0.5 rounded-full font-bold uppercase tracking-wider">
+                Keluar
+              </span>
+            </div>
+          </div>
+          <div className="h-72">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={cashFlowTrend30Days} margin={{ top: 15, right: 20, left: -10, bottom: 5 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#f8fafc" vertical={false} />
+                <XAxis 
+                  dataKey="date" 
+                  tick={{ fill: '#64748b', fontSize: 10 }}
+                  axisLine={{ stroke: '#e2e8f0' }}
+                  tickLine={false}
+                />
+                <YAxis 
+                  domain={[0, (dataMax: number) => (dataMax <= 0 ? 1000000 : Math.ceil(dataMax * 1.15))]}
+                  tickFormatter={(val) => `${val >= 1000000 ? `${(val / 1000000).toFixed(1)}M` : `${(val / 1000).toFixed(0)}K`}`}
+                  tick={{ fill: '#64748b', fontSize: 10 }}
+                  axisLine={{ stroke: '#e2e8f0' }}
+                  tickLine={false}
+                />
+                <Tooltip 
+                  formatter={(value, name) => [isFocusMode ? 'Rp ••••••' : formatterIDR.format(Number(value)), name]}
+                  contentStyle={{ backgroundColor: '#ffffff', borderRadius: '8px', border: '1px solid #e2e8f0', color: '#1e293b', fontSize: '12px', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
+                  itemStyle={{ fontWeight: 'bold' }}
+                  labelStyle={{ color: '#64748b', fontWeight: 'bold' }}
+                />
+                <Legend iconSize={8} wrapperStyle={{ fontSize: '10px', fontWeight: 'bold', paddingTop: '10px' }} />
+                <Line 
+                  type="monotone" 
+                  dataKey="Pemasukan" 
+                  stroke="#10b981" 
+                  strokeWidth={3} 
+                  dot={{ r: 3, strokeWidth: 1 }} 
+                  activeDot={{ r: 5, strokeWidth: 0 }}
+                />
+                <Line 
+                  type="monotone" 
+                  dataKey="Pengeluaran" 
+                  stroke="#ef4444" 
+                  strokeWidth={3} 
+                  dot={{ r: 3, strokeWidth: 1 }} 
+                  activeDot={{ r: 5, strokeWidth: 0 }}
+                />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
         </div>
+      </div>
 
-        {/* RIGHT COLUMN: TREN GRAFIK 30 HARI & NOTIFIKASI ANGGARAN (lg:col-span-8) */}
-        <div className="lg:col-span-8 space-y-6">
-          
-          {/* 6-Month Monthly Spending Trend Line Chart */}
-          <motion.div variants={cardVariants} className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm transition-all duration-300 hover:scale-[1.01] hover:shadow-md hover:border-rose-200/80">
-            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
+        {/* PERBANDINGAN PENGELUARAN MINGGUAN CARD */}
+        <motion.div variants={cardVariants} className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm space-y-3 transition-all hover:shadow-md hover:border-blue-300">
+          <div className="flex items-center justify-between border-b border-slate-100 pb-2.5">
+            <div className="flex items-center gap-2">
+              <div className="p-2 bg-blue-50 text-blue-600 rounded-xl">
+                <TrendingUp className="h-4 w-4" />
+              </div>
               <div>
-                <div className="flex items-center gap-2">
-                  <TrendingUp className="h-4 w-4 text-rose-500 shrink-0" />
-                  <h3 className="font-extrabold text-slate-800 text-xs uppercase tracking-wider">Tren Pengeluaran Bulanan (6 Bulan Terakhir)</h3>
-                </div>
-                <p className="text-[11px] text-slate-400 mt-0.5 font-medium leading-relaxed">
-                  Evaluasi fluktuasi total konsumsi dan pengeluaran bulanan Anda untuk menjaga kestabilan finansial.
-                </p>
-              </div>
-              <div className="flex items-center gap-1.5 shrink-0">
-                <span className="text-[9px] bg-rose-50 text-rose-600 border border-rose-100 px-2.5 py-1 rounded-full font-bold uppercase tracking-wider">
-                  Pengeluaran
-                </span>
-                <span className="text-[9px] bg-emerald-50 text-emerald-600 border border-emerald-100 px-2.5 py-1 rounded-full font-bold uppercase tracking-wider">
-                  Pemasukan
-                </span>
+                <h3 className="font-bold text-slate-800 text-xs uppercase tracking-wider">
+                  Perbandingan Pengeluaran Mingguan
+                </h3>
+                <p className="text-[10px] text-slate-400 font-medium">Minggu Ini vs Minggu Lalu</p>
               </div>
             </div>
-            <div className="h-72">
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={monthlySpendingTrend6Months} margin={{ top: 15, right: 20, left: -10, bottom: 5 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#f8fafc" vertical={false} />
-                  <XAxis 
-                    dataKey="monthLabel" 
-                    tick={{ fill: '#64748b', fontSize: 10, fontWeight: 'bold' }}
-                    axisLine={{ stroke: '#e2e8f0' }}
-                    tickLine={false}
-                  />
-                  <YAxis 
-                    domain={[0, (dataMax: number) => (dataMax <= 0 ? 1000000 : Math.ceil(dataMax * 1.15))]}
-                    tickFormatter={(val) => `${val >= 1000000 ? `${(val / 1000000).toFixed(1)}M` : `${(val / 1000).toFixed(0)}K`}`}
-                    tick={{ fill: '#64748b', fontSize: 10 }}
-                    axisLine={{ stroke: '#e2e8f0' }}
-                    tickLine={false}
-                  />
-                  <Tooltip 
-                    formatter={(value, name) => [isFocusMode ? 'Rp ••••••' : formatterIDR.format(Number(value)), name]}
-                    contentStyle={{ backgroundColor: '#ffffff', borderRadius: '8px', border: '1px solid #e2e8f0', color: '#1e293b', fontSize: '12px', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
-                    itemStyle={{ fontWeight: 'bold' }}
-                    labelStyle={{ color: '#64748b', fontWeight: 'bold' }}
-                  />
-                  <Legend iconSize={8} wrapperStyle={{ fontSize: '10px', fontWeight: 'bold', paddingTop: '10px' }} />
-                  <Line 
-                    type="monotone" 
-                    dataKey="Pengeluaran" 
-                    name="Total Pengeluaran"
-                    stroke="#e11d48" 
-                    strokeWidth={3} 
-                    dot={{ r: 4, strokeWidth: 2, fill: '#ffffff', stroke: '#e11d48' }} 
-                    activeDot={{ r: 7, strokeWidth: 0, fill: '#e11d48' }}
-                  />
-                  <Line 
-                    type="monotone" 
-                    dataKey="Pemasukan" 
-                    name="Total Pemasukan"
-                    stroke="#10b981" 
-                    strokeWidth={2} 
-                    strokeDasharray="4 4"
-                    dot={{ r: 3, strokeWidth: 1 }} 
-                    activeDot={{ r: 5, strokeWidth: 0 }}
-                  />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
-          </motion.div>
+            <span className={`px-2.5 py-1 rounded-full text-[10px] font-black uppercase flex items-center gap-1 ${
+              weeklyExpenseComparison.isIncrease
+                ? 'bg-rose-100 text-rose-700 border border-rose-200'
+                : weeklyExpenseComparison.isEqual
+                ? 'bg-slate-100 text-slate-700 border border-slate-200'
+                : 'bg-emerald-100 text-emerald-700 border border-emerald-200'
+            }`}>
+              {weeklyExpenseComparison.isIncrease ? (
+                <ArrowUpRight className="h-3 w-3" />
+              ) : weeklyExpenseComparison.isEqual ? null : (
+                <ArrowDownRight className="h-3 w-3" />
+              )}
+              {weeklyExpenseComparison.isIncrease ? '+' : ''}{weeklyExpenseComparison.pctChange.toFixed(1)}%
+            </span>
+          </div>
 
-          {/* 30-Day Cash Flow Trend Chart */}
-          <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm animate-fadeIn transition-all duration-300 hover:scale-[1.01] hover:shadow-md">
-            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
-              <div>
-                <h3 className="font-bold text-slate-800 text-xs uppercase tracking-wider">Tren Arus Kas 30 Hari Terakhir</h3>
-                <p className="text-[11px] text-slate-400 mt-0.5 font-medium leading-relaxed">
-                  Perbandingan harian antara total uang masuk (Pemasukan) dan uang keluar (Pengeluaran, Tabungan, & Investasi).
-                </p>
-              </div>
-              <div className="flex items-center gap-1.5 shrink-0">
-                <span className="text-[9px] bg-emerald-50 text-emerald-600 border border-emerald-100 px-2 py-0.5 rounded-full font-bold uppercase tracking-wider">
-                  Masuk
-                </span>
-                <span className="text-[9px] bg-rose-50 text-rose-600 border border-rose-100 px-2 py-0.5 rounded-full font-bold uppercase tracking-wider">
-                  Keluar
-                </span>
-              </div>
+          <div className="grid grid-cols-2 gap-3 text-xs font-medium bg-slate-50 p-3 rounded-xl border border-slate-150">
+            <div>
+              <span className="text-[9px] text-slate-400 font-extrabold uppercase block">Minggu Ini (7 Hr)</span>
+              <span className="font-black text-slate-800 text-sm font-mono tabular-nums block">
+                {formatValue(weeklyExpenseComparison.thisWeekTotal)}
+              </span>
             </div>
-            <div className="h-72">
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={cashFlowTrend30Days} margin={{ top: 15, right: 20, left: -10, bottom: 5 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#f8fafc" vertical={false} />
-                  <XAxis 
-                    dataKey="date" 
-                    tick={{ fill: '#64748b', fontSize: 10 }}
-                    axisLine={{ stroke: '#e2e8f0' }}
-                    tickLine={false}
-                  />
-                  <YAxis 
-                    domain={[0, (dataMax: number) => (dataMax <= 0 ? 1000000 : Math.ceil(dataMax * 1.15))]}
-                    tickFormatter={(val) => `${val >= 1000000 ? `${(val / 1000000).toFixed(1)}M` : `${(val / 1000).toFixed(0)}K`}`}
-                    tick={{ fill: '#64748b', fontSize: 10 }}
-                    axisLine={{ stroke: '#e2e8f0' }}
-                    tickLine={false}
-                  />
-                  <Tooltip 
-                    formatter={(value, name) => [isFocusMode ? 'Rp ••••••' : formatterIDR.format(Number(value)), name]}
-                    contentStyle={{ backgroundColor: '#ffffff', borderRadius: '8px', border: '1px solid #e2e8f0', color: '#1e293b', fontSize: '12px', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
-                    itemStyle={{ fontWeight: 'bold' }}
-                    labelStyle={{ color: '#64748b', fontWeight: 'bold' }}
-                  />
-                  <Legend iconSize={8} wrapperStyle={{ fontSize: '10px', fontWeight: 'bold', paddingTop: '10px' }} />
-                  <Line 
-                    type="monotone" 
-                    dataKey="Pemasukan" 
-                    stroke="#10b981" 
-                    strokeWidth={3} 
-                    dot={{ r: 3, strokeWidth: 1 }} 
-                    activeDot={{ r: 5, strokeWidth: 0 }}
-                  />
-                  <Line 
-                    type="monotone" 
-                    dataKey="Pengeluaran" 
-                    stroke="#ef4444" 
-                    strokeWidth={3} 
-                    dot={{ r: 3, strokeWidth: 1 }} 
-                    activeDot={{ r: 5, strokeWidth: 0 }}
-                  />
-                </LineChart>
-              </ResponsiveContainer>
+            <div>
+              <span className="text-[9px] text-slate-400 font-extrabold uppercase block">Minggu Lalu</span>
+              <span className="font-bold text-slate-600 text-xs font-mono tabular-nums block">
+                {formatValue(weeklyExpenseComparison.lastWeekTotal)}
+              </span>
             </div>
           </div>
 
-          {/* Budget Overruns (Notification of Budget Limits) */}
-          {budgetAlerts.length > 0 ? (
-            <div className="bg-rose-50/50 border border-rose-100 rounded-xl p-5 shadow-xs space-y-4 animate-fadeIn">
-              <div className="flex items-start gap-3">
-                <div className="p-1.5 bg-rose-600 text-white rounded-lg animate-pulse shrink-0">
-                  <AlertTriangle className="h-4.5 w-4.5" />
-                </div>
-                <div>
-                  <h3 className="text-xs font-black text-rose-800 uppercase tracking-wider">
-                    Pemberitahuan: Batas Anggaran Terlampaui (&gt;90%)
-                  </h3>
-                  <p className="text-[11px] text-rose-600 mt-0.5 font-semibold leading-relaxed">
-                    Kategori pengeluaran di bawah ini terdeteksi telah mendekati atau melampaui alokasi bulanan Anda:
-                  </p>
-                </div>
+          <p className="text-[11px] text-slate-600 font-medium leading-relaxed bg-blue-50/60 p-2.5 rounded-lg border border-blue-100">
+            {weeklyExpenseComparison.isIncrease ? (
+              <>⚠️ Pengeluaran minggu ini <strong className="text-rose-600">naik {formatValue(weeklyExpenseComparison.diff)}</strong> dibandingkan minggu lalu. Harap jaga ritme belanja harian Anda.</>
+            ) : weeklyExpenseComparison.isEqual ? (
+              <>Pengeluaran minggu ini relatif stabil sama dengan minggu lalu.</>
+            ) : (
+              <> Bagus! Pengeluaran minggu ini <strong className="text-emerald-600">hemat {formatValue(Math.abs(weeklyExpenseComparison.diff))}</strong> dibandingkan minggu lalu. Disiplin finansial berjalan baik!</>
+            )}
+          </p>
+        </motion.div>
+
+        {/* Budget Overruns (Notification of Budget Limits) */}
+        {budgetAlerts.length > 0 ? (
+          <div className="bg-rose-50/50 border border-rose-100 rounded-2xl p-5 shadow-xs space-y-4 animate-fadeIn">
+            <div className="flex items-start gap-3">
+              <div className="p-1.5 bg-rose-600 text-white rounded-lg animate-pulse shrink-0">
+                <AlertTriangle className="h-4.5 w-4.5" />
               </div>
+              <div>
+                <h3 className="text-xs font-black text-rose-800 uppercase tracking-wider">
+                  Peringatan Batas Anggaran (&gt;90%)
+                </h3>
+                <p className="text-[11px] text-rose-600 mt-0.5 font-semibold leading-relaxed">
+                  Kategori pengeluaran di bawah ini terdeteksi telah mendekati atau melampaui alokasi bulanan Anda:
+                </p>
+              </div>
+            </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                {budgetAlerts.map(alert => (
-                  <div key={`ba2-${alert.category}`} className="bg-white p-4 rounded-xl border border-rose-100 shadow-2xs space-y-2">
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="font-extrabold text-slate-800 uppercase tracking-tight">{alert.category}</span>
-                      <span className={`font-mono font-black ${alert.rawPercentage >= 100 ? 'text-rose-600' : 'text-amber-600'}`}>
-                        {alert.rawPercentage.toFixed(0)}% Terpakai
-                      </span>
-                    </div>
-                    
-                    {/* Progress Bar */}
-                    <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
-                      <div 
-                        className={`h-full rounded-full transition-all duration-500 ${
-                          alert.rawPercentage >= 100 ? 'bg-rose-600' : 'bg-amber-500'
-                        }`} 
-                        style={{ width: `${Math.min(alert.rawPercentage, 100)}%` }}
-                      />
-                    </div>
-
-                    <div className="flex justify-between items-center text-[10px] text-slate-400 font-bold">
-                      <span>Terpakai: <strong className="text-slate-700 font-extrabold">{isFocusMode ? 'Rp ••••••' : formatterIDR.format(alert.actual)}</strong></span>
-                      <span>Batas: <strong className="text-slate-500 font-semibold">{isFocusMode ? 'Rp ••••••' : formatterIDR.format(alert.limit)}</strong></span>
-                    </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {budgetAlerts.map(alert => (
+                <div key={`ba2-${alert.category}`} className="bg-white p-4 rounded-xl border border-rose-100 shadow-2xs space-y-2">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-extrabold text-slate-800 uppercase tracking-tight">{alert.category}</span>
+                    <span className={`font-mono font-black ${alert.rawPercentage >= 100 ? 'text-rose-600' : 'text-amber-600'}`}>
+                      {alert.rawPercentage.toFixed(0)}% Terpakai
+                    </span>
                   </div>
-                ))}
-              </div>
-            </div>
-          ) : (
-            <div className="bg-emerald-50/40 border border-emerald-100 rounded-xl p-4 flex items-center gap-3 text-xs text-slate-600 font-medium">
-              <span className="text-emerald-500 text-sm font-bold">✓</span>
-              <span>Seluruh kategori pengeluaran Anda bulan ini masih terkendali dan berada di dalam koridor anggaran yang aman. Hebat!</span>
-            </div>
-          )}
+                  
+                  {/* Progress Bar */}
+                  <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
+                    <div 
+                      className={`h-full rounded-full transition-all duration-500 ${
+                        alert.rawPercentage >= 100 ? 'bg-rose-600' : 'bg-amber-500'
+                      }`} 
+                      style={{ width: `${Math.min(alert.rawPercentage, 100)}%` }}
+                    />
+                  </div>
 
-        </div>
+                  <div className="flex justify-between items-center text-[10px] text-slate-400 font-bold">
+                    <span>Terpakai: <strong className="text-slate-700 font-extrabold">{isFocusMode ? 'Rp ••••••' : formatterIDR.format(alert.actual)}</strong></span>
+                    <span>Batas: <strong className="text-slate-500 font-semibold">{isFocusMode ? 'Rp ••••••' : formatterIDR.format(alert.limit)}</strong></span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <div className="bg-emerald-50/40 border border-emerald-100 rounded-2xl p-5 flex items-center gap-3 text-xs text-slate-600 font-medium">
+            <span className="text-emerald-500 text-sm font-bold">✓</span>
+            <span>Seluruh kategori pengeluaran Anda bulan ini masih terkendali dan berada di dalam koridor anggaran yang aman. Hebat!</span>
+          </div>
+        )}
       </div>
 
       {/* SECTION: PREDIKSI ARUS KAS & ESTIMASI SALDO AKUN AKHIR BULAN MENDATANG */}
@@ -3867,146 +4051,40 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
         </div>
       </div>
 
-      {/* --- SECTION: ANALISIS KESEHATAN KEUANGAN & PROYEKSI FINANSIAL --- */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Left Card: Komposisi Aset Lancar vs Total Utang */}
-        <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between">
+      {/* --- SECTION: PROYEKSI KESEHATAN FINANSIAL (3 BULAN) --- */}
+      <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
           <div>
-            <div className="flex items-center justify-between mb-2">
-              <h3 className="font-extrabold text-slate-800 text-sm uppercase tracking-wider flex items-center gap-1.5">
-                <TrendingUp className="h-4.5 w-4.5 text-blue-600" />
-                Komposisi Aset Lancar vs Total Utang
-              </h3>
-              <span className="text-[10px] bg-slate-100 text-slate-600 px-2.5 py-0.5 rounded-full font-bold uppercase tracking-wider">
-                Struktur Keuangan
-              </span>
-            </div>
-            <p className="text-xs text-slate-400 mb-4 font-medium">
-              Perbandingan akumulasi dana likuid, dana darurat, investasi, serta aset tetap &amp; KPR terhadap kewajiban utang aktif saat ini.
-            </p>
-          </div>
-
-          <div className="h-48 w-full mt-2">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart
-                data={assetDebtChartData}
-                layout="vertical"
-                margin={{ top: 5, right: 20, left: -10, bottom: 5 }}
-              >
-                <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" horizontal={false} />
-                <XAxis 
-                  type="number" 
-                  tickFormatter={(val) => formatCompactIDR(val)} 
-                  tick={{ fill: '#64748b', fontSize: 10 }} 
-                  axisLine={{ stroke: '#cbd5e1' }}
-                  tickLine={false}
-                />
-                <YAxis 
-                  dataKey="category" 
-                  type="category" 
-                  tick={{ fill: '#475569', fontSize: 11, fontWeight: 'bold' }} 
-                  axisLine={{ stroke: '#cbd5e1' }}
-                  tickLine={false}
-                />
-                <Tooltip 
-                  formatter={(value, name) => [isFocusMode ? 'Rp ••••••' : formatterIDR.format(Number(value)), name]}
-                  contentStyle={{ backgroundColor: '#1e293b', borderRadius: '8px', border: 'none', color: '#fff', fontSize: '12px' }}
-                />
-                <Legend iconSize={10} wrapperStyle={{ fontSize: '10px', fontWeight: 'bold', paddingTop: '10px' }} />
-                <Bar dataKey="Kas & Bank" stackId="assets" fill="#3b82f6" radius={[0, 0, 0, 0]} />
-                <Bar dataKey="Dana Darurat" stackId="assets" fill="#10b981" radius={[0, 0, 0, 0]} />
-                <Bar dataKey="Portofolio Investasi" stackId="assets" fill="#6366f1" radius={[0, 0, 0, 0]} />
-                <Bar dataKey="Aset Tetap & KPR" stackId="assets" fill="#0d9488" radius={[0, 4, 4, 0]} />
-                <Bar dataKey="Total Utang" fill="#ef4444" radius={[0, 4, 4, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-
-          {/* Detailed Breakdown Legend List */}
-          <div className="mt-4 pt-4 border-t border-slate-100 grid grid-cols-2 sm:grid-cols-5 gap-2.5 text-center">
-            <div className="bg-slate-50 p-2 rounded-lg border border-slate-100">
-              <span className="text-[9px] text-slate-400 block font-bold uppercase tracking-wider">Kas & Bank</span>
-              <span className="text-xs font-bold text-blue-600 font-mono tabular-nums mt-0.5 block">
-                {formatValue(totalLiquidAssets)}
-              </span>
-              <span className="text-[9px] text-slate-400 font-medium">
-                {totalCurrentAssets > 0 ? `${((totalLiquidAssets / totalCurrentAssets) * 100).toFixed(0)}% aset` : '0%'}
-              </span>
-            </div>
-            <div className="bg-slate-50 p-2 rounded-lg border border-slate-100">
-              <span className="text-[9px] text-slate-400 block font-bold uppercase tracking-wider">Dana Darurat</span>
-              <span className="text-xs font-bold text-emerald-600 font-mono tabular-nums mt-0.5 block">
-                {formatValue(totalEmergency)}
-              </span>
-              <span className="text-[9px] text-slate-400 font-medium">
-                {totalCurrentAssets > 0 ? `${((totalEmergency / totalCurrentAssets) * 100).toFixed(0)}% aset` : '0%'}
-              </span>
-            </div>
-            <div className="bg-slate-50 p-2 rounded-lg border border-slate-100">
-              <span className="text-[9px] text-slate-400 block font-bold uppercase tracking-wider">Investasi</span>
-              <span className="text-xs font-bold text-indigo-600 font-mono tabular-nums mt-0.5 block">
-                {formatValue(totalInvestments)}
-              </span>
-              <span className="text-[9px] text-slate-400 font-medium">
-                {totalCurrentAssets > 0 ? `${((totalInvestments / totalCurrentAssets) * 100).toFixed(0)}% aset` : '0%'}
-              </span>
-            </div>
-            <div className="bg-slate-50 p-2 rounded-lg border border-slate-100">
-              <span className="text-[9px] text-slate-400 block font-bold uppercase tracking-wider">Aset Tetap & KPR</span>
-              <span className="text-xs font-bold text-teal-600 font-mono tabular-nums mt-0.5 block">
-                {formatValue(totalFixedAssets)}
-              </span>
-              <span className="text-[9px] text-slate-400 font-medium">
-                {totalCurrentAssets > 0 ? `${((totalFixedAssets / totalCurrentAssets) * 100).toFixed(0)}% aset` : '0%'}
-              </span>
-            </div>
-            <div className="bg-slate-50 p-2 rounded-lg border border-slate-100 col-span-2 sm:col-span-1">
-              <span className="text-[9px] text-slate-400 block font-bold uppercase tracking-wider">Total Utang</span>
-              <span className="text-xs font-bold text-rose-600 font-mono tabular-nums mt-0.5 block">
-                {formatValue(totalDebts)}
-              </span>
-              <span className="text-[9px] text-slate-400 font-medium">
-                Rasio: {totalCurrentAssets > 0 ? `${((totalDebts / totalCurrentAssets) * 100).toFixed(0)}%` : '0%'}
-              </span>
-            </div>
-          </div>
-        </div>
-
-        {/* Right Card: Prediksi Kesehatan Finansial 3 Bulan */}
-        <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between space-y-4">
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <h3 className="font-extrabold text-slate-800 text-sm uppercase tracking-wider flex items-center gap-1.5">
-                <Calendar className="h-4.5 w-4.5 text-indigo-600" />
-                Prediksi Kesehatan Finansial (3 Bulan)
-              </h3>
-              <span className="text-[10px] bg-indigo-50 text-indigo-600 px-2.5 py-0.5 rounded-full font-bold uppercase tracking-wider">
-                Simulasi Proyeksi
-              </span>
-            </div>
-            <p className="text-xs text-slate-400 font-medium">
+            <h3 className="font-extrabold text-slate-800 text-sm uppercase tracking-wider flex items-center gap-1.5">
+              <Calendar className="h-4.5 w-4.5 text-indigo-600" />
+              Prediksi Kesehatan Finansial (3 Bulan)
+            </h3>
+            <p className="text-xs text-slate-400 font-medium mt-0.5">
               Proyeksi kondisi keuangan Anda dalam 3 bulan ke depan berdasarkan rata-rata pola pengeluaran dan pemasukan bulan ini.
             </p>
           </div>
+          <span className="text-xs font-bold text-indigo-600 shrink-0">Simulasi Proyeksi 3 Bulan</span>
+        </div>
 
-          <div className="bg-slate-50 p-4 rounded-xl border border-slate-150 space-y-3 flex-1 flex flex-col justify-center">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch">
+          <div className="lg:col-span-7 bg-slate-50 p-4 rounded-xl border border-slate-150 space-y-3 flex flex-col justify-center">
             <div className="flex justify-between items-center text-xs">
               <span className="text-slate-500 font-semibold">Surplus/Defisit Bulanan Saat Ini:</span>
-              <span className={`font-black font-mono px-2 py-0.5 rounded text-[11px] ${baselineNetSavings >= 0 ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800 animate-pulse'}`}>
+              <span className={`font-black font-mono tabular-nums px-2 py-0.5 rounded text-[11px] ${baselineNetSavings >= 0 ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'}`}>
                 {isFocusMode ? 'Rp ••••••' : (baselineNetSavings >= 0 ? '+' : '') + formatterIDR.format(baselineNetSavings)} / bln
               </span>
             </div>
             
             <div className="grid grid-cols-2 gap-3 pt-2 border-t border-slate-200">
               <div>
-                <span className="text-[9px] text-slate-400 font-bold uppercase tracking-wider block">Aset Lancar Hari Ini</span>
-                <span className="text-sm font-extrabold text-slate-700 font-mono block mt-0.5">
+                <span className="text-[9px] text-slate-400 font-bold uppercase tracking-wider block">Total Aset Hari Ini</span>
+                <span className="text-sm font-extrabold text-slate-700 font-mono tabular-nums block mt-0.5">
                   {formatValue(totalCurrentAssets)}
                 </span>
               </div>
               <div>
                 <span className="text-[9px] text-slate-400 font-bold uppercase tracking-wider block">Proyeksi Aset (3 Bulan)</span>
-                <span className={`text-sm font-extrabold font-mono block mt-0.5 ${projectedAssets >= totalCurrentAssets ? 'text-emerald-600' : 'text-rose-500'}`}>
+                <span className={`text-sm font-extrabold font-mono tabular-nums block mt-0.5 ${projectedAssets >= totalCurrentAssets ? 'text-emerald-600' : 'text-rose-500'}`}>
                   {formatValue(projectedAssets)}
                 </span>
               </div>
@@ -4015,9 +4093,9 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
             <div className="flex items-center justify-between p-3 rounded-lg border bg-white mt-1">
               <div>
                 <span className="text-[9px] text-slate-400 font-bold uppercase tracking-wider block">Prediksi Status Keuangan</span>
-                <span className="text-xs text-slate-400 font-medium font-mono block">{projectedRatioText}</span>
+                <span className="text-xs text-slate-400 font-medium font-mono tabular-nums block">{projectedRatioText}</span>
               </div>
-              <span className={`px-3 py-1 rounded-full text-xs font-black border uppercase tracking-wider flex items-center gap-1.5 ${projectedHealthColor}`}>
+              <span className={`px-3 py-1 rounded-lg text-xs font-black border uppercase tracking-wider flex items-center gap-1.5 ${projectedHealthColor}`}>
                 {projectedHealthStatus === 'Sehat' && <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />}
                 {projectedHealthStatus === 'Waspada' && <AlertTriangle className="h-3.5 w-3.5 shrink-0" />}
                 {projectedHealthStatus === 'Kritis' && <ShieldAlert className="h-3.5 w-3.5 shrink-0" />}
@@ -4026,12 +4104,12 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
             </div>
           </div>
 
-          <div className="flex items-start gap-2.5 bg-indigo-50/50 p-3 rounded-lg border border-indigo-100">
+          <div className="lg:col-span-5 flex items-start gap-2.5 bg-indigo-50/50 p-4 rounded-xl border border-indigo-100">
             <div className={`p-1.5 rounded-lg shrink-0 ${projectedHealthIconBg}`}>
               {projectedHealthStatus === 'Sehat' ? <CheckCircle2 className="h-4 w-4" /> : <AlertTriangle className="h-4 w-4" />}
             </div>
             <div className="space-y-1">
-              <span className="text-[10px] font-bold text-slate-700 block uppercase tracking-wider">Rekomendasi Strategis AI</span>
+              <span className="text-[10px] font-bold text-slate-700 block uppercase tracking-wider">Rekomendasi Strategis</span>
               <p className="text-xs text-slate-600 leading-relaxed font-medium">
                 {projectedHealthDesc} {baselineNetSavings < 0 ? 'Peringatan: Pengeluaran bulanan Anda melebihi pendapatan! Jika dibiarkan, tabungan Anda akan terkuras habis.' : 'Pertahankan rasio tabungan di atas 20% untuk mempercepat pembentukan kekayaan bersih.'}
               </p>
@@ -4039,73 +4117,6 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
           </div>
         </div>
       </div>
-
-      {/* Visual Notification System for upcoming payments within 3 days */}
-      {upcomingPayments.length > 0 && (
-        <div id="due-date-reminder-banner" className="bg-gradient-to-r from-amber-50 to-orange-50 border-l-4 border-amber-500 p-5 rounded-r-xl shadow-sm space-y-3">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-            <div className="flex items-center gap-2">
-              <AlertTriangle className="h-5 w-5 text-amber-600 animate-pulse shrink-0" />
-              <h4 className="text-sm font-bold text-slate-800 uppercase tracking-wider">
-                Pengingat Pembayaran Jatuh Tempo (3 Hari Ke Depan)
-              </h4>
-            </div>
-            <span className="text-[10px] bg-amber-200 text-amber-800 px-2.5 py-0.5 rounded-full font-bold self-start sm:self-auto shrink-0">
-              Tanggal Hari Ini: 12 Juli 2026 (Simulasi)
-            </span>
-          </div>
-          
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-            {upcomingPayments.map((p) => {
-              const daysLeftLabel = 
-                p.daysLeft < 0 ? 'Terlewat Jatuh Tempo!' :
-                p.daysLeft === 0 ? 'Hari Ini!' : 
-                p.daysLeft === 1 ? 'Besok!' : 
-                `Dalam ${p.daysLeft} Hari`;
-              
-              const badgeClass = 
-                p.daysLeft < 0 ? 'bg-rose-100 text-rose-700 border-rose-200 font-extrabold animate-pulse' :
-                p.daysLeft === 0 ? 'bg-rose-100 text-rose-700 border-rose-200 font-extrabold animate-pulse' :
-                p.daysLeft === 1 ? 'bg-orange-100 text-orange-700 border-orange-200 font-bold' :
-                'bg-amber-100 text-amber-700 border-amber-200 border-dashed font-medium';
-
-              return (
-                <div key={`up2-${p.type}-${p.id}`} className="bg-white p-3.5 rounded-lg border border-slate-200/80 shadow-sm flex flex-col justify-between hover:border-amber-300 transition-all">
-                  <div className="space-y-1.5">
-                    <div className="flex justify-between items-start gap-1">
-                      <span className={`text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded border ${badgeClass}`}>
-                        {daysLeftLabel}
-                      </span>
-                      <span className="text-[10px] text-slate-400 font-mono">Tgl {p.dueDay}</span>
-                    </div>
-                    
-                    <h5 className="font-extrabold text-slate-800 text-xs mt-1 truncate" title={p.name}>
-                      {p.name}
-                    </h5>
-                    
-                    <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">
-                      Tipe: <span className="text-slate-600">{p.type}</span>
-                    </p>
-                  </div>
-
-                  <div className="mt-3 pt-2.5 border-t border-slate-100 flex items-center justify-between gap-1">
-                    <div>
-                      <span className="text-[9px] text-slate-400 block font-bold uppercase tracking-widest">Tagihan</span>
-                      <span className="text-xs font-mono font-black text-slate-800">{formatValue(p.amount)}</span>
-                    </div>
-                    <button
-                      onClick={() => onQuickAction(p.type === 'Kartu Kredit' || p.type === 'PayLater' ? 'accounts' : 'debt')}
-                      className="text-[10px] font-bold text-blue-600 hover:text-white bg-blue-50 hover:bg-blue-600 px-2.5 py-1.5 rounded transition flex items-center gap-1 cursor-pointer shrink-0"
-                    >
-                      Bayar <ArrowRight className="h-3 w-3" />
-                    </button>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
 
       {/* --- KALENDER ARUS KAS HARIAN --- */}
       <div id="cashflow-calendar-section" className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-6">
