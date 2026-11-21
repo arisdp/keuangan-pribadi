@@ -5,14 +5,18 @@ import { FormattedNumberInput } from './FormattedNumberInput';
 import { TaxCalculatorCard } from './TaxCalculatorCard';
 import { DashboardFinancialHealthPanel } from './DashboardFinancialHealthPanel';
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell, ReferenceLine } from 'recharts';
-import { TrendingUp, TrendingDown, Wallet, ShieldAlert, CreditCard, PiggyBank, ArrowRight, CheckCircle2, AlertTriangle, Calendar, ChevronLeft, ChevronRight, ArrowUpRight, ArrowDownRight, Info, Eye, EyeOff, Percent, ArrowDown, Sparkles, Lightbulb, Target, Plus, Trash2, Edit2, Clock, Bell, DollarSign, X, RefreshCw, Activity, BarChart3, Table, GitCommit, Scale, FileCheck, ShieldCheck, Building2 } from 'lucide-react';
+import { TrendingUp, TrendingDown, Wallet, ShieldAlert, CreditCard, PiggyBank, ArrowRight, CheckCircle2, AlertTriangle, Calendar, ChevronLeft, ChevronRight, ChevronDown, ArrowUpRight, ArrowDownRight, Info, Eye, EyeOff, Percent, ArrowDown, Sparkles, Lightbulb, Target, Plus, Trash2, Edit2, Clock, Bell, DollarSign, X, RefreshCw, Activity, BarChart3, Table, GitCommit, Scale, FileCheck, ShieldCheck, Building2 } from 'lucide-react';
 import {
   BatchFixedAssetDepreciationResult,
   FixedAssetDepreciationResult,
+  FixedAssetLifecycleMetrics,
   FixedAssetValuationResult,
-  NetWorthMonthlyTrendPoint,
+  NetWorthCombinedTrendPoint,
+  NetWorthTrendWithProjectionResult,
+  WeeklyFinancialPrioritiesResult,
   calculateAssetDepreciation,
   calculateCombinedPortfolioWealth,
+  calculateFixedAssetLifecycleMetrics,
   calculateFixedAssetValuation,
   calculateTotalLiquidCash,
   calculateCreditPaylaterBills,
@@ -20,7 +24,8 @@ import {
   calculateTotalDebts,
   calculateMonthlyDebtService,
   calculateIncomeStatementSummary,
-  calculateNetWorthHistory6Months,
+  calculateNetWorthTrendWithProjection,
+  calculateWeeklyFinancialPriorities,
   getAccountCreditBill,
   getCreditAccounts,
   getCreditOverlimitAmount,
@@ -34,6 +39,7 @@ import {
   syncKprDebtsToFixedAssets,
 } from '../utils/accountingEngine';
 import { formatterIDR } from '../utils/formatters';
+import { showToast } from '../utils/toast';
 
 const containerVariants = {
   hidden: { opacity: 0 },
@@ -63,7 +69,198 @@ export interface FixedAssetModalRow {
   asset: FixedAsset;
   valuation: FixedAssetValuationResult;
   depreciation?: FixedAssetDepreciationResult;
+  lifecycle: FixedAssetLifecycleMetrics;
 }
+
+export interface FixedAssetDepreciationDetailProps {
+  row: FixedAssetModalRow;
+  formatValue: (amount: number, isSensitive?: boolean) => string;
+  onSyncFixedAssetDepreciation?: (assetId: string) => void;
+}
+
+export const FixedAssetDepreciationDetail: React.FC<FixedAssetDepreciationDetailProps> = ({
+  row,
+  formatValue,
+  onSyncFixedAssetDepreciation,
+}) => {
+  const { asset, valuation: val, depreciation: dep, lifecycle } = row;
+  const formatYears = (years: number) =>
+    years >= 1 ? `${years.toFixed(1).replace('.', ',')} thn` : `${Math.round(years * 12)} bln`;
+
+  const progressBarTone = !lifecycle.isDepreciable
+    ? 'bg-emerald-500'
+    : lifecycle.ageProgressPct >= 90
+    ? 'bg-rose-600'
+    : lifecycle.ageProgressPct >= 65
+    ? 'bg-amber-500'
+    : 'bg-blue-600';
+
+  const statusTextTone = !lifecycle.isDepreciable
+    ? 'text-emerald-700'
+    : lifecycle.ageProgressPct >= 90
+    ? 'text-rose-700'
+    : lifecycle.ageProgressPct >= 65
+    ? 'text-amber-700'
+    : 'text-blue-700';
+
+  return (
+    <div className="px-4 py-3.5 bg-slate-50/75 border-t border-slate-200/80 space-y-3">
+      {/* Progress Bar Durasi Nilai Buku */}
+      <div className="space-y-1.5">
+        <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+          <div className="flex items-center gap-1.5 font-bold text-slate-700">
+            <Clock className="h-3.5 w-3.5 text-slate-500 shrink-0" />
+            <span>
+              {lifecycle.isDepreciable
+                ? 'Masa Pakai Berjalan vs Estimasi Umur Ekonomis'
+                : asset.isKprLinked
+                ? 'Progres Pelunasan Pokok & Nilai Buku Properti'
+                : 'Durasi Kepemilikan & Laju Apresiasi Nilai'}
+            </span>
+          </div>
+          <span className={`font-mono tabular-nums font-extrabold ${statusTextTone}`}>
+            {lifecycle.isDepreciable
+              ? `${formatYears(lifecycle.elapsedAgeYears)} / ${formatYears(
+                  lifecycle.estimatedUsefulLifeYears
+                )} · ${lifecycle.ageProgressPct.toFixed(1)}%`
+              : asset.isKprLinked
+              ? `${val.ownershipPct.toFixed(1)}% Lunas`
+              : `+${lifecycle.annualRatePctAbs.toFixed(1)}%/thn`}
+          </span>
+        </div>
+
+        <div
+          role="progressbar"
+          aria-label={`Durasi nilai buku ${asset.name}`}
+          aria-valuenow={
+            lifecycle.isDepreciable || asset.isKprLinked
+              ? Math.round(lifecycle.ageProgressPct)
+              : 100
+          }
+          aria-valuemin={0}
+          aria-valuemax={100}
+          className="w-full h-2.5 rounded-full bg-slate-200 overflow-hidden"
+        >
+          <div
+            className={`h-full rounded-full transition-all duration-500 ${progressBarTone}`}
+            style={{
+              width: `${
+                lifecycle.isDepreciable || asset.isKprLinked
+                  ? Math.min(100, Math.max(2, lifecycle.ageProgressPct))
+                  : 100
+              }%`,
+            }}
+          />
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500">
+          <span>
+            Perolehan{' '}
+            <span className="font-mono tabular-nums font-semibold text-slate-700">
+              {lifecycle.acquisitionDate}
+            </span>{' '}
+            · Umur{' '}
+            <span className="font-mono tabular-nums font-semibold text-slate-700">
+              {lifecycle.totalAgeDays.toLocaleString('id-ID')} hari
+            </span>
+          </span>
+          <span className="font-mono tabular-nums font-semibold text-slate-600">
+            {lifecycle.isDepreciable
+              ? lifecycle.remainingLifeDays > 0
+                ? `Sisa masa manfaat: ${formatYears(lifecycle.remainingLifeYears)}`
+                : 'Estimasi umur ekonomis tercapai'
+              : `Sisa nilai buku: ${lifecycle.bookValueRemainingPct.toFixed(1)}%`}
+          </span>
+        </div>
+      </div>
+
+      {/* Rincian Akumulasi Penyusutan & Nilai Buku */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2 border-t border-slate-200/70 text-[11px]">
+        <div className="space-y-0.5">
+          <span className="text-slate-500 block">Basis Nilai Buku</span>
+          <span className="font-mono tabular-nums font-bold text-slate-900 block">
+            {formatValue(val.basisValue)}
+          </span>
+        </div>
+
+        <div className="space-y-0.5">
+          <span className="text-slate-500 block">
+            {lifecycle.isDepreciable
+              ? `Tarif Susut (${lifecycle.annualRatePctAbs}%/thn)`
+              : `Laju Tahunan (+${lifecycle.annualRatePctAbs}%)`}
+          </span>
+          <span className="font-mono tabular-nums font-bold text-slate-900 block">
+            {lifecycle.isDepreciable
+              ? `-${formatValue(lifecycle.monthlyDepreciationAmount)}/bln`
+              : `+${formatValue(Math.round((val.basisValue * lifecycle.annualRatePctAbs) / 100))}/thn`}
+          </span>
+        </div>
+
+        <div className="space-y-0.5">
+          <span className="text-slate-500 block">Akumulasi Tercatat</span>
+          <span className="font-mono tabular-nums font-bold text-amber-700 block">
+            {lifecycle.accumulatedDepreciationRecorded > 0
+              ? `-${formatValue(lifecycle.accumulatedDepreciationRecorded)}`
+              : formatValue(0)}
+          </span>
+        </div>
+
+        <div className="space-y-0.5">
+          <span className="text-slate-500 block">
+            {lifecycle.pendingDepreciationAmount > 0
+              ? 'Proyeksi Stlh Posting'
+              : 'Sisa Nilai Buku'}
+          </span>
+          <span className="font-mono tabular-nums font-bold text-slate-900 block">
+            {formatValue(
+              lifecycle.pendingDepreciationAmount > 0
+                ? lifecycle.projectedBookValueAfterSync
+                : val.currentBookValue
+            )}
+            <span className="text-slate-500 font-normal">
+              {' '}
+              ({lifecycle.bookValueRemainingPct.toFixed(0)}%)
+            </span>
+          </span>
+        </div>
+      </div>
+
+      {/* Footer Info / Aksi Posting Inline */}
+      <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-200/70 text-[11px]">
+        <span className="text-slate-500">
+          Status: <strong className={statusTextTone}>{lifecycle.lifecycleStatus}</strong>
+          {lifecycle.pendingDepreciationAmount > 0 && (
+            <>
+              {' '}
+              · Draft belum diposting:{' '}
+              <span className="font-mono tabular-nums font-bold text-amber-700">
+                -{formatValue(lifecycle.pendingDepreciationAmount)}
+              </span>
+            </>
+          )}
+        </span>
+
+        {onSyncFixedAssetDepreciation &&
+          dep &&
+          dep.isDepreciable &&
+          dep.cappedDepreciationAmount > 0 &&
+          dep.draftAdjustment && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onSyncFixedAssetDepreciation(asset.id);
+              }}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-[11px] font-bold transition cursor-pointer whitespace-nowrap shrink-0"
+            >
+              <RefreshCw className="h-3 w-3" />
+              <span>Posting Jurnal Non-Kas</span>
+            </button>
+          )}
+      </div>
+    </div>
+  );
+};
 
 export interface NeracaKekayaanBersihProps {
   netWorth: number;
@@ -124,6 +321,11 @@ export const NeracaKekayaanBersih: React.FC<NeracaKekayaanBersihProps> = ({
 }) => {
   const [activeNetWorthModal, setActiveNetWorthModal] =
     React.useState<NetWorthModalCategory | null>(null);
+  const [expandedAssetId, setExpandedAssetId] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    setExpandedAssetId(null);
+  }, [activeNetWorthModal]);
 
   React.useEffect(() => {
     if (!activeNetWorthModal) return;
@@ -660,65 +862,106 @@ export const NeracaKekayaanBersih: React.FC<NeracaKekayaanBersihProps> = ({
                     </div>
                   )}
 
-                  <div className="rounded-xl border border-slate-200 bg-white divide-y divide-slate-100">
+                  <div className="rounded-xl border border-slate-200 bg-white divide-y divide-slate-100 overflow-hidden">
                     {fixedAssetRows.length === 0 ? (
                       <div className="p-6 text-center text-xs text-slate-500">
                         Belum ada aset tetap atau properti KPR tercatat. Tambahkan melalui tab Portofolio &amp; Aset Tetap.
                       </div>
                     ) : (
-                      fixedAssetRows.map(({ asset, valuation: val, depreciation: dep }) => (
-                        <div
-                          key={asset.id}
-                          className="px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs hover:bg-slate-50/70 transition-colors"
-                        >
-                          <div className="min-w-0 space-y-0.5">
-                            <span className="font-bold text-slate-800 block truncate">
-                              {asset.name}
-                            </span>
-                            <span className="text-[11px] text-slate-500 block">
-                              {asset.category} · Dasar{' '}
-                              <span className="font-mono tabular-nums font-semibold text-slate-700">
-                                {formatValue(val.basisValue)}
-                              </span>{' '}
-                              · Penyesuaian{' '}
-                              <span
-                                className={`font-mono tabular-nums font-semibold ${
-                                  val.totalNetValueChange >= 0
-                                    ? 'text-emerald-600'
-                                    : 'text-amber-700'
-                                }`}
-                              >
-                                {val.totalNetValueChange >= 0 ? '+' : '-'}
-                                {formatValue(Math.abs(val.totalNetValueChange))}
-                              </span>
-                              {asset.isKprLinked && ` · ${val.ownershipPct.toFixed(1)}% lunas`}
-                            </span>
-                          </div>
-
-                          <div className="flex items-center justify-between sm:justify-end gap-2.5 shrink-0">
-                            {onSyncFixedAssetDepreciation &&
-                              dep &&
-                              dep.isDepreciable &&
-                              dep.cappedDepreciationAmount > 0 &&
-                              dep.draftAdjustment && (
-                                <button
-                                  type="button"
-                                  onClick={() => onSyncFixedAssetDepreciation(asset.id)}
-                                  title={dep.draftAdjustment.note}
-                                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-amber-200 bg-amber-50 hover:bg-amber-100 text-amber-800 text-[11px] font-bold transition cursor-pointer whitespace-nowrap shrink-0"
-                                >
-                                  <RefreshCw className="h-3 w-3" />
-                                  <span>
-                                    Posting Susut (-{formatValue(dep.cappedDepreciationAmount)})
+                      fixedAssetRows.map((row) => {
+                        const { asset, valuation: val, depreciation: dep, lifecycle } = row;
+                        const isExpanded = expandedAssetId === asset.id;
+                        return (
+                          <div key={asset.id}>
+                            <div
+                              role="button"
+                              tabIndex={0}
+                              aria-expanded={isExpanded}
+                              onClick={() =>
+                                setExpandedAssetId((prev) => (prev === asset.id ? null : asset.id))
+                              }
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter' || e.key === ' ') {
+                                  e.preventDefault();
+                                  setExpandedAssetId((prev) =>
+                                    prev === asset.id ? null : asset.id
+                                  );
+                                }
+                              }}
+                              className={`px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-500 ${
+                                isExpanded ? 'bg-slate-50/90' : 'hover:bg-slate-50/70'
+                              }`}
+                            >
+                              <div className="min-w-0 flex items-start gap-2.5">
+                                <ChevronDown
+                                  className={`h-4 w-4 text-slate-400 mt-0.5 shrink-0 transition-transform duration-200 ${
+                                    isExpanded ? 'rotate-180 text-slate-700' : ''
+                                  }`}
+                                />
+                                <div className="min-w-0 space-y-0.5">
+                                  <span className="font-bold text-slate-800 block truncate">
+                                    {asset.name}
                                   </span>
-                                </button>
-                              )}
-                            <span className="font-mono tabular-nums font-bold text-slate-900">
-                              {formatValue(val.currentBookValue)}
-                            </span>
+                                  <span className="text-[11px] text-slate-500 block">
+                                    {asset.category} · Dasar{' '}
+                                    <span className="font-mono tabular-nums font-semibold text-slate-700">
+                                      {formatValue(val.basisValue)}
+                                    </span>{' '}
+                                    · Penyesuaian{' '}
+                                    <span
+                                      className={`font-mono tabular-nums font-semibold ${
+                                        val.totalNetValueChange >= 0
+                                          ? 'text-emerald-600'
+                                          : 'text-amber-700'
+                                      }`}
+                                    >
+                                      {val.totalNetValueChange >= 0 ? '+' : '-'}
+                                      {formatValue(Math.abs(val.totalNetValueChange))}
+                                    </span>
+                                    {lifecycle.isDepreciable &&
+                                      ` · Terpakai ${lifecycle.ageProgressPct.toFixed(0)}%`}
+                                    {asset.isKprLinked && ` · ${val.ownershipPct.toFixed(1)}% lunas`}
+                                  </span>
+                                </div>
+                              </div>
+
+                              <div className="flex items-center justify-between sm:justify-end gap-2.5 shrink-0 pl-6 sm:pl-0">
+                                {onSyncFixedAssetDepreciation &&
+                                  dep &&
+                                  dep.isDepreciable &&
+                                  dep.cappedDepreciationAmount > 0 &&
+                                  dep.draftAdjustment && (
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        onSyncFixedAssetDepreciation(asset.id);
+                                      }}
+                                      title={dep.draftAdjustment.note}
+                                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-amber-200 bg-amber-50 hover:bg-amber-100 text-amber-800 text-[11px] font-bold transition cursor-pointer whitespace-nowrap shrink-0"
+                                    >
+                                      <RefreshCw className="h-3 w-3" />
+                                      <span>
+                                        Posting Susut (-{formatValue(dep.cappedDepreciationAmount)})
+                                      </span>
+                                    </button>
+                                  )}
+                                <span className="font-mono tabular-nums font-bold text-slate-900">
+                                  {formatValue(val.currentBookValue)}
+                                </span>
+                              </div>
+                            </div>
+
+                            {isExpanded && (
+                              <FixedAssetDepreciationDetail
+                                row={row}
+                                formatValue={formatValue}
+                                onSyncFixedAssetDepreciation={onSyncFixedAssetDepreciation}
+                              />
+                            )}
                           </div>
-                        </div>
-                      ))
+                        );
+                      })
                     )}
                   </div>
                 </>
@@ -825,7 +1068,7 @@ export const NeracaKekayaanBersih: React.FC<NeracaKekayaanBersihProps> = ({
 };
 
 interface TrendNetWorthChartProps {
-  data: NetWorthMonthlyTrendPoint[];
+  trendResult: NetWorthTrendWithProjectionResult;
   currentNetWorth: number;
   isFocusMode: boolean;
   formatValue: (amount: number, isSensitive?: boolean) => string;
@@ -833,73 +1076,141 @@ interface TrendNetWorthChartProps {
 }
 
 export const TrendNetWorthChart: React.FC<TrendNetWorthChartProps> = ({
-  data,
+  trendResult,
   currentNetWorth,
   isFocusMode,
   formatValue,
   formatCompactValue,
 }) => {
-  const firstPoint = data[0];
-  const latestPoint = data[data.length - 1];
+  const [showProjection, setShowProjection] = React.useState(true);
+
+  const historicalPoints = trendResult.historicalPoints;
+  const chartData = showProjection ? trendResult.points : historicalPoints;
+
+  const firstPoint = historicalPoints[0];
+  const latestPoint = historicalPoints[historicalPoints.length - 1];
   const sixMonthDelta =
-    firstPoint && latestPoint ? latestPoint.netWorth - firstPoint.netWorth : 0;
-  const sixMonthDeltaPct =
-    firstPoint && Math.abs(firstPoint.netWorth) > 0
-      ? (sixMonthDelta / Math.abs(firstPoint.netWorth)) * 100
+    firstPoint && latestPoint
+      ? latestPoint.displayNetWorth - firstPoint.displayNetWorth
       : 0;
-  const hasNegativeValues = data.some((p) => p.netWorth < 0);
+  const sixMonthDeltaPct =
+    firstPoint && Math.abs(firstPoint.displayNetWorth) > 0
+      ? (sixMonthDelta / Math.abs(firstPoint.displayNetWorth)) * 100
+      : 0;
+
+  const hasNegativeValues = chartData.some((p) => p.displayNetWorth < 0);
 
   return (
     <motion.div
       variants={cardVariants}
       className="bg-white rounded-2xl border border-slate-200 p-5 sm:p-6 space-y-4"
     >
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-4">
+      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b border-slate-100 pb-4">
         <div className="flex items-start gap-3">
           <div className="p-2.5 rounded-xl bg-blue-50 text-blue-600 shrink-0">
             <TrendingUp className="h-5 w-5" />
           </div>
           <div>
             <h2 className="text-base font-extrabold text-slate-900 tracking-tight">
-              Trend Net Worth (6 Bulan Terakhir)
+              {showProjection
+                ? 'Trend Net Worth (6 Bulan Historis & Proyeksi +3 Bulan)'
+                : 'Trend Net Worth (6 Bulan Terakhir)'}
             </h2>
             <p className="text-xs text-slate-500 font-medium mt-0.5">
-              Perkembangan Kekayaan Bersih, Total Aset &amp; Total Kewajiban dari riwayat transaksi historis
+              {showProjection
+                ? 'Kombinasi tren regresi 6 bulan dan surplus arus kas bulanan untuk memprediksi 3 bulan ke depan'
+                : 'Perkembangan Kekayaan Bersih, Total Aset & Total Kewajiban dari riwayat transaksi historis'}
             </p>
           </div>
         </div>
 
-        <div className="flex items-center gap-4 shrink-0">
-          <div className="text-left sm:text-right">
-            <span className="text-[11px] font-semibold text-slate-500 block">
-              Perubahan 6 Bulan
-            </span>
-            <div className="flex items-center gap-1.5 sm:justify-end">
-              {sixMonthDelta >= 0 ? (
-                <ArrowUpRight className="h-4 w-4 text-emerald-600 shrink-0" />
-              ) : (
-                <ArrowDownRight className="h-4 w-4 text-rose-600 shrink-0" />
-              )}
-              <span
-                className={`text-sm font-black font-mono tabular-nums ${
-                  sixMonthDelta >= 0 ? 'text-emerald-600' : 'text-rose-600'
-                }`}
-              >
-                {sixMonthDelta >= 0 ? '+' : ''}
-                {formatValue(sixMonthDelta)}
+        <div className="flex flex-wrap items-center justify-between lg:justify-end gap-4 shrink-0">
+          {/* Ringkasan Historis 6 Bulan / Proyeksi +3 Bulan */}
+          <div className="flex items-center gap-4">
+            <div className="text-left lg:text-right">
+              <span className="text-[11px] font-semibold text-slate-500 block">
+                Perubahan 6 Bulan
               </span>
-              <span className="text-xs font-mono tabular-nums font-bold text-slate-500">
-                ({sixMonthDeltaPct >= 0 ? '+' : ''}
-                {sixMonthDeltaPct.toFixed(1)}%)
-              </span>
+              <div className="flex items-center gap-1 lg:justify-end">
+                {sixMonthDelta >= 0 ? (
+                  <ArrowUpRight className="h-4 w-4 text-emerald-600 shrink-0" />
+                ) : (
+                  <ArrowDownRight className="h-4 w-4 text-rose-600 shrink-0" />
+                )}
+                <span
+                  className={`text-sm font-black font-mono tabular-nums ${
+                    sixMonthDelta >= 0 ? 'text-emerald-600' : 'text-rose-600'
+                  }`}
+                >
+                  {sixMonthDelta >= 0 ? '+' : ''}
+                  {formatValue(sixMonthDelta)}
+                </span>
+                <span className="text-xs font-mono tabular-nums font-bold text-slate-500">
+                  ({sixMonthDeltaPct >= 0 ? '+' : ''}
+                  {sixMonthDeltaPct.toFixed(1)}%)
+                </span>
+              </div>
             </div>
+
+            {showProjection && (
+              <div className="text-left lg:text-right border-l border-slate-200 pl-4">
+                <span className="text-[11px] font-semibold text-blue-600 block">
+                  Proyeksi +3 Bulan
+                </span>
+                <div className="flex items-center gap-1.5 lg:justify-end">
+                  <span
+                    className={`text-sm font-black font-mono tabular-nums ${
+                      trendResult.projectedNetWorth3M >= 0 ? 'text-slate-900' : 'text-rose-600'
+                    }`}
+                  >
+                    {formatValue(trendResult.projectedNetWorth3M)}
+                  </span>
+                  <span
+                    className={`text-xs font-mono tabular-nums font-bold ${
+                      trendResult.projectedDeltaAmount >= 0 ? 'text-emerald-600' : 'text-rose-600'
+                    }`}
+                  >
+                    ({trendResult.projectedDeltaAmount >= 0 ? '+' : ''}
+                    {trendResult.projectedDeltaPct.toFixed(1)}%)
+                  </span>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Segmented Toggle: Historis vs Proyeksi +3 Bln */}
+          <div className="inline-flex items-center gap-1 p-1 rounded-xl bg-slate-100 border border-slate-200">
+            <button
+              type="button"
+              aria-pressed={!showProjection}
+              onClick={() => setShowProjection(false)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition whitespace-nowrap shrink-0 cursor-pointer ${
+                !showProjection
+                  ? 'bg-white text-slate-900 shadow-2xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              Historis 6 Bln
+            </button>
+            <button
+              type="button"
+              aria-pressed={showProjection}
+              onClick={() => setShowProjection(true)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition whitespace-nowrap shrink-0 cursor-pointer ${
+                showProjection
+                  ? 'bg-slate-900 text-white shadow-2xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              Proyeksi +3 Bln
+            </button>
           </div>
         </div>
       </div>
 
       <div className="h-72 w-full">
         <ResponsiveContainer width="100%" height="100%">
-          <LineChart data={data} margin={{ top: 10, right: 20, left: 0, bottom: 5 }}>
+          <LineChart data={chartData} margin={{ top: 12, right: 20, left: 0, bottom: 5 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
             <XAxis
               dataKey="monthLabel"
@@ -919,40 +1230,80 @@ export const TrendNetWorthChart: React.FC<TrendNetWorthChartProps> = ({
             {hasNegativeValues && (
               <ReferenceLine y={0} stroke="#cbd5e1" strokeDasharray="4 4" />
             )}
+            {showProjection && trendResult.currentMonthLabel && (
+              <ReferenceLine
+                x={trendResult.currentMonthLabel}
+                stroke="#94a3b8"
+                strokeDasharray="3 3"
+                label={{
+                  value: 'Hari Ini',
+                  position: 'top',
+                  fill: '#64748b',
+                  fontSize: 10,
+                  fontWeight: 700,
+                }}
+              />
+            )}
             <Tooltip
               content={({ active, payload }) => {
                 if (!active || !payload || payload.length === 0) return null;
-                const point = payload[0].payload as NetWorthMonthlyTrendPoint;
+                const point = payload[0].payload as NetWorthCombinedTrendPoint;
                 return (
-                  <div className="bg-white border border-slate-200 rounded-xl shadow-lg p-3 text-xs space-y-1.5 min-w-[210px]">
-                    <div className="flex items-center justify-between border-b border-slate-100 pb-1.5">
-                      <span className="font-extrabold text-slate-900">{point.monthLabel}</span>
+                  <div className="bg-white border border-slate-200 rounded-xl shadow-lg p-3 text-xs space-y-1.5 min-w-[230px]">
+                    <div className="flex items-center justify-between gap-3 border-b border-slate-100 pb-1.5">
+                      <div>
+                        <span className="font-extrabold text-slate-900 block">
+                          {point.monthLabel}
+                        </span>
+                        <span
+                          className={`text-[10px] font-bold ${
+                            point.isProjection ? 'text-blue-600' : 'text-slate-400'
+                          }`}
+                        >
+                          {point.isProjection ? 'Proyeksi 3 Bulan' : 'Realisasi Historis'}
+                        </span>
+                      </div>
                       <span className="text-[11px] font-mono tabular-nums text-slate-400">
                         s.d. {point.cutoffDate}
                       </span>
                     </div>
                     <div className="flex items-center justify-between gap-4">
-                      <span className="text-slate-600 font-semibold">Net Worth</span>
+                      <span className="text-slate-600 font-semibold">
+                        {point.isProjection ? 'Est. Net Worth' : 'Net Worth'}
+                      </span>
                       <span
                         className={`font-mono tabular-nums font-black ${
-                          point.netWorth >= 0 ? 'text-slate-900' : 'text-rose-600'
+                          point.displayNetWorth >= 0 ? 'text-slate-900' : 'text-rose-600'
                         }`}
                       >
-                        {formatValue(point.netWorth)}
+                        {formatValue(point.displayNetWorth)}
                       </span>
                     </div>
                     <div className="flex items-center justify-between gap-4">
-                      <span className="text-blue-600 font-semibold">Total Aset</span>
+                      <span className="text-blue-600 font-semibold">
+                        {point.isProjection ? 'Est. Total Aset' : 'Total Aset'}
+                      </span>
                       <span className="font-mono tabular-nums font-bold text-blue-700">
-                        {formatValue(point.assets)}
+                        {formatValue(point.displayAssets)}
                       </span>
                     </div>
                     <div className="flex items-center justify-between gap-4">
-                      <span className="text-rose-600 font-semibold">Total Kewajiban</span>
+                      <span className="text-rose-600 font-semibold">
+                        {point.isProjection ? 'Est. Kewajiban' : 'Total Kewajiban'}
+                      </span>
                       <span className="font-mono tabular-nums font-bold text-rose-600">
-                        {formatValue(point.debts)}
+                        {formatValue(point.displayDebts)}
                       </span>
                     </div>
+                    {point.isProjection && (
+                      <div className="pt-1 border-t border-slate-100 text-[10px] text-slate-500">
+                        Laju campuran:{' '}
+                        <span className="font-mono tabular-nums font-bold text-slate-700">
+                          {trendResult.blendedMonthlyGrowth >= 0 ? '+' : ''}
+                          {formatValue(trendResult.blendedMonthlyGrowth)}/bln
+                        </span>
+                      </div>
+                    )}
                   </div>
                 );
               }}
@@ -969,6 +1320,7 @@ export const TrendNetWorthChart: React.FC<TrendNetWorthChartProps> = ({
               strokeWidth={3}
               dot={{ r: 4, fill: '#ffffff', strokeWidth: 2 }}
               activeDot={{ r: 6 }}
+              connectNulls={false}
             />
             <Line
               type="monotone"
@@ -978,6 +1330,7 @@ export const TrendNetWorthChart: React.FC<TrendNetWorthChartProps> = ({
               strokeWidth={2}
               dot={{ r: 3, fill: '#ffffff', strokeWidth: 2 }}
               activeDot={{ r: 5 }}
+              connectNulls={false}
             />
             <Line
               type="monotone"
@@ -988,11 +1341,243 @@ export const TrendNetWorthChart: React.FC<TrendNetWorthChartProps> = ({
               strokeDasharray="5 4"
               dot={{ r: 3, fill: '#ffffff', strokeWidth: 2 }}
               activeDot={{ r: 5 }}
+              connectNulls={false}
             />
+            {showProjection && (
+              <>
+                <Line
+                  type="monotone"
+                  dataKey="projectedNetWorth"
+                  name="Proyeksi Net Worth (+3 Bln)"
+                  stroke={trendResult.projectedNetWorth3M >= 0 ? '#0f172a' : '#dc2626'}
+                  strokeWidth={2.5}
+                  strokeDasharray="6 4"
+                  dot={{ r: 4, fill: '#ffffff', strokeWidth: 2 }}
+                  activeDot={{ r: 6 }}
+                  connectNulls={false}
+                />
+                <Line
+                  type="monotone"
+                  dataKey="projectedAssets"
+                  name="Proyeksi Aset"
+                  stroke="#3b82f6"
+                  strokeWidth={1.75}
+                  strokeDasharray="5 4"
+                  dot={{ r: 3, fill: '#ffffff', strokeWidth: 1.5 }}
+                  activeDot={{ r: 5 }}
+                  legendType="none"
+                  connectNulls={false}
+                />
+                <Line
+                  type="monotone"
+                  dataKey="projectedDebts"
+                  name="Proyeksi Kewajiban"
+                  stroke="#fb7185"
+                  strokeWidth={1.75}
+                  strokeDasharray="3 3"
+                  dot={{ r: 3, fill: '#ffffff', strokeWidth: 1.5 }}
+                  activeDot={{ r: 5 }}
+                  legendType="none"
+                  connectNulls={false}
+                />
+              </>
+            )}
           </LineChart>
         </ResponsiveContainer>
       </div>
+
+      {showProjection && (
+        <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-100 text-[11px] text-slate-500">
+          <span>
+            Basis proyeksi: Regresi tren 6 bln (
+            <span className="font-mono tabular-nums font-bold text-slate-700">
+              {trendResult.historicalSlopeMonthly >= 0 ? '+' : ''}
+              {formatValue(trendResult.historicalSlopeMonthly)}/bln
+            </span>
+            ) · Rata-rata arus kas (
+            <span className="font-mono tabular-nums font-bold text-slate-700">
+              {trendResult.avgNetCashFlowMonthly >= 0 ? '+' : ''}
+              {formatValue(trendResult.avgNetCashFlowMonthly)}/bln
+            </span>
+            )
+          </span>
+          <span>
+            Estimasi laju bersih:{' '}
+            <span
+              className={`font-mono tabular-nums font-bold ${
+                trendResult.blendedMonthlyGrowth >= 0 ? 'text-emerald-600' : 'text-rose-600'
+              }`}
+            >
+              {trendResult.blendedMonthlyGrowth >= 0 ? '+' : ''}
+              {formatValue(trendResult.blendedMonthlyGrowth)}/bln
+            </span>
+          </span>
+        </div>
+      )}
     </motion.div>
+  );
+};
+
+export interface WawasanAiPanelProps {
+  result: WeeklyFinancialPrioritiesResult;
+  lastAnalyzedAt: string;
+  isRefreshing: boolean;
+  onTriggerAnalysis: () => void;
+  onQuickAction: (tab: string) => void;
+  formatValue: (amount: number, isSensitive?: boolean) => string;
+}
+
+export const WawasanAiPanel: React.FC<WawasanAiPanelProps> = ({
+  result,
+  lastAnalyzedAt,
+  isRefreshing,
+  onTriggerAnalysis,
+  onQuickAction,
+  formatValue,
+}) => {
+  const weekDiffSign = result.weekDeltaAmount >= 0 ? '+' : '-';
+  const weekDeltaTone =
+    result.weekDeltaAmount > 0 && result.prevWeekExpense > 0
+      ? 'text-rose-700'
+      : result.weekDeltaAmount < 0
+      ? 'text-emerald-700'
+      : 'text-slate-700';
+
+  return (
+    <motion.section
+      variants={cardVariants}
+      aria-label="Wawasan AI Prioritas Mingguan"
+      className="bg-white rounded-2xl border border-slate-200 p-5 sm:p-6 space-y-5"
+    >
+      {/* Header Row */}
+      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b border-slate-100 pb-4">
+        <div className="flex items-start gap-3">
+          <div className="p-2.5 rounded-xl bg-slate-900 text-white shrink-0">
+            <Lightbulb className="h-5 w-5" />
+          </div>
+          <div className="space-y-0.5">
+            <h2 className="text-base font-extrabold text-slate-900 tracking-tight">
+              Wawasan AI
+            </h2>
+            <p className="text-xs text-slate-500 font-medium">
+              3 prioritas keuangan utama minggu ini · {result.weekRangeLabel} · Dianalisis {lastAnalyzedAt}
+            </p>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between lg:justify-end gap-4 shrink-0">
+          {/* Ringkasan Perbandingan 7 Hari */}
+          <div className="flex items-center gap-4 text-xs">
+            <div>
+              <span className="text-[11px] font-medium text-slate-500 block">
+                Pengeluaran 7 Hari
+              </span>
+              <span className="font-mono tabular-nums font-bold text-slate-900">
+                {formatValue(result.thisWeekExpense)}
+              </span>
+            </div>
+            <div className="border-l border-slate-200 pl-4">
+              <span className="text-[11px] font-medium text-slate-500 block">
+                vs Minggu Sebelumnya
+              </span>
+              <span className={`font-mono tabular-nums font-bold ${weekDeltaTone}`}>
+                {result.thisWeekExpense === 0 && result.prevWeekExpense === 0
+                  ? 'Belum ada mutasi'
+                  : `${weekDiffSign}${formatValue(Math.abs(result.weekDeltaAmount))} (${
+                      result.weekDeltaAmount >= 0 ? '+' : ''
+                    }${result.weekDeltaPct.toFixed(0)}%)`}
+              </span>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={onTriggerAnalysis}
+            disabled={isRefreshing}
+            className="inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold transition cursor-pointer disabled:opacity-60 whitespace-nowrap shrink-0"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
+            <span>{isRefreshing ? 'Menganalisis...' : 'Analisis Ulang'}</span>
+          </button>
+        </div>
+      </div>
+
+      {/* 3 Priorities Grid (Single-Elevation Divided Container) */}
+      {isRefreshing ? (
+        <div className="rounded-xl border border-slate-200 bg-slate-50/50 grid grid-cols-1 lg:grid-cols-3 divide-y lg:divide-y-0 lg:divide-x divide-slate-200">
+          {[1, 2, 3].map((idx) => (
+            <div key={idx} className="p-4 sm:p-5 space-y-3">
+              <div className="h-3.5 w-28 bg-slate-200 rounded" />
+              <div className="h-4 w-48 bg-slate-200 rounded" />
+              <div className="h-3 w-full bg-slate-100 rounded" />
+              <div className="h-3 w-4/5 bg-slate-100 rounded" />
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="rounded-xl border border-slate-200 bg-slate-50/40 grid grid-cols-1 lg:grid-cols-3 divide-y lg:divide-y-0 lg:divide-x divide-slate-200 overflow-hidden">
+          {result.priorities.map((item) => {
+            const urgencyStyle =
+              item.severity === 'high'
+                ? 'text-rose-700'
+                : item.severity === 'medium'
+                ? 'text-amber-700'
+                : 'text-emerald-700';
+
+            return (
+              <div
+                key={item.id}
+                className="p-4 sm:p-5 flex flex-col justify-between gap-4 hover:bg-white transition-colors"
+              >
+                <div className="space-y-2.5">
+                  <div className="flex items-center justify-between gap-2 text-[11px]">
+                    <span className={`inline-flex items-center gap-1.5 font-bold ${urgencyStyle}`}>
+                      {item.severity === 'high' ? (
+                        <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                      ) : item.severity === 'medium' ? (
+                        <Clock className="h-3.5 w-3.5 shrink-0" />
+                      ) : (
+                        <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                      )}
+                      <span>
+                        0{item.rank}. {item.urgencyLabel}
+                      </span>
+                    </span>
+                    <span className="text-slate-500 font-medium truncate">
+                      {item.categoryLabel}
+                    </span>
+                  </div>
+
+                  <div className="space-y-1">
+                    <h3 className="text-sm font-extrabold text-slate-900 leading-snug">
+                      {item.title}
+                    </h3>
+                    <p className="text-xs font-mono tabular-nums font-bold text-slate-800">
+                      {item.metricSummary}
+                    </p>
+                  </div>
+
+                  <p className="text-xs text-slate-600 leading-relaxed">
+                    {item.description}
+                  </p>
+                </div>
+
+                <div className="pt-2 border-t border-slate-200/70 flex items-center justify-between">
+                  <button
+                    type="button"
+                    onClick={() => onQuickAction(item.targetTab)}
+                    className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-900 hover:text-blue-700 transition-colors cursor-pointer whitespace-nowrap"
+                  >
+                    <span>{item.actionLabel}</span>
+                    <ArrowRight className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </motion.section>
   );
 };
 
@@ -1069,11 +1654,22 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
     batchAssetDepreciation.items.forEach((item) => {
       depById.set(item.assetId, item);
     });
-    return syncedFixedAssetsList.map((asset) => ({
-      asset,
-      valuation: calculateFixedAssetValuation(asset, debts, systemTodayStr),
-      depreciation: depById.get(asset.id),
-    }));
+    return syncedFixedAssetsList.map((asset) => {
+      const valuation = calculateFixedAssetValuation(asset, debts, systemTodayStr);
+      const depreciation = depById.get(asset.id);
+      const lifecycle = calculateFixedAssetLifecycleMetrics(
+        asset,
+        valuation,
+        depreciation,
+        systemTodayStr
+      );
+      return {
+        asset,
+        valuation,
+        depreciation,
+        lifecycle,
+      };
+    });
   }, [syncedFixedAssetsList, debts, systemTodayStr, batchAssetDepreciation]);
 
   const totalInvestments = combinedPortfolioWealth.totalInvestmentValue;
@@ -1134,9 +1730,9 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
   const monthlySaving = monthlySummary.emergencyAdditions;
   const monthlyInvestment = monthlySummary.investmentPurchases;
 
-  // Unified 6-month historical Net Worth trend (Net Worth, Total Assets, Total Liabilities)
-  const netWorthTrend6Months = React.useMemo(() => {
-    return calculateNetWorthHistory6Months(
+  // Unified 6-month historical Net Worth trend + 3-month blended projection
+  const netWorthTrendWithProjection = React.useMemo(() => {
+    return calculateNetWorthTrendWithProjection(
       transactions,
       accounts,
       totalCurrentAssets,
@@ -1351,93 +1947,27 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
   const [forecastIncludeUpcomingBills, setForecastIncludeUpcomingBills] = React.useState<boolean>(true);
   const [forecastChartView, setForecastChartView] = React.useState<'trend' | 'balance'>('trend');
 
-  // --- AI WEEKLY FINANCIAL INSIGHTS STATE & FETCH HANDLER ---
-  const [weeklyInsightsData, setWeeklyInsightsData] = React.useState<{
-    weeklyTrendScore: string;
-    headline: string;
-    summary: string;
-    unusualExpenses: Array<{
-      title: string;
-      category: string;
-      amount: number;
-      reason: string;
-      severity: 'high' | 'medium' | 'low';
-    }>;
-    savingsOpportunities: Array<{
-      title: string;
-      category: string;
-      potentialSavings: number;
-      actionableAdvice: string;
-    }>;
-  } | null>(null);
+  // --- WAWASAN AI (WEEKLY 3 PRIORITIES LOCAL TRIGGER STATE) ---
+  const [analysisTriggerCount, setAnalysisTriggerCount] = React.useState(0);
+  const [isRefreshingInsights, setIsRefreshingInsights] = React.useState(false);
+  const [lastAnalyzedAt, setLastAnalyzedAt] = React.useState(() =>
+    new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })
+  );
 
-  const [isLoadingWeeklyInsights, setIsLoadingWeeklyInsights] = React.useState(false);
-  const [weeklyInsightsError, setWeeklyInsightsError] = React.useState<string | null>(null);
-
-  const handleFetchWeeklyInsights = React.useCallback(async () => {
-    setIsLoadingWeeklyInsights(true);
-    setWeeklyInsightsError(null);
-    try {
-      const response = await fetch('/api/weekly-insights', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          transactions,
-          budgets,
-          debts,
-        }),
+  const handleTriggerWawasanAi = React.useCallback(() => {
+    setIsRefreshingInsights(true);
+    window.setTimeout(() => {
+      setAnalysisTriggerCount((c) => c + 1);
+      setLastAnalyzedAt(
+        new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })
+      );
+      setIsRefreshingInsights(false);
+      showToast({
+        type: 'success',
+        title: 'Wawasan AI Diperbarui',
+        message: '3 prioritas keuangan mingguan telah dievaluasi ulang dari data transaksi terkini.',
       });
-
-      if (!response.ok) {
-        throw new Error(`Server error (${response.status})`);
-      }
-
-      const data = await response.json();
-      setWeeklyInsightsData(data);
-    } catch (err: any) {
-      console.error('Error fetching weekly financial insights:', err);
-      setWeeklyInsightsError('Gagal memuat wawasan AI. Menampilkan analisis lokal.');
-
-      // Fallback local calculation
-      const recentTxs = transactions.slice(-15);
-      const largeTxs = recentTxs.filter(t => t.type === 'expense' && t.amount >= 500000);
-
-      setWeeklyInsightsData({
-        weeklyTrendScore: 'Disiplin & Stabil',
-        headline: 'Pengeluaran Mingguan Terkendali Sesuai Rencana',
-        summary: `Dalam 7 hari terakhir, Anda telah melakukan ${recentTxs.length} transaksi. Arus kas pengeluaran secara umum berada dalam batas wajar.`,
-        unusualExpenses: largeTxs.map(t => ({
-          title: `Pengeluaran ${t.category}`,
-          category: t.category,
-          amount: t.amount,
-          reason: `Transaksi ${t.description} sebesar ${formatterIDR.format(t.amount)} merupakan alokasi yang cukup signifikan minggu ini.`,
-          severity: t.amount >= 1000000 ? 'high' : 'medium',
-        })),
-        savingsOpportunities: [
-          {
-            title: 'Optimasi Anggaran Makanan & Makan Luar',
-            category: 'Makanan',
-            potentialSavings: 150000,
-            actionableAdvice: 'Cobalah membatasi pesan antar makanan 2-3 kali seminggu untuk menghemat alokasi pengeluaran harian.',
-          },
-          {
-            title: 'Review Langganan Digital & Hiburan',
-            category: 'Hiburan',
-            potentialSavings: 100000,
-            actionableAdvice: 'Evaluasi layanan streaming atau langganan yang jarang digunakan dalam sebulan terakhir.',
-          }
-        ]
-      });
-    } finally {
-      setIsLoadingWeeklyInsights(false);
-    }
-  }, [transactions, budgets, debts]);
-
-  // Auto-fetch on initial load
-  React.useEffect(() => {
-    if (!weeklyInsightsData && !isLoadingWeeklyInsights) {
-      handleFetchWeeklyInsights();
-    }
+    }, 220);
   }, []);
 
   // --- GOAL TRACKER (TARGET TABUNGAN) STATES & HANDLERS ---
@@ -1954,106 +2484,29 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
     };
   }, [calcAmount, calcInflation, calcYears]);
 
-  // --- AI QUICK INSIGHTS MEMO ---
-  const aiInsights = React.useMemo(() => {
-    const unusualExpenses: { type: string; title: string; desc: string }[] = [];
-    const recommendations: { type: string; title: string; desc: string }[] = [];
-
-    // 1. Detect unusual/large expense transactions in active month
-    const currentMonthPrefix = `${calYear}-${String(calMonth).padStart(2, '0')}`;
-    const targetTxs = transactions.filter(tx => tx.date.startsWith(currentMonthPrefix));
-    
-    const largeExpenses = targetTxs
-      .filter(tx => isOperatingExpense(tx) && tx.amount >= 750000)
-      .sort((a, b) => b.amount - a.amount);
-
-    if (largeExpenses.length > 0) {
-      largeExpenses.slice(0, 2).forEach(tx => {
-        unusualExpenses.push({
-          type: 'large_expense',
-          title: `Pengeluaran Besar: ${tx.category}`,
-          desc: `Transaksi '${tx.description}' sebesar ${formatValue(tx.amount)} terdeteksi pada ${tx.date}. Pertimbangkan untuk mengevaluasi urgensi pengeluaran ini.`
-        });
-      });
-    }
-
-    // 2. Budget Overruns
-    const exceeded = budgetProgress.filter(b => b.isOver);
-    if (exceeded.length > 0) {
-      exceeded.forEach(b => {
-        unusualExpenses.push({
-          type: 'budget_exceeded',
-          title: `Over Anggaran: ${b.category}`,
-          desc: `Kategori '${b.category}' telah melebihi batas anggaran sebesar ${formatValue(b.actual - b.limit)} (${Math.round(b.rawPercentage)}% dari batas ${formatValue(b.limit)}).`
-        });
-      });
-    }
-
-    // 3. Near-overrun budgets (80% - 100%)
-    const nearOverrun = budgetProgress.filter(b => !b.isOver && b.rawPercentage >= 80);
-    if (nearOverrun.length > 0) {
-      nearOverrun.forEach(b => {
-        recommendations.push({
-          type: 'budget_near',
-          title: `Anggaran Menipis: ${b.category}`,
-          desc: `Anggaran kategori '${b.category}' sudah terpakai ${Math.round(b.rawPercentage)}%. Sisa batas pengeluaran aman Anda hanya ${formatValue(b.limit - b.actual)}.`
-        });
-      });
-    }
-
-    // 4. Liquid Cash vs Investments
-    if (totalLiquidAssets > 12000000 && totalInvestments < (totalLiquidAssets * 0.20)) {
-      recommendations.push({
-        type: 'low_investment',
-        title: 'Optimalkan Dana Menganggur',
-        desc: `Anda memiliki uang kas & tabungan sebesar ${formatValue(totalLiquidAssets)}, sedangkan aset investasi Anda baru ${formatValue(totalInvestments)}. Cobalah alokasikan sebagian ke Reksa Dana atau Emas untuk memproteksi nilai uang Anda dari inflasi.`
-      });
-    }
-
-    // 5. Cash Flow deficit (Operating + Debt Service + Asset Reserve, excluding internal transfers & debt proceeds)
-    const currentMonthOutflow = targetTxs
-      .filter(tx => !isInternalTransfer(tx) && tx.type !== 'income' && classifyTransaction(tx) !== 'debt_proceeds')
-      .reduce((sum, tx) => sum + tx.amount, 0);
-    const currentMonthIncome = targetTxs
-      .filter(isOperatingIncome)
-      .reduce((sum, tx) => sum + tx.amount, 0);
-
-    if (currentMonthOutflow > currentMonthIncome && currentMonthIncome > 0) {
-      recommendations.push({
-        type: 'cash_flow_deficit',
-        title: 'Arus Kas Defisit Bulan Ini',
-        desc: `Arus kas keluar (${formatValue(currentMonthOutflow)}) melebihi arus kas masuk (${formatValue(currentMonthIncome)}) sebesar ${formatValue(currentMonthOutflow - currentMonthIncome)}. Kurangi transaksi non-primer agar saldo tidak terus tergerus.`
-      });
-    }
-
-    // 6. Emergency Fund analysis
-    const targetEmergencyFund = Math.max(5000000, (monthlyExpense || 3000000) * 3);
-    if (totalEmergency < targetEmergencyFund) {
-      recommendations.push({
-        type: 'low_emergency',
-        title: 'Tingkatkan Dana Darurat',
-        desc: `Dana darurat Anda saat ini sebesar ${formatValue(totalEmergency)} masih di bawah batas aman ideal yaitu ${formatValue(targetEmergencyFund)} (3x pengeluaran bulanan). Prioritaskan sisa kas bulan ini ke celengan Dana Darurat.`
-      });
-    }
-
-    // Add default safe/general tips if empty
-    if (unusualExpenses.length === 0) {
-      unusualExpenses.push({
-        type: 'safe',
-        title: 'Tidak Ada Anomali Pengeluaran',
-        desc: 'Bagus sekali! Pengeluaran Anda di bulan ini terpantau stabil tanpa adanya transaksi tunggal yang tidak wajar atau melebihi batas anggaran.'
-      });
-    }
-    if (recommendations.length === 0) {
-      recommendations.push({
-        type: 'general',
-        title: 'Pertahankan Disiplin Keuangan',
-        desc: 'Review pengeluaran Anda secara berkala dan pastikan setiap pengeluaran tetap berada dalam porsi anggaran yang telah ditentukan.'
-      });
-    }
-
-    return { unusualExpenses, recommendations };
-  }, [transactions, budgetProgress, totalLiquidAssets, totalInvestments, totalEmergency, monthlyExpense, calMonth, calYear, isFocusMode]);
+  // --- UNIFIED WAWASAN AI: 3 PRIORITAS KEUANGAN MINGGU INI ---
+  const weeklyPrioritiesResult = React.useMemo(() => {
+    return calculateWeeklyFinancialPriorities({
+      transactions,
+      accounts,
+      budgets,
+      debts,
+      investments,
+      emergencyTransactions,
+      systemTodayStr,
+      formatCurrency: (amt) => formatValue(amt),
+    });
+  }, [
+    transactions,
+    accounts,
+    budgets,
+    debts,
+    investments,
+    emergencyTransactions,
+    systemTodayStr,
+    isFocusMode,
+    analysisTriggerCount,
+  ]);
 
   // --- WEEKLY EXPENSE SUMMARY PER CATEGORY MEMO (Requirement 1) ---
   const weeklyCategorySummary = React.useMemo(() => {
@@ -2481,13 +2934,23 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
         onQuickAction={onQuickAction}
       />
 
-      {/* GRAFIK TREND NET WORTH 6 BULAN TERAKHIR */}
+      {/* GRAFIK TREND NET WORTH 6 BULAN TERAKHIR + PROYEKSI 3 BULAN */}
       <TrendNetWorthChart
-        data={netWorthTrend6Months}
+        trendResult={netWorthTrendWithProjection}
         currentNetWorth={netWorth}
         isFocusMode={isFocusMode}
         formatValue={formatValue}
         formatCompactValue={formatCompactValue}
+      />
+
+      {/* PANEL WAWASAN AI TERKONSOLIDASI (3 PRIORITAS MINGGU INI) */}
+      <WawasanAiPanel
+        result={weeklyPrioritiesResult}
+        lastAnalyzedAt={lastAnalyzedAt}
+        isRefreshing={isRefreshingInsights}
+        onTriggerAnalysis={handleTriggerWawasanAi}
+        onQuickAction={onQuickAction}
+        formatValue={formatValue}
       />
 
       {/* FINANCIAL HEALTH SCORE CARD */}
@@ -2668,141 +3131,6 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
         />
       </motion.div>
 
-      {/* AI WEEKLY FINANCIAL INSIGHTS CARD */}
-      <motion.div variants={cardVariants} className="bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 p-6 rounded-2xl text-white shadow-xl border border-indigo-800/40 space-y-6">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800/80 pb-4">
-          <div className="flex items-center gap-3">
-            <div className="p-2.5 bg-gradient-to-tr from-blue-600 to-indigo-500 rounded-xl shadow-md text-white">
-              <Sparkles className="h-5 w-5 animate-pulse" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h2 className="text-base font-black tracking-tight text-white">
-                  Wawasan Keuangan Minggu Ini
-                </h2>
-                <span className="bg-blue-500/20 text-blue-300 border border-blue-400/30 text-[10px] font-extrabold px-2.5 py-0.5 rounded-full uppercase tracking-wider flex items-center gap-1">
-                  Gemini AI
-                </span>
-              </div>
-              <p className="text-xs text-slate-300 font-medium">
-                Analisis otomatis kecerdasan buatan terhadap pola transaksi & pengeluaran Anda.
-              </p>
-            </div>
-          </div>
-
-          <button
-            type="button"
-            onClick={handleFetchWeeklyInsights}
-            disabled={isLoadingWeeklyInsights}
-            className="flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-500 text-white font-extrabold text-xs px-4 py-2 rounded-xl shadow-md transition cursor-pointer disabled:opacity-50 shrink-0"
-          >
-            <RefreshCw className={`h-3.5 w-3.5 ${isLoadingWeeklyInsights ? 'animate-spin' : ''}`} />
-            {isLoadingWeeklyInsights ? 'Menganalisis...' : 'Perbarui Analisis AI'}
-          </button>
-        </div>
-
-        {/* LOADING STATE */}
-        {isLoadingWeeklyInsights && (
-          <div className="py-8 text-center space-y-3 bg-slate-950/50 rounded-xl border border-slate-800">
-            <div className="inline-flex items-center justify-center p-3 bg-blue-500/20 text-blue-400 rounded-full animate-bounce">
-              <Sparkles className="h-6 w-6" />
-            </div>
-            <p className="text-xs font-bold text-slate-300">
-              Gemini AI sedang menganalisis pola transaksi & arus kas Anda minggu ini...
-            </p>
-          </div>
-        )}
-
-        {/* INSIGHTS CONTENT */}
-        {!isLoadingWeeklyInsights && weeklyInsightsData && (
-          <div className="space-y-6">
-            {/* HEADLINE & SCORE */}
-            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 p-4 bg-slate-950/60 rounded-xl border border-slate-800">
-              <div className="space-y-1">
-                <span className="text-[10px] font-black uppercase text-blue-400 tracking-wider">
-                  Skor & Tren Mingguan
-                </span>
-                <h3 className="text-sm font-black text-white">
-                  {weeklyInsightsData.headline}
-                </h3>
-                <p className="text-xs text-slate-300 leading-relaxed">
-                  {weeklyInsightsData.summary}
-                </p>
-              </div>
-              <div className="shrink-0 bg-blue-600/20 border border-blue-500/40 px-4 py-2.5 rounded-xl text-center">
-                <span className="text-[10px] font-extrabold uppercase text-blue-300 block">Status Evaluasi</span>
-                <span className="text-xs font-black text-blue-200">{weeklyInsightsData.weeklyTrendScore}</span>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-              {/* UNUSUAL EXPENSES */}
-              <div className="space-y-3">
-                <h4 className="text-xs font-extrabold text-amber-400 uppercase tracking-wider flex items-center gap-2">
-                  <ShieldAlert className="h-4 w-4" /> Peringatan Pengeluaran Tidak Biasa
-                </h4>
-                {weeklyInsightsData.unusualExpenses.length === 0 ? (
-                  <div className="p-4 bg-slate-950/40 rounded-xl border border-slate-800 text-xs text-slate-400">
-                    Tidak terdeteksi pengeluaran tidak biasa minggu ini. Semua alokasi berjalan normal!
-                  </div>
-                ) : (
-                  <div className="space-y-2.5">
-                    {weeklyInsightsData.unusualExpenses.map((item, idx) => (
-                      <div
-                        key={idx}
-                        className={`p-3.5 rounded-xl border text-xs space-y-1 ${
-                          item.severity === 'high'
-                            ? 'bg-rose-950/40 border-rose-800/60 text-rose-100'
-                            : 'bg-amber-950/30 border-amber-800/50 text-amber-100'
-                        }`}
-                      >
-                        <div className="flex items-center justify-between font-bold">
-                          <span>{item.title}</span>
-                          <span className="font-mono text-white">{formatterIDR.format(item.amount)}</span>
-                        </div>
-                        <p className="text-[11px] opacity-90 leading-relaxed">
-                          {item.reason}
-                        </p>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              {/* SAVINGS OPPORTUNITIES */}
-              <div className="space-y-3">
-                <h4 className="text-xs font-extrabold text-emerald-400 uppercase tracking-wider flex items-center gap-2">
-                  <TrendingDown className="h-4 w-4" /> Saran & Peluang Penghematan
-                </h4>
-                {weeklyInsightsData.savingsOpportunities.length === 0 ? (
-                  <div className="p-4 bg-slate-950/40 rounded-xl border border-slate-800 text-xs text-slate-400">
-                    Sistem belum menemukan alokasi hemat baru. Pertahankan disiplin keuangan Anda!
-                  </div>
-                ) : (
-                  <div className="space-y-2.5">
-                    {weeklyInsightsData.savingsOpportunities.map((opp, idx) => (
-                      <div
-                        key={idx}
-                        className="p-3.5 bg-emerald-950/30 border border-emerald-800/50 text-emerald-100 rounded-xl text-xs space-y-1"
-                      >
-                        <div className="flex items-center justify-between font-bold text-emerald-300">
-                          <span>{opp.title}</span>
-                          <span className="bg-emerald-500/20 text-emerald-200 px-2 py-0.5 rounded text-[10px] font-mono">
-                            Potensi Hemat: {formatterIDR.format(opp.potentialSavings)}
-                          </span>
-                        </div>
-                        <p className="text-[11px] text-slate-300 leading-relaxed">
-                          {opp.actionableAdvice}
-                        </p>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-        )}
-      </motion.div>
 
       {/* Due Date Notification Banner for Debts (< 3 Days) */}
       {urgentDueDebts.length > 0 && (
@@ -3043,7 +3371,7 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
               </div>
               <div className="flex justify-between text-slate-600">
                 <span>Anomali Kebocoran:</span>
-                <span className="font-mono font-bold text-slate-800">{aiInsights.unusualExpenses.length > 0 ? aiInsights.unusualExpenses.length : '0'}</span>
+                <span className="font-mono font-bold text-slate-800">{weeklyPrioritiesResult.anomalyCount}</span>
               </div>
             </div>
           </div>
@@ -3991,65 +4319,6 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
 
       </div>
 
-      {/* Wawasan Cepat AI (AI Quick Insights Card) */}
-      <div className="bg-gradient-to-r from-blue-50/70 via-indigo-50/50 to-purple-50/30 border border-blue-150/85 p-5 rounded-xl shadow-xs space-y-4">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="flex items-start gap-2.5">
-            <div className="p-1.5 bg-blue-600 text-white rounded-lg animate-pulse shrink-0">
-              <Sparkles className="h-4.5 w-4.5" />
-            </div>
-            <div>
-              <h2 className="text-xs font-black text-slate-800 uppercase tracking-wider flex items-center gap-1.5">
-                Wawasan Cepat AI
-              </h2>
-              <p className="text-[11px] text-slate-400 font-bold">
-                Poin-poin analisis keuangan utama yang dianalisis secara riil dari riwayat transaksi bulan ini ({INDONESIAN_MONTHS[calMonth - 1]} {calYear}).
-              </p>
-            </div>
-          </div>
-
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {/* Anomali & Pengeluaran Tidak Wajar */}
-          <div className="bg-white/80 backdrop-blur-xs p-4 rounded-lg border border-slate-200/60 space-y-3">
-            <h3 className="text-xs font-black text-slate-700 uppercase tracking-wider flex items-center gap-1.5 border-b border-slate-100 pb-1.5">
-              <AlertTriangle className="h-4 w-4 text-amber-500 shrink-0" />
-              Anomali & Batas Anggaran
-            </h3>
-            <div className="space-y-2.5">
-              {aiInsights.unusualExpenses.map((item, idx) => (
-                <div key={idx} className="flex gap-2 text-xs">
-                  <div className="w-1.5 h-1.5 rounded-full bg-amber-500 mt-1.5 shrink-0" />
-                  <div>
-                    <span className="font-extrabold text-slate-800 block">{item.title}</span>
-                    <p className="text-[11px] text-slate-500 font-medium leading-relaxed">{item.desc}</p>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Rekomendasi Penghematan */}
-          <div className="bg-white/80 backdrop-blur-xs p-4 rounded-lg border border-slate-200/60 space-y-3">
-            <h3 className="text-xs font-black text-slate-700 uppercase tracking-wider flex items-center gap-1.5 border-b border-slate-100 pb-1.5">
-              <Lightbulb className="h-4 w-4 text-indigo-500 shrink-0" />
-              Rekomendasi Cerdas AI
-            </h3>
-            <div className="space-y-2.5">
-              {aiInsights.recommendations.map((item, idx) => (
-                <div key={idx} className="flex gap-2 text-xs">
-                  <div className="w-1.5 h-1.5 rounded-full bg-indigo-500 mt-1.5 shrink-0" />
-                  <div>
-                    <span className="font-extrabold text-slate-800 block">{item.title}</span>
-                    <p className="text-[11px] text-slate-500 font-medium leading-relaxed">{item.desc}</p>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      </div>
 
       {/* --- SECTION: PROYEKSI KESEHATAN FINANSIAL (3 BULAN) --- */}
       <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between space-y-4">

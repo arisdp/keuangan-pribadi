@@ -1,6 +1,7 @@
 import {
   Account,
   AccountType,
+  CategoryBudget,
   Debt,
   EmergencyFundTransaction,
   FixedAsset,
@@ -745,6 +746,123 @@ export function calculateAssetDepreciation(
   }
 
   return calculateSingleAssetDepreciation(assetOrAssets, debts, asOfDateStr, periodDaysOrOptions);
+}
+
+export interface FixedAssetLifecycleMetrics {
+  assetId: string;
+  isDepreciable: boolean;
+  annualRatePct: number;
+  annualRatePctAbs: number;
+  acquisitionDate: string;
+  asOfDate: string;
+  totalAgeDays: number;
+  elapsedAgeYears: number;
+  estimatedUsefulLifeYears: number;
+  estimatedUsefulLifeDays: number;
+  remainingLifeDays: number;
+  remainingLifeYears: number;
+  ageProgressPct: number;
+  bookValueRemainingPct: number;
+  accumulatedDepreciationRecorded: number;
+  pendingDepreciationAmount: number;
+  annualDepreciationAmount: number;
+  monthlyDepreciationAmount: number;
+  projectedBookValueAfterSync: number;
+  lifecycleStatus:
+    | 'Habis Masa Manfaat'
+    | 'Mendekati Akhir Manfaat'
+    | 'Aktif Menyusut'
+    | 'Apresiasi / Non-Susut';
+}
+
+/**
+ * Menghitung metrik masa pakai berjalan vs estimasi umur ekonomis aset tetap
+ * serta rincian penyusutan untuk ditampilkan pada panel detail aset.
+ */
+export function calculateFixedAssetLifecycleMetrics(
+  asset: FixedAsset,
+  valuation: FixedAssetValuationResult,
+  depreciation?: FixedAssetDepreciationResult,
+  asOfDateStr?: string
+): FixedAssetLifecycleMetrics {
+  const safeAsOfStr =
+    normalizeLedgerDateYYYYMMDD(asOfDateStr) ||
+    depreciation?.asOfDate ||
+    new Date().toISOString().split('T')[0];
+  const safeAcqStr = normalizeLedgerDateYYYYMMDD(asset.acquisitionDate) || safeAsOfStr;
+
+  const asOfMs = Date.parse(`${safeAsOfStr}T00:00:00Z`);
+  const acqMs = Date.parse(`${safeAcqStr}T00:00:00Z`);
+  const totalAgeDays =
+    Number.isFinite(asOfMs) && Number.isFinite(acqMs)
+      ? Math.max(0, Math.floor((asOfMs - acqMs) / 86400000))
+      : valuation.elapsedDays;
+  const elapsedAgeYears = totalAgeDays / 365;
+
+  const isDepreciable = valuation.annualRatePct < 0 && valuation.basisValue > 0;
+  const annualRatePctAbs = Math.abs(valuation.annualRatePct);
+  const estimatedUsefulLifeYears =
+    isDepreciable && annualRatePctAbs > 0 ? 100 / annualRatePctAbs : 0;
+  const estimatedUsefulLifeDays =
+    estimatedUsefulLifeYears > 0 ? Math.round(estimatedUsefulLifeYears * 365) : 0;
+
+  const remainingLifeDays =
+    estimatedUsefulLifeDays > 0 ? Math.max(0, estimatedUsefulLifeDays - totalAgeDays) : 0;
+  const remainingLifeYears = remainingLifeDays / 365;
+  const ageProgressPct =
+    estimatedUsefulLifeDays > 0
+      ? Math.min(100, Math.max(0, (totalAgeDays / estimatedUsefulLifeDays) * 100))
+      : asset.isKprLinked
+      ? Math.min(100, Math.max(0, valuation.ownershipPct))
+      : 0;
+
+  const bookValueRemainingPct =
+    valuation.basisValue > 0
+      ? Math.min(100, Math.max(0, (valuation.currentBookValue / valuation.basisValue) * 100))
+      : 0;
+
+  const annualDepreciationAmount =
+    depreciation?.annualDepreciationAmount ??
+    (isDepreciable ? Math.round(valuation.basisValue * (annualRatePctAbs / 100)) : 0);
+  const monthlyDepreciationAmount = Math.round(annualDepreciationAmount / 12);
+  const pendingDepreciationAmount = depreciation?.cappedDepreciationAmount ?? 0;
+  const projectedBookValueAfterSync =
+    depreciation?.projectedBookValueAfter ??
+    Math.max(0, valuation.currentBookValue - pendingDepreciationAmount);
+
+  let lifecycleStatus: FixedAssetLifecycleMetrics['lifecycleStatus'] = 'Apresiasi / Non-Susut';
+  if (isDepreciable) {
+    if (valuation.currentBookValue <= 0 || ageProgressPct >= 100) {
+      lifecycleStatus = 'Habis Masa Manfaat';
+    } else if (ageProgressPct >= 80) {
+      lifecycleStatus = 'Mendekati Akhir Manfaat';
+    } else {
+      lifecycleStatus = 'Aktif Menyusut';
+    }
+  }
+
+  return {
+    assetId: asset.id,
+    isDepreciable,
+    annualRatePct: valuation.annualRatePct,
+    annualRatePctAbs,
+    acquisitionDate: safeAcqStr,
+    asOfDate: safeAsOfStr,
+    totalAgeDays,
+    elapsedAgeYears,
+    estimatedUsefulLifeYears,
+    estimatedUsefulLifeDays,
+    remainingLifeDays,
+    remainingLifeYears,
+    ageProgressPct,
+    bookValueRemainingPct,
+    accumulatedDepreciationRecorded: valuation.manualDepreciation,
+    pendingDepreciationAmount,
+    annualDepreciationAmount,
+    monthlyDepreciationAmount,
+    projectedBookValueAfterSync,
+    lifecycleStatus,
+  };
 }
 
 export interface SyncedFixedAssetDepreciationResult {
@@ -2452,6 +2570,235 @@ export function calculateNetWorthHistory6Months(
   return points;
 }
 
+export interface NetWorthCombinedTrendPoint {
+  monthKey: string;
+  monthLabel: string;
+  cutoffDate: string;
+  isProjection: boolean;
+  // Historical actual series (M-5 .. M0)
+  netWorth?: number;
+  assets?: number;
+  debts?: number;
+  // Dashed projection continuation series (anchored at M0 -> +1 .. +3)
+  projectedNetWorth?: number;
+  projectedAssets?: number;
+  projectedDebts?: number;
+  // Unified display values for Tooltip/calculations
+  displayNetWorth: number;
+  displayAssets: number;
+  displayDebts: number;
+  ratio: number;
+  status: 'Sehat' | 'Waspada' | 'Kritis';
+  deltaFromPrev: number;
+  deltaPctFromPrev: number;
+}
+
+export interface NetWorthTrendWithProjectionResult {
+  points: NetWorthCombinedTrendPoint[];
+  historicalPoints: NetWorthCombinedTrendPoint[];
+  currentMonthLabel: string;
+  currentNetWorth: number;
+  projectedNetWorth3M: number;
+  projectedAssets3M: number;
+  projectedDebts3M: number;
+  projectedDeltaAmount: number;
+  projectedDeltaPct: number;
+  historicalSlopeMonthly: number;
+  avgNetCashFlowMonthly: number;
+  blendedMonthlyGrowth: number;
+  activeCashFlowMonths: number;
+}
+
+function computeLinearRegressionSlope(values: number[]): number {
+  const n = values.length;
+  if (n < 2) return 0;
+  let sumX = 0;
+  let sumY = 0;
+  let sumXY = 0;
+  let sumXX = 0;
+  for (let i = 0; i < n; i++) {
+    sumX += i;
+    sumY += values[i];
+    sumXY += i * values[i];
+    sumXX += i * i;
+  }
+  const denominator = n * sumXX - sumX * sumX;
+  if (denominator === 0) return 0;
+  return (n * sumXY - sumX * sumY) / denominator;
+}
+
+/**
+ * Menggabungkan riwayat Net Worth 6 bulan terakhir dengan proyeksi 3 bulan ke depan
+ * menggunakan kombinasi tren regresi historis 6 bulan dan rata-rata surplus arus kas operasional.
+ */
+export function calculateNetWorthTrendWithProjection(
+  transactions: Transaction[],
+  accounts: Account[],
+  currentAssets: number,
+  currentDebts: number,
+  systemTodayStr: string
+): NetWorthTrendWithProjectionResult {
+  const safeTxs = Array.isArray(transactions) ? transactions : [];
+  const safeTodayStr =
+    normalizeLedgerDateYYYYMMDD(systemTodayStr) || new Date().toISOString().split('T')[0];
+
+  const hist = calculateNetWorthHistory6Months(
+    safeTxs,
+    accounts,
+    currentAssets,
+    currentDebts,
+    safeTodayStr
+  );
+
+  const histMonthKeys = new Set(hist.map((p) => p.monthKey));
+  const activeCashFlowMonthSet = new Set<string>();
+  let totalOperatingIncome6M = 0;
+  let totalOperatingExpense6M = 0;
+
+  for (const tx of safeTxs) {
+    if (!tx || !tx.date || tx.date > safeTodayStr) continue;
+    const mKey = tx.date.slice(0, 7);
+    if (!histMonthKeys.has(mKey)) continue;
+    if (isOperatingIncome(tx)) {
+      totalOperatingIncome6M += normalizeAbsAmount(tx.amount);
+      activeCashFlowMonthSet.add(mKey);
+    } else if (isOperatingExpense(tx)) {
+      totalOperatingExpense6M += normalizeAbsAmount(tx.amount);
+      activeCashFlowMonthSet.add(mKey);
+    }
+  }
+
+  const activeCashFlowMonths = activeCashFlowMonthSet.size;
+  const avgNetCashFlowMonthly =
+    activeCashFlowMonths > 0
+      ? (totalOperatingIncome6M - totalOperatingExpense6M) / activeCashFlowMonths
+      : 0;
+
+  const historicalSlopeMonthly = computeLinearRegressionSlope(hist.map((p) => p.netWorth));
+  const historicalDebtSlope = computeLinearRegressionSlope(hist.map((p) => p.debts));
+
+  // Gabungan 50% tren regresi historis 6 bulan + 50% rata-rata surplus arus kas bulanan
+  const blendedMonthlyGrowth =
+    activeCashFlowMonths > 0
+      ? historicalSlopeMonthly * 0.5 + avgNetCashFlowMonthly * 0.5
+      : historicalSlopeMonthly;
+
+  const lastHist = hist[hist.length - 1];
+  const currentMonthLabel = lastHist?.monthLabel || '';
+  const currentNetWorth = lastHist?.netWorth ?? currentAssets - currentDebts;
+
+  const historicalPoints: NetWorthCombinedTrendPoint[] = hist.map((p, idx) => {
+    const isAnchor = idx === hist.length - 1;
+    return {
+      monthKey: p.monthKey,
+      monthLabel: p.monthLabel,
+      cutoffDate: p.cutoffDate,
+      isProjection: false,
+      netWorth: p.netWorth,
+      assets: p.assets,
+      debts: p.debts,
+      ...(isAnchor
+        ? {
+            projectedNetWorth: p.netWorth,
+            projectedAssets: p.assets,
+            projectedDebts: p.debts,
+          }
+        : {}),
+      displayNetWorth: p.netWorth,
+      displayAssets: p.assets,
+      displayDebts: p.debts,
+      ratio: p.ratio,
+      status: p.status,
+      deltaFromPrev: p.deltaFromPrev,
+      deltaPctFromPrev: p.deltaPctFromPrev,
+    };
+  });
+
+  const baseYear = parseInt(safeTodayStr.slice(0, 4), 10);
+  const baseMonth = parseInt(safeTodayStr.slice(5, 7), 10);
+  const projectionPoints: NetWorthCombinedTrendPoint[] = [];
+  let prevDisplayNetWorth = currentNetWorth;
+
+  for (let step = 1; step <= 3; step++) {
+    const refDate = new Date(baseYear, baseMonth - 1 + step, 1);
+    const year = refDate.getFullYear();
+    const monthIdx = refDate.getMonth();
+    const monthKey = `${year}-${String(monthIdx + 1).padStart(2, '0')}`;
+    const monthLabel = `${SHORT_MONTHS_ID[monthIdx]} '${String(year).slice(-2)}`;
+    const lastDay = new Date(year, monthIdx + 1, 0).getDate();
+    const cutoffDate = `${monthKey}-${String(lastDay).padStart(2, '0')}`;
+
+    const baseDebts = lastHist ? lastHist.debts : currentDebts;
+    const projectedDebts = Math.max(0, Math.round(baseDebts + historicalDebtSlope * step));
+    const targetNetWorth = Math.round(currentNetWorth + blendedMonthlyGrowth * step);
+    const projectedAssets = Math.max(0, targetNetWorth + projectedDebts);
+    const projectedNetWorth = projectedAssets - projectedDebts;
+
+    const deltaFromPrev = projectedNetWorth - prevDisplayNetWorth;
+    const deltaPctFromPrev =
+      Math.abs(prevDisplayNetWorth) > 0
+        ? (deltaFromPrev / Math.abs(prevDisplayNetWorth)) * 100
+        : 0;
+    prevDisplayNetWorth = projectedNetWorth;
+
+    const ratio =
+      projectedAssets > 0
+        ? (projectedDebts / projectedAssets) * 100
+        : projectedDebts > 0
+        ? 100
+        : 0;
+    let status: 'Sehat' | 'Waspada' | 'Kritis' = 'Sehat';
+    if (projectedDebts > 0) {
+      if (ratio <= 35) status = 'Sehat';
+      else if (ratio <= 75) status = 'Waspada';
+      else status = 'Kritis';
+    }
+
+    projectionPoints.push({
+      monthKey,
+      monthLabel,
+      cutoffDate,
+      isProjection: true,
+      projectedNetWorth,
+      projectedAssets,
+      projectedDebts,
+      displayNetWorth: projectedNetWorth,
+      displayAssets: projectedAssets,
+      displayDebts: projectedDebts,
+      ratio,
+      status,
+      deltaFromPrev,
+      deltaPctFromPrev,
+    });
+  }
+
+  const lastProj = projectionPoints[projectionPoints.length - 1];
+  const projectedNetWorth3M = lastProj?.displayNetWorth ?? currentNetWorth;
+  const projectedAssets3M = lastProj?.displayAssets ?? currentAssets;
+  const projectedDebts3M = lastProj?.displayDebts ?? currentDebts;
+  const projectedDeltaAmount = projectedNetWorth3M - currentNetWorth;
+  const projectedDeltaPct =
+    Math.abs(currentNetWorth) > 0
+      ? (projectedDeltaAmount / Math.abs(currentNetWorth)) * 100
+      : 0;
+
+  return {
+    points: [...historicalPoints, ...projectionPoints],
+    historicalPoints,
+    currentMonthLabel,
+    currentNetWorth,
+    projectedNetWorth3M,
+    projectedAssets3M,
+    projectedDebts3M,
+    projectedDeltaAmount,
+    projectedDeltaPct,
+    historicalSlopeMonthly: Math.round(historicalSlopeMonthly),
+    avgNetCashFlowMonthly: Math.round(avgNetCashFlowMonthly),
+    blendedMonthlyGrowth: Math.round(blendedMonthlyGrowth),
+    activeCashFlowMonths,
+  };
+}
+
 export interface CFPHealthRatiosResult {
   monthlyIncome: number;
   monthlyExpense: number;
@@ -2576,3 +2923,517 @@ export function calculateCFPFinancialHealthRatios(
     healthScore,
   };
 }
+
+export type WeeklyPrioritySeverity = 'high' | 'medium' | 'positive';
+
+export interface WeeklyFinancialPriorityItem {
+  id: string;
+  rank: 1 | 2 | 3;
+  severity: WeeklyPrioritySeverity;
+  urgencyLabel: 'Mendesak' | 'Perlu Perhatian' | 'Terkendali';
+  categoryLabel: string;
+  title: string;
+  metricSummary: string;
+  description: string;
+  actionLabel: string;
+  targetTab:
+    | 'budget'
+    | 'debts'
+    | 'emergency-fund'
+    | 'investments'
+    | 'transactions'
+    | 'reports';
+  urgencyScore: number;
+}
+
+export interface WeeklyFinancialPrioritiesResult {
+  priorities: WeeklyFinancialPriorityItem[];
+  thisWeekExpense: number;
+  prevWeekExpense: number;
+  weekDeltaAmount: number;
+  weekDeltaPct: number;
+  thisWeekIncome: number;
+  thisWeekTxCount: number;
+  prevWeekTxCount: number;
+  topCategoryThisWeek: string | null;
+  topCategoryAmount: number;
+  anomalyCount: number;
+  weekRangeLabel: string;
+}
+
+function shiftDateStringDays(baseDateStr: string, deltaDays: number): string {
+  const [y, m, d] = baseDateStr.split('-').map((n) => parseInt(n, 10));
+  const dt = new Date(y, (m || 1) - 1, (d || 1) + deltaDays);
+  const yy = dt.getFullYear();
+  const mm = String(dt.getMonth() + 1).padStart(2, '0');
+  const dd = String(dt.getDate()).padStart(2, '0');
+  return `${yy}-${mm}-${dd}`;
+}
+
+function defaultFormatRp(amount: number): string {
+  const abs = Math.abs(Math.round(amount));
+  const formatted = abs.toLocaleString('id-ID');
+  return amount < 0 ? `-Rp ${formatted}` : `Rp ${formatted}`;
+}
+
+/**
+ * Menganalisis tren transaksi 7 hari terakhir vs 7 hari sebelumnya, batas anggaran aktif,
+ * jatuh tempo utang, cakupan dana darurat, dan optimalisasi kas untuk menyusun
+ * tepat 3 prioritas keuangan utama pengguna minggu ini.
+ */
+export function calculateWeeklyFinancialPriorities(params: {
+  transactions: Transaction[];
+  accounts: Account[];
+  budgets: CategoryBudget[];
+  debts: Debt[];
+  investments: InvestmentAsset[];
+  emergencyTransactions: EmergencyFundTransaction[];
+  systemTodayStr: string;
+  formatCurrency?: (amount: number) => string;
+}): WeeklyFinancialPrioritiesResult {
+  const {
+    transactions = [],
+    accounts = [],
+    budgets = [],
+    debts = [],
+    investments = [],
+    emergencyTransactions = [],
+    systemTodayStr,
+    formatCurrency = defaultFormatRp,
+  } = params;
+
+  const safeTodayStr =
+    normalizeLedgerDateYYYYMMDD(systemTodayStr) || new Date().toISOString().split('T')[0];
+  const weekStartStr = shiftDateStringDays(safeTodayStr, -6);
+  const prevWeekStartStr = shiftDateStringDays(safeTodayStr, -13);
+  const prevWeekEndStr = shiftDateStringDays(safeTodayStr, -7);
+  const currentMonthPrefix = safeTodayStr.slice(0, 7);
+
+  const formatShortId = (dStr: string) => {
+    const [, mm, dd] = dStr.split('-').map((n) => parseInt(n, 10));
+    return `${dd} ${SHORT_MONTHS_ID[(mm || 1) - 1]}`;
+  };
+  const weekRangeLabel = `${formatShortId(weekStartStr)} - ${formatShortId(safeTodayStr)}`;
+
+  let thisWeekExpense = 0;
+  let prevWeekExpense = 0;
+  let thisWeekIncome = 0;
+  let thisWeekTxCount = 0;
+  let prevWeekTxCount = 0;
+
+  const thisWeekCategoryMap: Record<string, number> = {};
+  const prevWeekCategoryMap: Record<string, number> = {};
+  let largestWeekTx: { category: string; description: string; amount: number; date: string } | null = null;
+
+  let monthOperatingIncome = 0;
+  let monthOperatingExpense = 0;
+  const monthExpenseByCategory: Record<string, number> = {};
+
+  for (const tx of transactions) {
+    if (!tx || !tx.date || tx.isAdjustment) continue;
+    const txDate = normalizeLedgerDateYYYYMMDD(tx.date);
+    if (!txDate || txDate > safeTodayStr) continue;
+
+    const amt = normalizeAbsAmount(tx.amount);
+    const isOpExp = isOperatingExpense(tx);
+    const isOpInc = isOperatingIncome(tx);
+
+    if (txDate >= weekStartStr && txDate <= safeTodayStr) {
+      thisWeekTxCount += 1;
+      if (isOpExp) {
+        thisWeekExpense += amt;
+        const cat = tx.category || 'Lainnya';
+        thisWeekCategoryMap[cat] = (thisWeekCategoryMap[cat] || 0) + amt;
+        if (!largestWeekTx || amt > largestWeekTx.amount) {
+          largestWeekTx = {
+            category: cat,
+            description: tx.description || cat,
+            amount: amt,
+            date: txDate,
+          };
+        }
+      } else if (isOpInc) {
+        thisWeekIncome += amt;
+      }
+    } else if (txDate >= prevWeekStartStr && txDate <= prevWeekEndStr) {
+      prevWeekTxCount += 1;
+      if (isOpExp) {
+        prevWeekExpense += amt;
+        const cat = tx.category || 'Lainnya';
+        prevWeekCategoryMap[cat] = (prevWeekCategoryMap[cat] || 0) + amt;
+      }
+    }
+
+    if (txDate.startsWith(currentMonthPrefix)) {
+      if (isOpInc) {
+        monthOperatingIncome += amt;
+      } else if (isOpExp) {
+        monthOperatingExpense += amt;
+        const cat = tx.category || 'Lainnya';
+        monthExpenseByCategory[cat] = (monthExpenseByCategory[cat] || 0) + amt;
+      }
+    }
+  }
+
+  const weekDeltaAmount = thisWeekExpense - prevWeekExpense;
+  const weekDeltaPct =
+    prevWeekExpense > 0
+      ? (weekDeltaAmount / prevWeekExpense) * 100
+      : thisWeekExpense > 0
+      ? 100
+      : 0;
+
+  let topCategoryThisWeek: string | null = null;
+  let topCategoryAmount = 0;
+  for (const [cat, amt] of Object.entries(thisWeekCategoryMap)) {
+    if (amt > topCategoryAmount) {
+      topCategoryAmount = amt;
+      topCategoryThisWeek = cat;
+    }
+  }
+
+  // Detect category spike (7d vs prev 7d)
+  let topSpikeCategory: { category: string; thisAmt: number; prevAmt: number; jumpAmt: number; jumpPct: number } | null = null;
+  for (const [cat, thisAmt] of Object.entries(thisWeekCategoryMap)) {
+    const prevAmt = prevWeekCategoryMap[cat] || 0;
+    const jumpAmt = thisAmt - prevAmt;
+    if (jumpAmt > 0 && thisAmt >= 150000) {
+      const jumpPct = prevAmt > 0 ? (jumpAmt / prevAmt) * 100 : 100;
+      if (!topSpikeCategory || jumpAmt > topSpikeCategory.jumpAmt) {
+        topSpikeCategory = { category: cat, thisAmt, prevAmt, jumpAmt, jumpPct };
+      }
+    }
+  }
+
+  // Budget audit for active month
+  const overBudgets: Array<{ category: string; limit: number; actual: number; overAmt: number; pct: number }> = [];
+  const nearBudgets: Array<{ category: string; limit: number; actual: number; remaining: number; pct: number }> = [];
+
+  for (const b of budgets) {
+    if (!b || b.type !== 'expense') continue;
+    const limit = Number((b as any).monthlyLimit || b.limit || 0);
+    if (limit <= 0) continue;
+    const matchedCat = Object.keys(monthExpenseByCategory).find(
+      (k) => k.toLowerCase() === b.category.toLowerCase()
+    );
+    const actual = matchedCat ? monthExpenseByCategory[matchedCat] : 0;
+    const pct = (actual / limit) * 100;
+    if (actual > limit) {
+      overBudgets.push({
+        category: b.category,
+        limit,
+        actual,
+        overAmt: actual - limit,
+        pct,
+      });
+    } else if (pct >= 80) {
+      nearBudgets.push({
+        category: b.category,
+        limit,
+        actual,
+        remaining: Math.max(0, limit - actual),
+        pct,
+      });
+    }
+  }
+  overBudgets.sort((a, b) => b.overAmt - a.overAmt);
+  nearBudgets.sort((a, b) => b.pct - a.pct);
+
+  // Upcoming debts & credit card bills within 7 days
+  const [ty, tm, td] = safeTodayStr.split('-').map((n) => parseInt(n, 10));
+  const todayLocal = new Date(ty, (tm || 1) - 1, td || 1);
+  const dueSoonDebts: Array<{ name: string; amount: number; daysLeft: number }> = [];
+
+  for (const d of debts) {
+    if (!d || d.balance <= 0) continue;
+    let daysLeft: number | null = null;
+    if (d.dueDate) {
+      const dueStr = normalizeLedgerDateYYYYMMDD(d.dueDate);
+      if (dueStr) {
+        const [dy, dmo, dda] = dueStr.split('-').map((n) => parseInt(n, 10));
+        const dueDt = new Date(dy, (dmo || 1) - 1, dda || 1);
+        daysLeft = Math.ceil((dueDt.getTime() - todayLocal.getTime()) / (1000 * 60 * 60 * 24));
+      }
+    } else if (d.dueDay && d.dueDay >= 1 && d.dueDay <= 31) {
+      let targetDt = new Date(todayLocal.getFullYear(), todayLocal.getMonth(), d.dueDay);
+      if (d.dueDay < todayLocal.getDate()) {
+        targetDt = new Date(todayLocal.getFullYear(), todayLocal.getMonth() + 1, d.dueDay);
+      }
+      daysLeft = Math.ceil((targetDt.getTime() - todayLocal.getTime()) / (1000 * 60 * 60 * 24));
+    }
+    if (daysLeft !== null && daysLeft <= 7) {
+      dueSoonDebts.push({
+        name: d.name,
+        amount: d.minPayment > 0 ? Math.min(d.minPayment, d.balance) : d.balance,
+        daysLeft,
+      });
+    }
+  }
+
+  for (const acc of getCreditAccounts(accounts)) {
+    const bill = getAccountCreditBill(acc);
+    if (bill <= 0 || !acc.dueDay) continue;
+    let targetDt = new Date(todayLocal.getFullYear(), todayLocal.getMonth(), acc.dueDay);
+    if (acc.dueDay < todayLocal.getDate()) {
+      targetDt = new Date(todayLocal.getFullYear(), todayLocal.getMonth() + 1, acc.dueDay);
+    }
+    const daysLeft = Math.ceil((targetDt.getTime() - todayLocal.getTime()) / (1000 * 60 * 60 * 24));
+    if (daysLeft <= 7) {
+      dueSoonDebts.push({
+        name: acc.name,
+        amount: acc.minPayment && acc.minPayment > 0 ? Math.min(acc.minPayment, bill) : bill,
+        daysLeft,
+      });
+    }
+  }
+  dueSoonDebts.sort((a, b) => a.daysLeft - b.daysLeft);
+
+  const liquidCash = calculateTotalLiquidCash(accounts);
+  const emergencyBalance = calculateTotalEmergencyFund(emergencyTransactions);
+  const totalInvestments = calculateTotalInvestments(investments);
+  const monthlyDebtService = calculateMonthlyDebtService(accounts, debts);
+  const dtiRatioPct = monthOperatingIncome > 0 ? (monthlyDebtService / monthOperatingIncome) * 100 : 0;
+
+  const anomalyCount =
+    overBudgets.length +
+    (weekDeltaPct >= 25 && weekDeltaAmount >= 250000 ? 1 : 0) +
+    (largestWeekTx && largestWeekTx.amount >= 1000000 ? 1 : 0);
+
+  type CandidatePriority = Omit<WeeklyFinancialPriorityItem, 'rank'>;
+  const candidates: CandidatePriority[] = [];
+
+  // 1. Over-budget / near-budget priority
+  if (overBudgets.length > 0) {
+    const topOver = overBudgets[0];
+    candidates.push({
+      id: 'prio-budget-over',
+      severity: 'high',
+      urgencyLabel: 'Mendesak',
+      categoryLabel: 'Kendali Anggaran',
+      title: `Rem Pengeluaran ${topOver.category}`,
+      metricSummary: `Over ${formatCurrency(topOver.overAmt)} (${Math.round(topOver.pct)}%)`,
+      description: `Realisasi kategori ${topOver.category} bulan ini mencapai ${formatCurrency(topOver.actual)} dari batas ${formatCurrency(topOver.limit)}. Hentikan belanja non-esensial di pos ini hingga akhir bulan.`,
+      actionLabel: 'Tinjau Anggaran',
+      targetTab: 'budget',
+      urgencyScore: 96,
+    });
+  } else if (nearBudgets.length > 0) {
+    const topNear = nearBudgets[0];
+    candidates.push({
+      id: 'prio-budget-near',
+      severity: 'medium',
+      urgencyLabel: 'Perlu Perhatian',
+      categoryLabel: 'Kendali Anggaran',
+      title: `Jaga Sisa Limit ${topNear.category}`,
+      metricSummary: `Sisa ${formatCurrency(topNear.remaining)} (${Math.round(topNear.pct)}% terpakai)`,
+      description: `Anggaran ${topNear.category} sudah terpakai ${Math.round(topNear.pct)}%. Batasi pengeluaran minggu ini agar tidak melampaui plafon ${formatCurrency(topNear.limit)}.`,
+      actionLabel: 'Pantau Anggaran',
+      targetTab: 'budget',
+      urgencyScore: 76,
+    });
+  }
+
+  // 2. Debt due soon or high DTI priority
+  if (dueSoonDebts.length > 0) {
+    const topDue = dueSoonDebts[0];
+    const isCritical = topDue.daysLeft <= 3;
+    const duePhrase =
+      topDue.daysLeft < 0
+        ? `terlewat ${Math.abs(topDue.daysLeft)} hari`
+        : topDue.daysLeft === 0
+        ? 'jatuh tempo hari ini'
+        : `dalam ${topDue.daysLeft} hari`;
+    candidates.push({
+      id: 'prio-debt-due',
+      severity: isCritical ? 'high' : 'medium',
+      urgencyLabel: isCritical ? 'Mendesak' : 'Perlu Perhatian',
+      categoryLabel: 'Kewajiban & Jatuh Tempo',
+      title: `Siapkan Tagihan ${topDue.name}`,
+      metricSummary: `${formatCurrency(topDue.amount)} · ${topDue.daysLeft <= 0 ? 'Segera Bayar' : `${topDue.daysLeft} hari lagi`}`,
+      description: `Pembayaran ${topDue.name} ${duePhrase}. Pastikan saldo kas likuid (${formatCurrency(liquidCash)}) mencukupi untuk menghindari denda keterlambatan.`,
+      actionLabel: 'Kelola Utang',
+      targetTab: 'debts',
+      urgencyScore: isCritical ? 94 : 79,
+    });
+  } else if (dtiRatioPct > 35) {
+    candidates.push({
+      id: 'prio-dti-high',
+      severity: 'medium',
+      urgencyLabel: 'Perlu Perhatian',
+      categoryLabel: 'Rasio Beban Utang',
+      title: 'Tekan Rasio Cicilan Utang (DTI)',
+      metricSummary: `${dtiRatioPct.toFixed(1)}% dari pemasukan`,
+      description: `Kewajiban cicilan bulanan (${formatCurrency(monthlyDebtService)}) melampaui batas ideal 35%. Prioritaskan pelunasan utang berbunga tertinggi terlebih dahulu.`,
+      actionLabel: 'Simulasi Pelunasan',
+      targetTab: 'debts',
+      urgencyScore: 78,
+    });
+  }
+
+  // 3. Weekly spending trend spike priority
+  if (thisWeekExpense > prevWeekExpense && weekDeltaAmount >= 100000 && (weekDeltaPct >= 12 || prevWeekExpense === 0)) {
+    const spikeNote = topSpikeCategory
+      ? ` Lonjakan terbesar berasal dari pos ${topSpikeCategory.category} (${formatCurrency(topSpikeCategory.thisAmt)}).`
+      : '';
+    const isHighSpike = weekDeltaPct >= 30 || weekDeltaAmount >= 750000;
+    candidates.push({
+      id: 'prio-weekly-spike',
+      severity: isHighSpike ? 'high' : 'medium',
+      urgencyLabel: isHighSpike ? 'Mendesak' : 'Perlu Perhatian',
+      categoryLabel: 'Tren Transaksi 7 Hari',
+      title: topSpikeCategory
+        ? `Kendalikan Lonjakan ${topSpikeCategory.category}`
+        : 'Rem Laju Pengeluaran Minggu Ini',
+      metricSummary: `+${formatCurrency(weekDeltaAmount)} (${prevWeekExpense > 0 ? `+${weekDeltaPct.toFixed(0)}%` : 'Minggu Aktif'})`,
+      description: `Pengeluaran 7 hari terakhir mencapai ${formatCurrency(thisWeekExpense)}, naik dibanding minggu sebelumnya (${formatCurrency(prevWeekExpense)}).${spikeNote}`,
+      actionLabel: 'Cek Mutasi',
+      targetTab: 'transactions',
+      urgencyScore: isHighSpike ? 89 : 74,
+    });
+  }
+
+  // 4. Current month cashflow deficit priority
+  if (monthOperatingExpense > monthOperatingIncome && monthOperatingExpense > 0) {
+    const deficit = monthOperatingExpense - monthOperatingIncome;
+    candidates.push({
+      id: 'prio-cashflow-deficit',
+      severity: 'high',
+      urgencyLabel: 'Mendesak',
+      categoryLabel: 'Arus Kas Operasional',
+      title: 'Tutup Defisit Arus Kas Bulan Ini',
+      metricSummary: `Defisit ${formatCurrency(deficit)}`,
+      description: `Pengeluaran operasional bulan berjalan (${formatCurrency(monthOperatingExpense)}) melampaui pemasukan (${formatCurrency(monthOperatingIncome)}). Tunda pembelian sekunder hingga arus kas kembali surplus.`,
+      actionLabel: 'Buka Laporan',
+      targetTab: 'reports',
+      urgencyScore: 91,
+    });
+  }
+
+  // 5. Emergency fund coverage priority
+  const baselineMonthlyExpense = Math.max(monthOperatingExpense, thisWeekExpense * 4, 2500000);
+  const targetEmergency = Math.max(5000000, baselineMonthlyExpense * 3);
+  if (emergencyBalance < targetEmergency) {
+    const coverageMonths = baselineMonthlyExpense > 0 ? emergencyBalance / baselineMonthlyExpense : 0;
+    const gap = targetEmergency - emergencyBalance;
+    const isVeryLow = coverageMonths < 1.5;
+    candidates.push({
+      id: 'prio-emergency-gap',
+      severity: isVeryLow ? 'high' : 'medium',
+      urgencyLabel: isVeryLow ? 'Mendesak' : 'Perlu Perhatian',
+      categoryLabel: 'Ketahanan Dana Darurat',
+      title: 'Perkuat Cadangan Dana Darurat',
+      metricSummary: `${coverageMonths.toFixed(1)} bln (Target 3 bln)`,
+      description: `Saldo dana darurat saat ini ${formatCurrency(emergencyBalance)}, masih butuh ${formatCurrency(gap)} untuk menutup minimal 3 bulan pengeluaran aman.`,
+      actionLabel: 'Isi Dana Darurat',
+      targetTab: 'emergency-fund',
+      urgencyScore: isVeryLow ? 84 : 69,
+    });
+  }
+
+  // 6. Idle cash optimization priority
+  if (liquidCash > 10000000 && totalInvestments < liquidCash * 0.25) {
+    const suggestedAlloc = Math.round(liquidCash * 0.2);
+    candidates.push({
+      id: 'prio-idle-cash',
+      severity: 'medium',
+      urgencyLabel: 'Perlu Perhatian',
+      categoryLabel: 'Optimalisasi Aset',
+      title: 'Alokasikan Kas Menganggur',
+      metricSummary: `Kas ${formatCurrency(liquidCash)} · Inv. ${formatCurrency(totalInvestments)}`,
+      description: `Porsi dana likuid cukup besar dibanding portofolio investasi. Pertimbangkan mengalihkan sekitar ${formatCurrency(suggestedAlloc)} ke instrumen produktif agar tidak tergerus inflasi.`,
+      actionLabel: 'Kelola Portofolio',
+      targetTab: 'investments',
+      urgencyScore: 60,
+    });
+  }
+
+  // 7. Positive / maintenance fallbacks so there are always 3 well-grounded priorities
+  if (thisWeekExpense <= prevWeekExpense) {
+    const savedVsPrev = Math.max(0, prevWeekExpense - thisWeekExpense);
+    candidates.push({
+      id: 'prio-weekly-disciplined',
+      severity: 'positive',
+      urgencyLabel: 'Terkendali',
+      categoryLabel: 'Tren Transaksi 7 Hari',
+      title:
+        thisWeekTxCount === 0
+          ? 'Catat Transaksi Rutin Minggu Ini'
+          : 'Pertahankan Efisiensi Mingguan',
+      metricSummary:
+        thisWeekTxCount === 0
+          ? '0 transaksi 7 hari terakhir'
+          : savedVsPrev > 0
+          ? `Hemat ${formatCurrency(savedVsPrev)} vs minggu lalu`
+          : `${formatCurrency(thisWeekExpense)} (Stabil)`,
+      description:
+        thisWeekTxCount === 0
+          ? 'Belum ada transaksi tercatat dalam 7 hari terakhir. Pastikan seluruh mutasi harian dicatat agar proyeksi arus kas tetap akurat.'
+          : `Total pengeluaran 7 hari terakhir (${formatCurrency(thisWeekExpense)}) lebih terkendali dibanding minggu sebelumnya (${formatCurrency(prevWeekExpense)}).`,
+      actionLabel: 'Lihat Transaksi',
+      targetTab: 'transactions',
+      urgencyScore: 48,
+    });
+  }
+
+  const monthSurplus = monthOperatingIncome - monthOperatingExpense;
+  if (monthSurplus > 0) {
+    const allocTarget = Math.round(monthSurplus * 0.3);
+    candidates.push({
+      id: 'prio-surplus-invest',
+      severity: 'positive',
+      urgencyLabel: 'Terkendali',
+      categoryLabel: 'Alokasi Surplus',
+      title: 'Kunci Surplus Bulan Ini ke Investasi',
+      metricSummary: `Surplus ${formatCurrency(monthSurplus)}`,
+      description: `Arus kas operasional bulan ini mencatat surplus bersih ${formatCurrency(monthSurplus)}. Sisihkan sekitar ${formatCurrency(allocTarget)} sebelum terpakai konsumsi.`,
+      actionLabel: 'Tambah Investasi',
+      targetTab: 'investments',
+      urgencyScore: 44,
+    });
+  }
+
+  candidates.push({
+    id: 'prio-review-reports',
+    severity: 'positive',
+    urgencyLabel: 'Terkendali',
+    categoryLabel: 'Evaluasi Berkala',
+    title: 'Tinjau Neraca & Laba-Rugi Bulanan',
+    metricSummary: `${thisWeekTxCount} transaksi minggu ini`,
+    description: topCategoryThisWeek
+      ? `Pos pengeluaran terbesar minggu ini adalah ${topCategoryThisWeek} (${formatCurrency(topCategoryAmount)}). Pastikan pencatatan pos dan saldo akun sudah rekonsiliasi rapi.`
+      : 'Lakukan peninjauan rutin pada laporan neraca dan laba-rugi untuk memastikan seluruh saldo rekening serta aset tetap sinkron.',
+    actionLabel: 'Buka Laporan',
+    targetTab: 'reports',
+    urgencyScore: 35,
+  });
+
+  // Deduplicate by id & sort descending by urgencyScore, pick top 3
+  const uniqueMap = new Map<string, CandidatePriority>();
+  for (const c of candidates) {
+    if (!uniqueMap.has(c.id)) uniqueMap.set(c.id, c);
+  }
+
+  const sortedTop3 = Array.from(uniqueMap.values())
+    .sort((a, b) => b.urgencyScore - a.urgencyScore)
+    .slice(0, 3)
+    .map((item, idx) => ({
+      ...item,
+      rank: (idx + 1) as 1 | 2 | 3,
+    }));
+
+  return {
+    priorities: sortedTop3,
+    thisWeekExpense,
+    prevWeekExpense,
+    weekDeltaAmount,
+    weekDeltaPct,
+    thisWeekIncome,
+    thisWeekTxCount,
+    prevWeekTxCount,
+    topCategoryThisWeek,
+    topCategoryAmount,
+    anomalyCount,
+    weekRangeLabel,
+  };
+}
+

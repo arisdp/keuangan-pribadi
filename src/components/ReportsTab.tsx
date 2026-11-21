@@ -13,12 +13,14 @@ import { AiLedgerReconciliation } from './AiLedgerReconciliation';
 import { MonthlyExpenseD3TrendChart } from './MonthlyExpenseD3TrendChart';
 import { IntegrityReport } from './IntegrityReport';
 import { AdjustingEntriesPanel, AdjustingEntryDraft } from './AdjustingEntriesPanel';
-import { 
-  exportIncomeStatementToCSV, 
-  exportBalanceSheetToCSV, 
-  exportCashFlowToCSV, 
-  exportBudgetRealizationToCSV, 
-  exportReportSectionToPDF 
+import {
+  exportIncomeStatementToCSV,
+  exportBalanceSheetToCSV,
+  exportCashFlowToCSV,
+  exportBudgetRealizationToCSV,
+  exportReportSectionToPDF,
+  buildMonthlyBalanceAndIncomeSummary,
+  exportMonthlyBalanceAndIncomePDF,
 } from '../utils/exportFinancialReports';
 import html2canvas from 'html2canvas';
 import jsPDF from 'jspdf';
@@ -65,7 +67,8 @@ import {
   GitCommit,
   Activity,
   FileCheck,
-  LineChart as LineChartIcon
+  LineChart as LineChartIcon,
+  X,
 } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, Cell, PieChart, Pie, LineChart, Line } from 'recharts';
 
@@ -120,6 +123,79 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
   // PDF Export
   const reportRef = useRef<HTMLDivElement>(null);
   const [isExporting, setIsExporting] = useState(false);
+  const [showExportModal, setShowExportModal] = useState(false);
+  const [exportMonth, setExportMonth] = useState<number>(() => new Date().getMonth() + 1);
+  const [exportYear, setExportYear] = useState<number>(() => new Date().getFullYear());
+
+  const availableExportYears = useMemo(() => {
+    const currentYear = new Date().getFullYear();
+    const yearSet = new Set<number>([currentYear, currentYear - 1]);
+    transactions.forEach((tx) => {
+      if (tx?.date && tx.date.length >= 4) {
+        const y = parseInt(tx.date.slice(0, 4), 10);
+        if (!Number.isNaN(y) && y >= 2000 && y <= currentYear + 5) {
+          yearSet.add(y);
+        }
+      }
+    });
+    return Array.from(yearSet).sort((a, b) => b - a);
+  }, [transactions]);
+
+  const exportPreviewSummary = useMemo(() => {
+    return buildMonthlyBalanceAndIncomeSummary({
+      month: exportMonth,
+      year: exportYear,
+      transactions,
+      accounts,
+      debts,
+      investments,
+      emergencyTransactions,
+      fixedAssets,
+      kprCoaMapping,
+    });
+  }, [
+    exportMonth,
+    exportYear,
+    transactions,
+    accounts,
+    debts,
+    investments,
+    emergencyTransactions,
+    fixedAssets,
+    kprCoaMapping,
+  ]);
+
+  const handleExportStructuredPDF = () => {
+    setIsExporting(true);
+    try {
+      const filename = exportMonthlyBalanceAndIncomePDF({
+        month: exportMonth,
+        year: exportYear,
+        transactions,
+        accounts,
+        debts,
+        investments,
+        emergencyTransactions,
+        fixedAssets,
+        kprCoaMapping,
+      });
+      showToast({
+        type: 'success',
+        title: 'Laporan PDF Diunduh',
+        message: `Ringkasan Neraca & Laba-Rugi ${exportPreviewSummary.periodLabel} (${filename}) berhasil dibuat.`,
+      });
+      setShowExportModal(false);
+    } catch (error) {
+      console.error('Failed to export structured PDF:', error);
+      showToast({
+        type: 'error',
+        title: 'Gagal Ekspor PDF',
+        message: 'Terjadi kendala saat menyusun dokumen PDF Neraca & Laba-Rugi.',
+      });
+    } finally {
+      setIsExporting(false);
+    }
+  };
 
   const exportToPDF = async () => {
     if (!reportRef.current) return;
@@ -130,9 +206,10 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
       const pdf = new jsPDF('p', 'mm', 'a4');
       const pdfWidth = pdf.internal.pageSize.getWidth();
       const pdfHeight = (canvas.height * pdfWidth) / canvas.width;
-      
+
       pdf.addImage(imgData, 'PNG', 0, 0, pdfWidth, pdfHeight);
       pdf.save(`Laporan_Keuangan_NusantaraWealth_${new Date().toISOString().split('T')[0]}.pdf`);
+      setShowExportModal(false);
     } catch (error) {
       console.error('Failed to export PDF:', error);
       showToast({
@@ -485,32 +562,242 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
         </div>
 
         {/* Global Print & Export Actions */}
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
           <button
+            type="button"
             onClick={handleExportCSV}
-            className="flex items-center gap-1.5 px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl transition cursor-pointer shadow-md"
+            className="flex items-center gap-1.5 px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl transition cursor-pointer whitespace-nowrap shrink-0"
             title="Ekspor Data Laporan Aktif ke Format CSV Spreadsheet"
           >
             <FileSpreadsheet className="h-4 w-4" />
             <span>Ekspor CSV</span>
           </button>
           <button
-            onClick={exportToPDF}
+            type="button"
+            onClick={() => setShowExportModal(true)}
             disabled={isExporting}
-            className="flex items-center gap-1.5 px-3.5 py-2 bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold rounded-xl transition cursor-pointer shadow-md disabled:opacity-50 disabled:cursor-not-allowed"
+            className="flex items-center gap-1.5 px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap shrink-0"
           >
             {isExporting ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-            {isExporting ? 'Mengekspor...' : 'Export to PDF'}
+            <span>{isExporting ? 'Mengekspor...' : 'Ekspor Laporan'}</span>
           </button>
           <button
+            type="button"
             onClick={() => window.print()}
-            className="flex items-center gap-1.5 px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition cursor-pointer border border-slate-200 shadow-2xs"
+            className="flex items-center gap-1.5 px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition cursor-pointer border border-slate-200 whitespace-nowrap shrink-0"
           >
             <Printer className="h-4 w-4 text-slate-600" />
-            Cetak Laporan
+            <span>Cetak</span>
           </button>
         </div>
       </div>
+
+      {/* MODAL EKSPOR LAPORAN PDF TERSTRUKTUR (NERACA & LABA-RUGI BULANAN) */}
+      {showExportModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 backdrop-blur-xs p-4"
+          onClick={() => !isExporting && setShowExportModal(false)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="export-report-modal-title"
+            className="bg-white rounded-2xl border border-slate-200 w-full max-w-lg overflow-hidden shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="p-2 rounded-xl bg-slate-900 text-white shrink-0">
+                  <FileText className="h-4 w-4" />
+                </div>
+                <div className="min-w-0">
+                  <h3
+                    id="export-report-modal-title"
+                    className="text-sm font-extrabold text-slate-900 truncate"
+                  >
+                    Ekspor Laporan Keuangan (PDF)
+                  </h3>
+                  <p className="text-[11px] text-slate-500">
+                    Ringkasan Neraca &amp; Laporan Laba-Rugi Bulanan format A4 rapi
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                aria-label="Tutup modal ekspor"
+                disabled={isExporting}
+                onClick={() => setShowExportModal(false)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition cursor-pointer disabled:opacity-50"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="p-5 space-y-5">
+              {/* Pemilih Bulan & Tahun Laporan Laba-Rugi */}
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <label
+                    htmlFor="export-report-month"
+                    className="block text-xs font-bold text-slate-700"
+                  >
+                    Bulan Laba-Rugi
+                  </label>
+                  <select
+                    id="export-report-month"
+                    value={exportMonth}
+                    onChange={(e) => setExportMonth(Number(e.target.value))}
+                    className="w-full px-3 py-2 rounded-xl border border-slate-200 bg-white text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-900"
+                  >
+                    {[
+                      'Januari',
+                      'Februari',
+                      'Maret',
+                      'April',
+                      'Mei',
+                      'Juni',
+                      'Juli',
+                      'Agustus',
+                      'September',
+                      'Oktober',
+                      'November',
+                      'Desember',
+                    ].map((monthName, idx) => (
+                      <option key={monthName} value={idx + 1}>
+                        {monthName}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label
+                    htmlFor="export-report-year"
+                    className="block text-xs font-bold text-slate-700"
+                  >
+                    Tahun
+                  </label>
+                  <select
+                    id="export-report-year"
+                    value={exportYear}
+                    onChange={(e) => setExportYear(Number(e.target.value))}
+                    className="w-full px-3 py-2 rounded-xl border border-slate-200 bg-white text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-900"
+                  >
+                    {availableExportYears.map((yr) => (
+                      <option key={yr} value={yr}>
+                        {yr}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {/* Pratinjau Ringkas Dokumen */}
+              <div className="rounded-xl border border-slate-200 bg-slate-50/60 divide-y divide-slate-200 text-xs">
+                <div className="px-4 py-3 space-y-2">
+                  <div className="flex items-center justify-between text-[11px] font-bold text-slate-600">
+                    <span>Bagian I · Ringkasan Neraca Posisi Terkini</span>
+                    <span
+                      className={
+                        exportPreviewSummary.balanceSheet.isBalanced
+                          ? 'text-emerald-700'
+                          : 'text-rose-700'
+                      }
+                    >
+                      {exportPreviewSummary.balanceSheet.isBalanced ? 'Seimbang' : 'Cek Balance'}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2 pt-1">
+                    <div>
+                      <span className="text-[10px] text-slate-500 block">Total Aset</span>
+                      <span className="font-mono tabular-nums font-bold text-slate-900">
+                        {formatterIDR.format(exportPreviewSummary.balanceSheet.totalAssets)}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-[10px] text-slate-500 block">Total Kewajiban</span>
+                      <span className="font-mono tabular-nums font-bold text-rose-700">
+                        {formatterIDR.format(exportPreviewSummary.balanceSheet.totalLiabilities)}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-[10px] text-slate-500 block">Ekuitas Bersih</span>
+                      <span className="font-mono tabular-nums font-bold text-emerald-700">
+                        {formatterIDR.format(exportPreviewSummary.balanceSheet.equity)}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="px-4 py-3 space-y-2">
+                  <div className="flex items-center justify-between text-[11px] font-bold text-slate-600">
+                    <span>Bagian II · Laba-Rugi {exportPreviewSummary.periodLabel}</span>
+                    <span className="font-mono tabular-nums text-slate-500 font-medium">
+                      {exportPreviewSummary.monthTxCount} transaksi
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2 pt-1">
+                    <div>
+                      <span className="text-[10px] text-slate-500 block">Pendapatan</span>
+                      <span className="font-mono tabular-nums font-bold text-emerald-700">
+                        {formatterIDR.format(exportPreviewSummary.totalIncome)}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-[10px] text-slate-500 block">Beban</span>
+                      <span className="font-mono tabular-nums font-bold text-rose-700">
+                        -{formatterIDR.format(exportPreviewSummary.totalExpense)}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-[10px] text-slate-500 block">Surplus Bersih</span>
+                      <span
+                        className={`font-mono tabular-nums font-bold ${
+                          exportPreviewSummary.netSurplus >= 0
+                            ? 'text-emerald-700'
+                            : 'text-rose-700'
+                        }`}
+                      >
+                        {exportPreviewSummary.netSurplus >= 0 ? '+' : ''}
+                        {formatterIDR.format(exportPreviewSummary.netSurplus)}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Modal Footer */}
+            <div className="px-5 py-4 border-t border-slate-200 bg-slate-50/70 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+              <button
+                type="button"
+                disabled={isExporting}
+                onClick={exportToPDF}
+                className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-100 text-slate-700 text-xs font-bold transition cursor-pointer disabled:opacity-50 whitespace-nowrap"
+              >
+                <FileCheck className="h-3.5 w-3.5" />
+                <span>Tangkap Tab Aktif ke PDF</span>
+              </button>
+
+              <button
+                type="button"
+                disabled={isExporting}
+                onClick={handleExportStructuredPDF}
+                className="inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold transition cursor-pointer disabled:opacity-50 whitespace-nowrap shrink-0"
+              >
+                {isExporting ? (
+                  <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Download className="h-3.5 w-3.5" />
+                )}
+                <span>{isExporting ? 'Menyusun PDF...' : 'Unduh PDF Laporan'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* REPORT SUB-TAB NAVIGATOR (CATEGORIZED GRID UI) */}
       <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm space-y-3">
