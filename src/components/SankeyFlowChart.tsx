@@ -9,6 +9,7 @@ import {
   getPeriodRangeLabel,
   QUARTER_LABELS,
   QuarterNum,
+  SankeyDrilldownSelection,
   SankeyLedgerEntry,
   SankeyPeriodMode,
 } from '../utils/cashFlowSankey';
@@ -40,6 +41,9 @@ interface SankeyFlowChartProps {
   onSelectedYearChange?: (yr: string) => void;
   hidePeriodControls?: boolean;
   hideInlineSummaryStrip?: boolean;
+  renderExternalDrilldown?: boolean;
+  onDrilldownSelect?: (selection: SankeyDrilldownSelection | null) => void;
+  clearSelectionToken?: number;
 }
 
 interface CustomSankeyNodeExtra {
@@ -78,6 +82,9 @@ export const SankeyFlowChart: React.FC<SankeyFlowChartProps> = ({
   onSelectedYearChange,
   hidePeriodControls = false,
   hideInlineSummaryStrip = false,
+  renderExternalDrilldown = false,
+  onDrilldownSelect,
+  clearSelectionToken,
 }) => {
   const {
     availableMonthKeys,
@@ -137,12 +144,12 @@ export const SankeyFlowChart: React.FC<SankeyFlowChartProps> = ({
     }
   }, [controlledYear, availableYears, internalYear]);
 
-  // Reset active drill-down cleanly when period filter changes externally or internally
+  // Reset active drill-down cleanly when period filter changes or parent triggers close
   useEffect(() => {
     setPinnedSelection(null);
     setSelectedSubCategory(null);
     setDrilldownSearch('');
-  }, [periodMode, selectedMonth, selectedQuarter, selectedYear]);
+  }, [periodMode, selectedMonth, selectedQuarter, selectedYear, clearSelectionToken]);
 
   const periodRangeLabel = useMemo(
     () => getPeriodRangeLabel(periodMode, selectedMonth, selectedQuarter, selectedYear),
@@ -374,25 +381,33 @@ export const SankeyFlowChart: React.FC<SankeyFlowChartProps> = ({
   }, [sankeyData]);
 
   // Resolve pinned drill-down details + sub-category share breakdown
-  const pinnedDetails = useMemo(() => {
+  const pinnedDetails = useMemo<SankeyDrilldownSelection | null>(() => {
     if (!pinnedSelection || !sankeyGraph) return null;
 
+    let key = '';
+    let kind: 'node' | 'link' = 'node';
     let title = '';
     let subtitle = '';
     let volume = 0;
     let entries: SankeyLedgerEntry[] = [];
     let isResidualNode = false;
+    let isDeficitNode = false;
     let groupByAccount = false;
 
     if (pinnedSelection.kind === 'node') {
       const node = sankeyGraph.nodes.find((n) => n.id === pinnedSelection.nodeId);
       if (!node) return null;
+      key = `node:${node.id}:${periodRangeLabel}`;
+      kind = 'node';
       entries = sankeyData.nodeTransactionsMap.get(node.id) || [];
       title = node.name;
       isResidualNode = node.id === 'pool-surplus';
+      isDeficitNode = node.id === 'inc-deficit';
       groupByAccount = node.id.startsWith('inc-') || node.id.startsWith('exp-');
       subtitle = isResidualNode
         ? 'Sisa kas operasional bersih setelah pengeluaran, cicilan utang, tabungan, dan investasi'
+        : isDeficitNode
+        ? 'Penyeimbang selisih pengeluaran di atas total pemasukan periode ini'
         : groupByAccount
         ? 'Rincian kontribusi per rekening dan transaksi kategori ini'
         : 'Rincian proporsi sub-kategori dan transaksi pada jalur ini';
@@ -407,11 +422,14 @@ export const SankeyFlowChart: React.FC<SankeyFlowChartProps> = ({
       const src = link.source as CustomSankeyNode;
       const tgt = link.target as CustomSankeyNode;
       const linkKey = `${src.id}-->${tgt.id}`;
+      key = `link:${linkKey}:${periodRangeLabel}`;
+      kind = 'link';
       entries = sankeyData.linkTransactionsMap.get(linkKey) || [];
       title = `${src.name} ➔ ${tgt.name}`;
       subtitle = 'Aliran dana terhubung antara sumber dan tujuan';
       volume = link.value || 0;
       isResidualNode = tgt.id === 'pool-surplus';
+      isDeficitNode = src.id === 'inc-deficit';
       groupByAccount = src.id.startsWith('inc-') || tgt.id.startsWith('exp-');
     }
 
@@ -439,15 +457,32 @@ export const SankeyFlowChart: React.FC<SankeyFlowChartProps> = ({
       }));
 
     return {
+      key,
+      kind,
       title,
       subtitle,
       volume,
+      periodRangeLabel,
+      totalIncome: sankeyData.totalIncome,
+      totalExpense: sankeyData.totalExpense,
+      totalDebtPayment: sankeyData.totalDebtPayment,
+      totalSaving: sankeyData.totalSaving,
+      totalInvestment: sankeyData.totalInvestment,
+      netSurplus: sankeyData.netSurplus,
+      netDeficit: sankeyData.netDeficit,
       entries,
       isResidualNode,
+      isDeficitNode,
       groupByAccount,
       subCategoryBreakdown,
     };
-  }, [pinnedSelection, sankeyGraph, sankeyData, accountLookup]);
+  }, [pinnedSelection, sankeyGraph, sankeyData, accountLookup, periodRangeLabel]);
+
+  useEffect(() => {
+    if (onDrilldownSelect) {
+      onDrilldownSelect(pinnedDetails);
+    }
+  }, [pinnedDetails, onDrilldownSelect]);
 
   const filteredDrilldownEntries = useMemo(() => {
     if (!pinnedDetails) return [];
@@ -969,8 +1004,33 @@ export const SankeyFlowChart: React.FC<SankeyFlowChartProps> = ({
             </div>
           )}
 
-          {/* Pinned Interactive Drill-Down Panel */}
-          {pinnedDetails && (
+          {/* Active Selection Hint Strip when external drill-down table is rendered below */}
+          {renderExternalDrilldown && pinnedDetails && (
+            <div className="px-4 py-2.5 bg-blue-50 border border-blue-200 rounded-xl text-xs flex flex-wrap items-center justify-between gap-2 text-blue-900">
+              <span>
+                Menampilkan rincian transaksi untuk <strong>{pinnedDetails.title}</strong> (
+                <span className="font-mono tabular-nums font-bold">
+                  {formatterIDR.format(pinnedDetails.volume)}
+                </span>
+                ) pada tabel di bawah.
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  setPinnedSelection(null);
+                  setSelectedSubCategory(null);
+                  setDrilldownSearch('');
+                }}
+                className="px-2.5 py-1 bg-white border border-blue-200 hover:bg-blue-100 text-blue-800 font-semibold rounded-lg transition inline-flex items-center gap-1 cursor-pointer whitespace-nowrap"
+              >
+                <RotateCcw className="h-3 w-3" />
+                Tampilkan Semua Aliran
+              </button>
+            </div>
+          )}
+
+          {/* Pinned Interactive Drill-Down Panel (inline fallback when used standalone) */}
+          {!renderExternalDrilldown && pinnedDetails && (
             <div className="bg-slate-50 border border-slate-200 rounded-xl p-5 space-y-5">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-200 pb-3">
                 <div>

@@ -8,12 +8,14 @@ import { CategoryTreeDiagram } from './CategoryTreeDiagram';
 import { TaxCalculatorCard } from './TaxCalculatorCard';
 import { SankeyFlowChart } from './SankeyFlowChart';
 import { SankeyCashFlowSummary } from './SankeyCashFlowSummary';
+import { SankeyDrilldownTable } from './SankeyDrilldownTable';
 import {
   aggregatePeriodCashFlow,
   filterTransactionsBySankeyPeriod,
   getAvailablePeriodOptions,
   getPeriodRangeLabel,
   QuarterNum,
+  SankeyDrilldownSelection,
   SankeyPeriodMode,
 } from '../utils/cashFlowSankey';
 import { FinancialHealthRatios } from './FinancialHealthRatios';
@@ -166,6 +168,9 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
   const [sankeySelectedQuarter, setSankeySelectedQuarter] = useState<QuarterNum>(
     sankeyPeriodOptions.currentLocalQuarter
   );
+  const [sankeyDrilldownSelection, setSankeyDrilldownSelection] =
+    useState<SankeyDrilldownSelection | null>(null);
+  const [sankeyClearToken, setSankeyClearToken] = useState<number>(0);
 
   useEffect(() => {
     if (
@@ -1192,7 +1197,20 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
             onSelectedYearChange={setSankeySelectedYear}
             hidePeriodControls
             hideInlineSummaryStrip
+            renderExternalDrilldown
+            onDrilldownSelect={setSankeyDrilldownSelection}
+            clearSelectionToken={sankeyClearToken}
           />
+          {sankeyDrilldownSelection && (
+            <SankeyDrilldownTable
+              selection={sankeyDrilldownSelection}
+              accounts={accounts}
+              onClearSelection={() => {
+                setSankeyClearToken((prev) => prev + 1);
+                setSankeyDrilldownSelection(null);
+              }}
+            />
+          )}
         </div>
       )}
 

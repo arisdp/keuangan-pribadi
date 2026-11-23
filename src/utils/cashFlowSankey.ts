@@ -15,6 +15,34 @@ export interface SankeyLedgerEntry {
   attributionLabel?: string;
 }
 
+export interface SankeySubCategoryShare {
+  label: string;
+  amount: number;
+  count: number;
+  sharePct: number;
+}
+
+export interface SankeyDrilldownSelection {
+  key: string;
+  kind: 'node' | 'link';
+  title: string;
+  subtitle: string;
+  volume: number;
+  periodRangeLabel: string;
+  totalIncome: number;
+  totalExpense: number;
+  totalDebtPayment: number;
+  totalSaving: number;
+  totalInvestment: number;
+  netSurplus: number;
+  netDeficit: number;
+  isResidualNode: boolean;
+  isDeficitNode: boolean;
+  groupByAccount: boolean;
+  subCategoryBreakdown: SankeySubCategoryShare[];
+  entries: SankeyLedgerEntry[];
+}
+
 export interface PeriodCashFlowAggregation {
   incomeCategoryMap: Record<string, { total: number; entries: SankeyLedgerEntry[] }>;
   expenseCategoryMap: Record<string, { total: number; entries: SankeyLedgerEntry[] }>;
