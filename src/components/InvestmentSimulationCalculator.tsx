@@ -107,9 +107,17 @@ export const InvestmentSimulationCalculator: React.FC<InvestmentSimulationCalcul
   const finalNetProfit = finalValuation - finalTotalCapital;
   const finalRoiPct = finalTotalCapital > 0 ? (finalNetProfit / finalTotalCapital) * 100 : 0;
 
-  // Benchmark Comparisons
-  const bankDepositValuation = (currentBalance + totalDcaInvested) * Math.pow(1 + 0.04, yearsHorizon);
-  const sbnValuation = (currentBalance + totalDcaInvested) * Math.pow(1 + 0.065, yearsHorizon);
+  // Benchmark Comparisons (simulasi DCA bulanan agar setara/apple-to-apple dengan skenario target)
+  const simulateBenchmarkDca = (annualRate: number) => {
+    let bal = currentBalance;
+    const mRate = annualRate / 12;
+    for (let m = 1; m <= totalMonths; m++) {
+      bal = bal * (1 + mRate) + monthlyDca;
+    }
+    return bal;
+  };
+  const bankDepositValuation = simulateBenchmarkDca(0.04);
+  const sbnValuation = simulateBenchmarkDca(0.065);
 
   return (
     <div className="fixed inset-0 bg-slate-950/70 backdrop-blur-sm flex items-center justify-center p-4 z-50 overflow-y-auto">

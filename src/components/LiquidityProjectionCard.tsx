@@ -1,10 +1,12 @@
 import React, { useState, useMemo } from 'react';
-import { Transaction, Account, Debt } from '../types';
+import { Transaction, Account, Debt, EmergencyFundTransaction } from '../types';
 import {
   calculateTotalLiquidCash,
+  calculateTotalEmergencyFund,
   calculateCreditPaylaterBills,
   calculateMonthlyDebtService,
   classifyTransaction,
+  getCreditAccounts,
 } from '../utils/accountingEngine';
 import { formatterIDR } from '../utils/formatters';
 import {
@@ -36,18 +38,27 @@ interface LiquidityProjectionCardProps {
   transactions: Transaction[];
   accounts: Account[];
   debts: Debt[];
+  emergencyTransactions?: EmergencyFundTransaction[];
+  emergencyBalance?: number;
 }
 
 export const LiquidityProjectionCard: React.FC<LiquidityProjectionCardProps> = ({
   transactions,
   accounts,
   debts,
+  emergencyTransactions = [],
+  emergencyBalance,
 }) => {
   // Scenario Adjustment Modifiers (in %)
   const [inflowAdjustmentPct, setInflowAdjustmentPct] = useState<number>(0);
   const [outflowAdjustmentPct, setOutflowAdjustmentPct] = useState<number>(0);
 
-  // 1. Calculate Historical Monthly Averages (Cash Inflows & Outflows excluding internal transfers & loan proceeds)
+  const creditAccountIds = useMemo(
+    () => new Set(getCreditAccounts(accounts).map((a) => a.id)),
+    [accounts]
+  );
+
+  // 1. Calculate Historical Monthly Averages (Cash Inflows & Outflows excluding internal transfers, loan proceeds & non-cash credit card charges)
   const historicalAverages = useMemo(() => {
     const monthlyData: Record<string, { income: number; expense: number }> = {};
 
@@ -61,15 +72,16 @@ export const LiquidityProjectionCard: React.FC<LiquidityProjectionCardProps> = (
         monthlyData[ym] = { income: 0, expense: 0 };
       }
 
+      const isCreditCharge = Boolean(tx.accountId && creditAccountIds.has(tx.accountId));
       if (nature === 'operating_income') {
-        monthlyData[ym].income += Math.abs(tx.amount);
+        if (!isCreditCharge) monthlyData[ym].income += Math.abs(tx.amount);
       } else if (
         nature === 'operating_expense' ||
         nature === 'debt_principal_pay' ||
         nature === 'emergency_fund_transfer' ||
         nature === 'investment_buy'
       ) {
-        if (tx.type !== 'income') {
+        if (tx.type !== 'income' && !isCreditCharge) {
           monthlyData[ym].expense += Math.abs(tx.amount);
         }
       }
@@ -88,15 +100,28 @@ export const LiquidityProjectionCard: React.FC<LiquidityProjectionCardProps> = (
     const avgNet = avgIncome - avgExpense;
 
     return { avgIncome, avgExpense, avgNet, monthCount: months.length };
-  }, [transactions]);
+  }, [transactions, creditAccountIds]);
 
-  // 2. Current Liquid Assets & Current Short-Term Liabilities
+  // 2. Current Liquid Reserve & Current Short-Term Liabilities (Credit Bills + <= 12-month portion of loan debts)
   const currentBaseline = useMemo(() => {
-    const liquidAssets = Math.max(0, calculateTotalLiquidCash(accounts));
-    const creditPaylaterLiabilities = calculateCreditPaylaterBills(accounts);
-    const debtLiabilities = debts.reduce((sum, d) => sum + Math.max(0, d.balance || 0), 0);
+    const liquidCash = Math.max(0, calculateTotalLiquidCash(accounts));
+    const emergencyReserve = Math.max(
+      0,
+      emergencyBalance !== undefined
+        ? emergencyBalance
+        : calculateTotalEmergencyFund(emergencyTransactions)
+    );
+    const liquidAssets = liquidCash + emergencyReserve;
 
-    const currentLiabilities = creditPaylaterLiabilities + debtLiabilities;
+    const creditPaylaterLiabilities = calculateCreditPaylaterBills(accounts);
+    const shortTermDebtPortion = debts.reduce((sum, d) => {
+      const bal = Math.max(0, d.balance || 0);
+      if (bal <= 0) return sum;
+      const annualScheduled = Math.max(0, d.minPayment || 0) * 12;
+      return sum + (annualScheduled > 0 ? Math.min(bal, annualScheduled) : bal);
+    }, 0);
+
+    const currentLiabilities = creditPaylaterLiabilities + shortTermDebtPortion;
 
     // Current Ratio (Liquidity Ratio)
     const currentRatio = currentLiabilities > 0 ? liquidAssets / currentLiabilities : 5.0;
@@ -106,7 +131,7 @@ export const LiquidityProjectionCard: React.FC<LiquidityProjectionCardProps> = (
       currentLiabilities,
       currentRatio,
     };
-  }, [accounts, debts]);
+  }, [accounts, debts, emergencyTransactions, emergencyBalance]);
 
   // 3. Generate 6-Month Projection Data
   const projectionData = useMemo(() => {

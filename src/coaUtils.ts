@@ -54,14 +54,58 @@ export const DEFAULT_COA_LIST: AccountCOA[] = [
   { code: '5500', name: 'Beban Hiburan & Langganan Digital', category: 'Expense', normalBalance: 'Debet', description: 'Streaming, rekreasi, hobi, dan jalan-jalan' },
   { code: '5600', name: 'Beban Kesehatan & Medis', category: 'Expense', normalBalance: 'Debet', description: 'Obat, dokter, asuransi, dan perawatan' },
   { code: '5700', name: 'Beban Pendidikan & Pengembangan Diri', category: 'Expense', normalBalance: 'Debet', description: 'Buku, kursus, seminar, dan spp' },
+  { code: '5750', name: 'Beban Sosial, Zakat & Donasi', category: 'Expense', normalBalance: 'Debet', description: 'Zakat, infak, sedekah, sumbangan, dan bantuan sosial' },
   { code: '5800', name: 'Beban Angsuran Utang & Bunga', category: 'Expense', normalBalance: 'Debet', description: 'Pembayaran pokok & bunga utang' },
   { code: '5810', name: 'Beban Bunga KPR & Pinjaman Akrual', category: 'Expense', normalBalance: 'Debet', description: 'Porsi beban bunga KPR bulanan dan jurnal penyesuaian akrual bunga' },
   { code: '5820', name: 'Beban Provisi, Admin & Legal KPR', category: 'Expense', normalBalance: 'Debet', description: 'Biaya akad KPR: provisi bank, appraisal, notaris, dan AJB' },
   { code: '5830', name: 'Beban Pajak & Asuransi Properti (BPHTB/PBB)', category: 'Expense', normalBalance: 'Debet', description: 'Bea perolehan hak atas tanah/bangunan, PBB, dan premi asuransi KPR' },
   { code: '5900', name: 'Beban Operasional Lainnya', category: 'Expense', normalBalance: 'Debet', description: 'Pengeluaran tak terduga lainnya' },
+  { code: '5910', name: 'Beban Biaya Bank & Admin Transaksi', category: 'Expense', normalBalance: 'Debet', description: 'Biaya admin rekening bank, pajak bunga bank, dan biaya transfer/transaksi' },
   { code: '5950', name: 'Beban Depresiasi & Penurunan Nilai Investasi', category: 'Expense', normalBalance: 'Debet', description: 'Beban non-kas atas koreksi/depresiasi nilai aset investasi berdasarkan durasi kepemilikan' },
   { code: '5960', name: 'Beban Penyusutan Aset Tetap', category: 'Expense', normalBalance: 'Debet', description: 'Beban penyusutan nilai buku kendaraan, elektronik, dan aset tetap lainnya' },
 ];
+
+export interface CoaReportScopeInfo {
+  reportName: 'Laporan Laba-Rugi' | 'Neraca (Posisi Keuangan)';
+  categoryLabelID: string;
+  impactSummary: string;
+}
+
+export const getCoaReportScope = (category: AccountCOA['category']): CoaReportScopeInfo => {
+  switch (category) {
+    case 'Asset':
+      return {
+        reportName: 'Neraca (Posisi Keuangan)',
+        categoryLabelID: 'Aset (1xxx)',
+        impactSummary: 'Masuk ke pos Harta/Aset di Neraca; perpindahan saldo antar akun tidak mengurangi Laba-Rugi.',
+      };
+    case 'Liability':
+      return {
+        reportName: 'Neraca (Posisi Keuangan)',
+        categoryLabelID: 'Kewajiban (2xxx)',
+        impactSummary: 'Masuk ke pos Utang/Kewajiban di Neraca; pelunasan pokok menurunkan utang tanpa menjadi beban Laba-Rugi.',
+      };
+    case 'Equity':
+      return {
+        reportName: 'Neraca (Posisi Keuangan)',
+        categoryLabelID: 'Ekuitas (3xxx)',
+        impactSummary: 'Masuk ke pos Modal & Laba Ditahan di Neraca sebagai dasar kekayaan bersih.',
+      };
+    case 'Income':
+      return {
+        reportName: 'Laporan Laba-Rugi',
+        categoryLabelID: 'Pendapatan (4xxx)',
+        impactSummary: 'Menambah total Pendapatan Operasional dan Laba Bersih pada periode berjalan.',
+      };
+    case 'Expense':
+    default:
+      return {
+        reportName: 'Laporan Laba-Rugi',
+        categoryLabelID: 'Beban & Pengeluaran (5xxx)',
+        impactSummary: 'Mengurangi Laba Bersih sebagai Beban Operasional pada Laporan Laba-Rugi periode berjalan.',
+      };
+  }
+};
 
 export const getStoredCoaList = (): AccountCOA[] => {
   try {

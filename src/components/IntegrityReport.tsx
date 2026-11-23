@@ -35,6 +35,7 @@ import {
   reassignOrphanTransactionWithBalanceSync,
   removeDuplicateTransactionsWithBalanceSync,
   setAccountTargetBalance,
+  toLocalYYYYMMDD,
 } from '../utils/accountingEngine';
 import { formatterIDR } from '../utils/formatters';
 
@@ -661,7 +662,7 @@ export const IntegrityReport: React.FC<IntegrityReportProps> = ({
     const encodedUri = encodeURI(csvContent);
     const link = document.createElement('a');
     link.setAttribute('href', encodedUri);
-    link.setAttribute('download', `Integrity_Report_Audit_${new Date().toISOString().split('T')[0]}.csv`);
+    link.setAttribute('download', `Integrity_Report_Audit_${toLocalYYYYMMDD()}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);

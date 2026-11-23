@@ -4,6 +4,7 @@ import { Transaction, Account, CategoryBudget, Debt, EmergencyFundTransaction, F
 import { FormattedNumberInput } from './FormattedNumberInput';
 import { TaxCalculatorCard } from './TaxCalculatorCard';
 import { DashboardFinancialHealthPanel } from './DashboardFinancialHealthPanel';
+import { SavingsAchievementCard } from './SavingsAchievementCard';
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell, ReferenceLine } from 'recharts';
 import { TrendingUp, TrendingDown, Wallet, ShieldAlert, CreditCard, PiggyBank, ArrowRight, CheckCircle2, AlertTriangle, Calendar, ChevronLeft, ChevronRight, ChevronDown, ArrowUpRight, ArrowDownRight, Info, Eye, EyeOff, Percent, ArrowDown, Sparkles, Lightbulb, Target, Plus, Trash2, Edit2, Clock, Bell, DollarSign, X, RefreshCw, Activity, BarChart3, Table, GitCommit, Scale, FileCheck, ShieldCheck, Building2 } from 'lucide-react';
 import {
@@ -36,7 +37,9 @@ import {
   isInternalTransfer,
   classifyTransaction,
   getTransactionAccountDelta,
+  parseLocalDate,
   syncKprDebtsToFixedAssets,
+  toLocalYYYYMMDD,
 } from '../utils/accountingEngine';
 import { formatterIDR } from '../utils/formatters';
 import { showToast } from '../utils/toast';
@@ -1659,6 +1662,10 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
   // 1. Calculate Net Worth (Liquid Accounts + Emergency Funds + Investments + Fixed Assets/KPR - Debts)
   const liquidAccounts = React.useMemo(() => getLiquidAccounts(accounts), [accounts]);
   const creditCardAndPaylaterAccounts = React.useMemo(() => getCreditAccounts(accounts), [accounts]);
+  const creditAccountIds = React.useMemo(
+    () => new Set(creditCardAndPaylaterAccounts.map((a) => a.id)),
+    [creditCardAndPaylaterAccounts]
+  );
 
   const totalLiquidAssets = calculateTotalLiquidCash(accounts);
   const totalCreditCardBills = calculateCreditPaylaterBills(accounts);
@@ -1792,7 +1799,13 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
         .reduce((sum, tx) => sum + tx.amount, 0);
         
       const outflow = dayTxs
-        .filter(tx => !isInternalTransfer(tx) && tx.type !== 'income' && classifyTransaction(tx) !== 'debt_proceeds')
+        .filter(
+          (tx) =>
+            !isInternalTransfer(tx) &&
+            tx.type !== 'income' &&
+            classifyTransaction(tx) !== 'debt_proceeds' &&
+            !(tx.accountId && creditAccountIds.has(tx.accountId))
+        )
         .reduce((sum, tx) => sum + tx.amount, 0);
         
       let formattedDate = dateStr;
@@ -1810,7 +1823,7 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
       });
     }
     return dataPoints;
-  }, [transactions, systemTodayStr]);
+  }, [transactions, systemTodayStr, creditAccountIds]);
 
   // 3-Month Projection Logic based on average monthly income & expense
   const monthsProjection = 3;
@@ -1914,30 +1927,26 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
 
   // Filtered transactions according to dashboardPeriod
   const periodFilteredTxs = React.useMemo(() => {
-    const today = new Date();
+    const todayEnd = new Date(actualYear, actualMonth - 1, actualDay, 23, 59, 59, 999);
     if (dashboardPeriod === 'this-week') {
-      const sevenDaysAgo = new Date();
-      sevenDaysAgo.setDate(today.getDate() - 7);
-      return transactions.filter(tx => {
-        if (!tx.date) return false;
-        const d = new Date(tx.date);
-        return d >= sevenDaysAgo && d <= today;
+      const sevenDaysAgo = new Date(actualYear, actualMonth - 1, actualDay - 7, 0, 0, 0, 0);
+      return transactions.filter((tx) => {
+        const d = parseLocalDate(tx.date);
+        return d !== null && d >= sevenDaysAgo && d <= todayEnd;
       });
     }
     if (dashboardPeriod === 'this-month') {
       return monthlyTxs;
     }
     if (dashboardPeriod === 'last-3-months') {
-      const ninetyDaysAgo = new Date();
-      ninetyDaysAgo.setDate(today.getDate() - 90);
-      return transactions.filter(tx => {
-        if (!tx.date) return false;
-        const d = new Date(tx.date);
-        return d >= ninetyDaysAgo && d <= today;
+      const ninetyDaysAgo = new Date(actualYear, actualMonth - 1, actualDay - 90, 0, 0, 0, 0);
+      return transactions.filter((tx) => {
+        const d = parseLocalDate(tx.date);
+        return d !== null && d >= ninetyDaysAgo && d <= todayEnd;
       });
     }
     return transactions;
-  }, [transactions, dashboardPeriod, monthlyTxs]);
+  }, [transactions, dashboardPeriod, monthlyTxs, actualYear, actualMonth, actualDay]);
 
   // Category Expense Breakdown for Donut Chart (Operating Expense Only)
   const periodExpenseByCategory = React.useMemo(() => {
@@ -2002,6 +2011,7 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
   }, []);
 
   // --- GOAL TRACKER (TARGET TABUNGAN) STATES & HANDLERS ---
+  const savingsGoalsSectionRef = React.useRef<HTMLDivElement>(null);
   const [showGoalModal, setShowGoalModal] = React.useState(false);
   const [goalEditingId, setGoalEditingId] = React.useState<string | null>(null);
   const [goalTitleInput, setGoalTitleInput] = React.useState('');
@@ -2073,27 +2083,20 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
 
   // --- WEEKLY EXPENSE COMPARISON MEMO ---
   const weeklyExpenseComparison = React.useMemo(() => {
-    const now = new Date();
-    now.setHours(23, 59, 59, 999);
+    const nowEnd = new Date(actualYear, actualMonth - 1, actualDay, 23, 59, 59, 999);
+    const sevenDaysAgo = new Date(actualYear, actualMonth - 1, actualDay - 7, 0, 0, 0, 0);
+    const fourteenDaysAgo = new Date(actualYear, actualMonth - 1, actualDay - 14, 0, 0, 0, 0);
 
-    const sevenDaysAgo = new Date(now);
-    sevenDaysAgo.setDate(now.getDate() - 7);
-    sevenDaysAgo.setHours(0, 0, 0, 0);
-
-    const fourteenDaysAgo = new Date(now);
-    fourteenDaysAgo.setDate(now.getDate() - 14);
-    fourteenDaysAgo.setHours(0, 0, 0, 0);
-
-    const thisWeekTxs = transactions.filter(tx => {
+    const thisWeekTxs = transactions.filter((tx) => {
       if (!isOperatingExpense(tx) || !tx.date) return false;
-      const d = new Date(tx.date);
-      return d >= sevenDaysAgo && d <= now;
+      const d = parseLocalDate(tx.date);
+      return d !== null && d >= sevenDaysAgo && d <= nowEnd;
     });
 
-    const lastWeekTxs = transactions.filter(tx => {
+    const lastWeekTxs = transactions.filter((tx) => {
       if (!isOperatingExpense(tx) || !tx.date) return false;
-      const d = new Date(tx.date);
-      return d >= fourteenDaysAgo && d < sevenDaysAgo;
+      const d = parseLocalDate(tx.date);
+      return d !== null && d >= fourteenDaysAgo && d < sevenDaysAgo;
     });
 
     const thisWeekTotal = thisWeekTxs.reduce((sum, tx) => sum + tx.amount, 0);
@@ -2112,7 +2115,7 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
       isIncrease: diff > 0,
       isEqual: diff === 0,
     };
-  }, [transactions]);
+  }, [transactions, actualYear, actualMonth, actualDay]);
 
   // --- EMERGENCY FUND VS IDEAL TARGET (6-12 MONTHS) MEMO ---
   const emergencyFundIdealMetrics = React.useMemo(() => {
@@ -2137,7 +2140,9 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
   // --- FINANCIAL HEALTH SCORE CALCULATOR MEMO ---
   const financialHealthScore = React.useMemo(() => {
     // 1. SAVINGS RATIO SCORE (Weight: 35%)
-    const netMonthlySavings = (monthlyIncome - monthlyExpense) + monthlySaving + monthlyInvestment;
+    // Surplus operasional (monthlyIncome - monthlyExpense) sudah mencakup dana yang dialokasikan
+    // ke pos tabungan, investasi, maupun sisa kas bersih karena monthlyExpense hanya memuat beban operasional.
+    const netMonthlySavings = monthlyIncome - monthlyExpense;
     const savingsRatioPct = monthlyIncome > 0 ? (netMonthlySavings / monthlyIncome) * 100 : 0;
 
     let savingsScore = 0;
@@ -2189,13 +2194,26 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
     if (budgets.length > 0) {
       let totalUsageRatioSum = 0;
       budgets.forEach(b => {
-        const spent = monthlyTxs
-          .filter(tx => isOperatingExpense(tx) && tx.category.toLowerCase() === b.category.toLowerCase())
+        const actual = monthlyTxs
+          .filter(
+            (tx) =>
+              !isInternalTransfer(tx) &&
+              classifyTransaction(tx) !== 'debt_proceeds' &&
+              tx.type === b.type &&
+              tx.category.toLowerCase() === b.category.toLowerCase()
+          )
           .reduce((sum, tx) => sum + tx.amount, 0);
-        
-        const ratio = b.limit > 0 ? spent / b.limit : 0;
-        if (ratio > 1) overBudgetCount++;
-        totalUsageRatioSum += Math.min(2, ratio);
+
+        if (b.type === 'saving' || b.type === 'investment') {
+          const achievementPct = b.limit > 0 ? actual / b.limit : 1;
+          const equivalentRatio =
+            achievementPct >= 1 ? 0.8 : 0.8 + Math.max(0, 1 - achievementPct) * 0.7;
+          totalUsageRatioSum += Math.min(2, equivalentRatio);
+        } else {
+          const ratio = b.limit > 0 ? actual / b.limit : 0;
+          if (ratio > 1) overBudgetCount++;
+          totalUsageRatioSum += Math.min(2, ratio);
+        }
       });
 
       const avgRatio = totalUsageRatioSum / budgets.length;
@@ -2356,15 +2374,17 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
     // Prepend starting balance as a point
     if (uniqueDates.length > 0) {
       try {
-        const firstDate = new Date(uniqueDates[0]);
-        firstDate.setDate(firstDate.getDate() - 1);
-        const prependedDateStr = firstDate.toISOString().split('T')[0];
-        const formattedPrepended = firstDate.toLocaleDateString('id-ID', { day: '2-digit', month: 'short' });
-        data.push({
-          rawDate: prependedDateStr,
-          date: formattedPrepended,
-          'Saldo Total': startingTotalBalance,
-        });
+        const firstDate = parseLocalDate(uniqueDates[0]);
+        if (firstDate) {
+          firstDate.setDate(firstDate.getDate() - 1);
+          const prependedDateStr = toLocalYYYYMMDD(firstDate);
+          const formattedPrepended = firstDate.toLocaleDateString('id-ID', { day: '2-digit', month: 'short' });
+          data.push({
+            rawDate: prependedDateStr,
+            date: formattedPrepended,
+            'Saldo Total': startingTotalBalance,
+          });
+        }
       } catch (e) {
         // fallback
       }
@@ -2380,8 +2400,8 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
       
       let formattedDate = date;
       try {
-        const d = new Date(date);
-        if (!isNaN(d.getTime())) {
+        const d = parseLocalDate(date);
+        if (d) {
           formattedDate = d.toLocaleDateString('id-ID', { day: '2-digit', month: 'short' });
         }
       } catch (e) {
@@ -2448,11 +2468,17 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
   const calMonthlySaving = calMonthlySummary.emergencyAdditions;
   const calMonthlyInvestment = calMonthlySummary.investmentPurchases;
 
-  const calMonthlyOutflow =
-    calMonthlyExpense +
-    calMonthlySummary.debtPrincipalPayments +
-    calMonthlySaving +
-    calMonthlyInvestment;
+  const calMonthlyCashOutflow = calMonthlyTxs
+    .filter(
+      (tx) =>
+        !isInternalTransfer(tx) &&
+        tx.type !== 'income' &&
+        classifyTransaction(tx) !== 'debt_proceeds' &&
+        !(tx.accountId && creditAccountIds.has(tx.accountId))
+    )
+    .reduce((sum, tx) => sum + tx.amount, 0);
+
+  const calMonthlyOutflow = calMonthlyCashOutflow;
   const calMonthlyNetFlow = calMonthlyIncome - calMonthlyOutflow;
 
   const calendarCells: (number | null)[] = [];
@@ -2614,7 +2640,13 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
       .reduce((sum, tx) => sum + tx.amount, 0);
 
     const totalHistExpense = transactions
-      .filter(tx => !isInternalTransfer(tx) && tx.type !== 'income' && classifyTransaction(tx) !== 'debt_proceeds')
+      .filter(
+        (tx) =>
+          !isInternalTransfer(tx) &&
+          tx.type !== 'income' &&
+          classifyTransaction(tx) !== 'debt_proceeds' &&
+          !(tx.accountId && creditAccountIds.has(tx.accountId))
+      )
       .reduce((sum, tx) => sum + tx.amount, 0);
 
     const avgMonthlyIncomeHist = totalHistIncome > 0 ? (totalHistIncome / historyMonthsCount) : (monthlyIncome || 0);
@@ -2704,7 +2736,12 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
         }
         if (isOperatingIncome(tx)) {
           monthlyMap[monthKey].income += tx.amount;
-        } else if (!isInternalTransfer(tx) && tx.type !== 'income' && classifyTransaction(tx) !== 'debt_proceeds') {
+        } else if (
+          !isInternalTransfer(tx) &&
+          tx.type !== 'income' &&
+          classifyTransaction(tx) !== 'debt_proceeds' &&
+          !(tx.accountId && creditAccountIds.has(tx.accountId))
+        ) {
           monthlyMap[monthKey].expense += tx.amount;
         }
       }
@@ -2832,12 +2869,14 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
       let dueText = '';
 
       if (d.dueDate) {
-        const due = new Date(d.dueDate);
-        due.setHours(0, 0, 0, 0);
-        daysRemaining = Math.ceil((due.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
-        if (daysRemaining < 0) dueText = `Terlewat ${Math.abs(daysRemaining)} hari`;
-        else if (daysRemaining === 0) dueText = `HARI INI JATUH TEMPO!`;
-        else dueText = `${daysRemaining} hari lagi`;
+        const due = parseLocalDate(d.dueDate);
+        if (due) {
+          due.setHours(0, 0, 0, 0);
+          daysRemaining = Math.ceil((due.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+          if (daysRemaining < 0) dueText = `Terlewat ${Math.abs(daysRemaining)} hari`;
+          else if (daysRemaining === 0) dueText = `HARI INI JATUH TEMPO!`;
+          else dueText = `${daysRemaining} hari lagi`;
+        }
       } else if (d.dueDay && d.dueDay >= 1 && d.dueDay <= 31) {
         const currentYear = today.getFullYear();
         const currentMonth = today.getMonth();
@@ -2963,6 +3002,24 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
         onSyncFixedAssetDepreciation={onSyncFixedAssetDepreciation}
         onSyncAllFixedAssetDepreciations={onSyncAllFixedAssetDepreciations}
         onQuickAction={onQuickAction}
+      />
+
+      {/* KARTU RINGKASAN PENCAPAIAN TABUNGAN GABUNGAN (RENCANA ANGGARAN + TARGET TABUNGAN) */}
+      <SavingsAchievementCard
+        budgets={budgets}
+        transactions={transactions}
+        savingsGoals={savingsGoals}
+        activeMonthStr={activeMonthStr}
+        activeMonthLabel={`${INDONESIAN_MONTHS[actualMonth - 1]} ${actualYear}`}
+        formatValue={formatValue}
+        onOpenBudgetTab={() => onQuickAction('budget')}
+        onOpenAddGoal={handleOpenAddGoal}
+        onScrollToGoals={() => {
+          savingsGoalsSectionRef.current?.scrollIntoView({
+            behavior: 'smooth',
+            block: 'start',
+          });
+        }}
       />
 
       {/* GRAFIK TREND NET WORTH 6 BULAN TERAKHIR + PROYEKSI 3 BULAN */}
@@ -3945,7 +4002,10 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
         
         {/* CARD 1: TARGET TABUNGAN (GOAL TRACKER) */}
-        <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm space-y-4 animate-fadeIn transition-all duration-300 hover:shadow-md hover:border-emerald-300 dark:hover:border-emerald-700 flex flex-col justify-between">
+        <div
+          ref={savingsGoalsSectionRef}
+          className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm space-y-4 animate-fadeIn transition-all duration-300 hover:shadow-md hover:border-emerald-300 dark:hover:border-emerald-700 flex flex-col justify-between"
+        >
           <div className="space-y-3">
             <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-3">
               <div className="flex items-center gap-2.5">
@@ -4027,8 +4087,11 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
                 // Calculate days left
                 let daysLeft = 0;
                 if (goal.targetDate) {
-                  const diffTime = new Date(goal.targetDate).getTime() - new Date().getTime();
-                  daysLeft = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+                  const targetDt = parseLocalDate(goal.targetDate);
+                  if (targetDt) {
+                    const diffTime = targetDt.getTime() - new Date().getTime();
+                    daysLeft = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+                  }
                 }
 
                 const proximityMeta = pct >= 100

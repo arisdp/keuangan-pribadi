@@ -1,7 +1,7 @@
 import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, Type, ThinkingLevel } from "@google/genai";
 import dotenv from "dotenv";
 import { apiRouter, ensureTablesExist } from "./src/server/api";
 
@@ -1417,6 +1417,310 @@ Aturan Ketat:
     } catch (error: any) {
       console.log("[AI Category Consolidation] Using rules-based fallback response.");
       res.json(generateFallbackCategoryConsolidation(transactions, masterCategoryNames));
+    }
+  });
+
+  // API Route - AI Income Statement Performance Summary (gemini-4-hydrogen)
+  app.post("/api/income-statement-summary", async (req, res) => {
+    try {
+      const { periodLabel, selectedCategories, months, totals } = req.body || {};
+
+      if (!Array.isArray(months) || months.length === 0 || !periodLabel) {
+        return res.status(400).json({
+          error: "Data periode atau ringkasan bulanan tidak lengkap untuk dianalisis.",
+        });
+      }
+
+      const apiKey = process.env.GEMINI_API_KEY?.trim();
+      if (!apiKey) {
+        return res.status(503).json({
+          error:
+            "Kunci API Gemini belum terkonfigurasi di server. Tambahkan GEMINI_API_KEY di Settings > Secrets untuk mengaktifkan ringkasan AI.",
+        });
+      }
+
+      const ai = new GoogleGenAI({
+        apiKey,
+        httpOptions: {
+          headers: { "User-Agent": "aistudio-build" },
+        },
+      });
+
+      const hasCategoryFilter =
+        Array.isArray(selectedCategories) && selectedCategories.length > 0;
+      const scopeDescription = hasCategoryFilter
+        ? `Kategori terfilter (${selectedCategories.length}): ${selectedCategories
+            .map((c: { coaCode?: string; name?: string }) =>
+              c?.coaCode ? `[${c.coaCode}] ${c.name}` : c?.name || ""
+            )
+            .filter(Boolean)
+            .join(", ")}`
+        : "Seluruh kategori Pendapatan Operasional (4xxx) dan Beban Operasional (5xxx)";
+
+      const compactMonths = months.slice(-12).map((m: any) => ({
+        bulan: m.fullMonthLabel || m.monthLabel,
+        pendapatan: Number(m.totalIncome) || 0,
+        pengeluaran: Number(m.totalExpense) || 0,
+        labaBersih: Number(m.netProfitLoss) || 0,
+        marginPct: Number(m.marginPct) || 0,
+        pendapatanTeratas: Array.isArray(m.topIncomeCategories)
+          ? m.topIncomeCategories
+          : [],
+        pengeluaranTeratas: Array.isArray(m.topExpenseCategories)
+          ? m.topExpenseCategories
+          : [],
+      }));
+
+      const prompt = `Anda adalah analis keuangan pribadi dan akuntansi yang objektif, ringkas, dan akurat.
+Analisis data Laporan Laba-Rugi berikut dalam Bahasa Indonesia yang jelas dan mudah dipahami.
+
+Periode Aktif: ${String(periodLabel)}
+Cakupan Kategori: ${scopeDescription}
+Agregat Periode: ${JSON.stringify(totals || {})}
+Data Bulanan Berurutan:
+${JSON.stringify(compactMonths, null, 2)}
+
+Tugas Anda:
+1. Jelaskan tren Laba Bersih (atau selisih kontribusi bersih jika filter kategori aktif) dari bulan ke bulan termasuk perubahan signifikan MoM.
+2. Identifikasi kategori/pos COA mana yang paling mendorong kenaikan atau penurunan tren tersebut berdasarkan angka di atas.
+3. Berikan 1 catatan praktis singkat yang relevan dengan pola kategori yang sedang dipilih.
+Gunakan angka Rupiah singkat (mis. Rp 4,5 jt) atau persentase nyata dari data di atas saja, jangan mengarang angka.`;
+
+      const response = await ai.models.generateContent({
+        model: "gemini-4-hydrogen",
+        contents: prompt,
+        config: {
+          thinkingConfig: {
+            thinkingLevel: ThinkingLevel.LOW,
+          },
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              headline: {
+                type: Type.STRING,
+                description:
+                  "Judul ringkas 1 kalimat (maksimal ~14 kata) mengenai kondisi utama Laba Bersih pada kategori dan periode aktif.",
+              },
+              trendExplanation: {
+                type: Type.STRING,
+                description:
+                  "Penjelasan ringkas 2 kalimat mengenai arah tren Laba Bersih MoM dan kontribusi kategori yang sedang aktif.",
+              },
+              keyDrivers: {
+                type: Type.ARRAY,
+                items: { type: Type.STRING },
+                description:
+                  "2 sampai 3 poin singkat pendorong utama perubahan angka (sebutkan kategori/COA dan nominal atau persen yang relevan).",
+              },
+              actionableNote: {
+                type: Type.STRING,
+                description:
+                  "1 saran praktis singkat yang relevan dengan tren kategori terpilih.",
+              },
+            },
+            required: [
+              "headline",
+              "trendExplanation",
+              "keyDrivers",
+              "actionableNote",
+            ],
+          },
+        },
+      });
+
+      const rawText = (response.text || "").trim();
+      if (!rawText) {
+        return res.status(502).json({
+          error: "Model AI tidak mengembalikan ringkasan. Silakan muat ulang.",
+        });
+      }
+
+      const parsed = JSON.parse(rawText);
+      return res.json({
+        headline: String(parsed.headline || ""),
+        trendExplanation: String(parsed.trendExplanation || ""),
+        keyDrivers: Array.isArray(parsed.keyDrivers)
+          ? parsed.keyDrivers.map(String).slice(0, 3)
+          : [],
+        actionableNote: String(parsed.actionableNote || ""),
+        generatedAt: new Date().toLocaleTimeString("id-ID", {
+          hour: "2-digit",
+          minute: "2-digit",
+        }),
+      });
+    } catch (error: any) {
+      console.error("[AI Income Statement Summary Error]:", error);
+      const status =
+        typeof error?.status === "number" && error.status >= 400
+          ? error.status
+          : 500;
+      return res.status(status).json({
+        error:
+          error?.message ||
+          "Gagal menghubungi layanan AI untuk merangkum performa laporan.",
+      });
+    }
+  });
+
+  // API Route - AI Savings Target Completion Date Projection (gemini-4-hydrogen)
+  app.post("/api/savings-projection", async (req, res) => {
+    try {
+      const {
+        currentDateStr,
+        activeMonthLabel,
+        monthlyHistory3M,
+        avgDirectSaving3M,
+        avgNetSurplus3M,
+        effectiveMonthlySavingRate,
+        totalBudgetLimit,
+        totalBudgetActual,
+        totalGoalSaved,
+        totalGoalTarget,
+        remainingTotalGoalGap,
+        nearestGoal,
+      } = req.body || {};
+
+      if (!Array.isArray(monthlyHistory3M) || monthlyHistory3M.length === 0) {
+        return res.status(400).json({
+          error: "Data riwayat tabungan 3 bulan terakhir tidak lengkap untuk dianalisis.",
+        });
+      }
+
+      const apiKey = process.env.GEMINI_API_KEY?.trim();
+      if (!apiKey) {
+        return res.status(503).json({
+          error:
+            "Kunci API Gemini belum terkonfigurasi di server. Tambahkan GEMINI_API_KEY di Settings > Secrets untuk mengaktifkan estimasi AI.",
+        });
+      }
+
+      const ai = new GoogleGenAI({
+        apiKey,
+        httpOptions: {
+          headers: { "User-Agent": "aistudio-build" },
+        },
+      });
+
+      const prompt = `Anda adalah perencana keuangan pribadi yang presisi, realistis, dan membantu.
+Hitung dan jelaskan proyeksi tanggal pencapaian target tabungan pengguna dalam Bahasa Indonesia berdasarkan laju menabung bulanan rata-rata 3 bulan terakhir.
+
+Tanggal Referensi Saat Ini: ${String(currentDateStr || "")} (${String(activeMonthLabel || "Bulan Berjalan")})
+Riwayat 3 Bulan Terakhir:
+${JSON.stringify(monthlyHistory3M, null, 2)}
+
+Ringkasan Laju Menabung 3 Bulan:
+- Rata-rata setoran tabungan tercatat (type saving): ${Number(avgDirectSaving3M) || 0}
+- Rata-rata surplus kas bersih (pemasukan - pengeluaran): ${Number(avgNetSurplus3M) || 0}
+- Laju menabung efektif per bulan yang dipakai untuk proyeksi: ${Number(effectiveMonthlySavingRate) || 0}
+
+Status Anggaran & Target Tabungan Saat Ini:
+- Limit Anggaran Tabungan Bulan Ini: ${Number(totalBudgetLimit) || 0} (Terealisasi: ${Number(totalBudgetActual) || 0})
+- Total Target Tabungan Kumulatif: ${Number(totalGoalTarget) || 0}
+- Sudah Terkumpul: ${Number(totalGoalSaved) || 0}
+- Sisa Total Kekurangan Target: ${Number(remainingTotalGoalGap) || 0}
+- Target Terdekat yang Belum Lunas: ${nearestGoal ? JSON.stringify(nearestGoal) : "Tidak ada"}
+
+Aturan Perhitungan:
+1. Jika Sisa Total Kekurangan Target <= 0, nyatakan sudah tercapai ("Sudah Tercapai", estimatedMonthsRemaining = 0).
+2. Jika Laju menabung efektif <= 0, jangan mengarang tanggal selesai; isi projectedTotalDate dengan "Belum Terproyeksi", estimatedMonthsRemaining = -1, dan jelaskan berapa minimal tabungan bulanan yang dibutuhkan.
+3. Jika laju > 0, estimasikan jumlah bulan tersisa dari sisa kekurangan dibagi laju efektif (pertimbangkan tren naik/turun 3 bulan terakhir jika relevan) lalu konversi ke format Bulan Tahun Bahasa Indonesia (contoh: "Agustus 2027").
+4. Lakukan hal yang sama untuk target terdekat (nearestGoal), bandingkan dengan targetDate jika tersedia untuk menentukan status ("Lebih Cepat", "Tepat Waktu", "Melewati Tenggat", "Tanpa Tenggat", atau "Perlu Alokasi Rutin").
+5. Seluruh angka dalam penjelasan harus akurat mengikuti data di atas.`;
+
+      const response = await ai.models.generateContent({
+        model: "gemini-4-hydrogen",
+        contents: prompt,
+        config: {
+          thinkingConfig: {
+            thinkingLevel: ThinkingLevel.LOW,
+          },
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              projectedTotalDate: {
+                type: Type.STRING,
+                description:
+                  "Bulan dan tahun proyeksi tercapainya seluruh sisa target (mis. 'September 2027'), atau 'Sudah Tercapai' / 'Belum Terproyeksi'.",
+              },
+              estimatedMonthsRemaining: {
+                type: Type.INTEGER,
+                description:
+                  "Estimasi sisa bulan hingga seluruh target terpenuhi (0 jika sudah tercapai, -1 jika laju menabung <= 0).",
+              },
+              nearestGoalTitle: {
+                type: Type.STRING,
+                description: "Nama target tabungan terdekat yang disorot.",
+              },
+              nearestGoalProjectedDate: {
+                type: Type.STRING,
+                description:
+                  "Estimasi bulan dan tahun selesainya target terdekat (mis. 'Januari 2027').",
+              },
+              nearestGoalStatus: {
+                type: Type.STRING,
+                description:
+                  "Status proyeksi target terdekat dibanding tenggat: 'Lebih Cepat', 'Tepat Waktu', 'Melewati Tenggat', 'Sudah Tercapai', 'Tanpa Tenggat', atau 'Perlu Alokasi Rutin'.",
+              },
+              projectionSummary: {
+                type: Type.STRING,
+                description:
+                  "Penjelasan ringkas 1-2 kalimat mengenai dasar estimasi dari rata-rata menabung 3 bulan terakhir.",
+              },
+              accelerationTip: {
+                type: Type.STRING,
+                description:
+                  "1 saran konkret singkat agar target dapat tercapai lebih cepat atau sesuai tenggat.",
+              },
+            },
+            required: [
+              "projectedTotalDate",
+              "estimatedMonthsRemaining",
+              "nearestGoalTitle",
+              "nearestGoalProjectedDate",
+              "nearestGoalStatus",
+              "projectionSummary",
+              "accelerationTip",
+            ],
+          },
+        },
+      });
+
+      const rawText = (response.text || "").trim();
+      if (!rawText) {
+        return res.status(502).json({
+          error: "Model AI tidak mengembalikan estimasi proyeksi. Silakan muat ulang.",
+        });
+      }
+
+      const parsed = JSON.parse(rawText);
+      return res.json({
+        projectedTotalDate: String(parsed.projectedTotalDate || ""),
+        estimatedMonthsRemaining: Number.isFinite(Number(parsed.estimatedMonthsRemaining))
+          ? Number(parsed.estimatedMonthsRemaining)
+          : -1,
+        nearestGoalTitle: String(parsed.nearestGoalTitle || ""),
+        nearestGoalProjectedDate: String(parsed.nearestGoalProjectedDate || ""),
+        nearestGoalStatus: String(parsed.nearestGoalStatus || ""),
+        projectionSummary: String(parsed.projectionSummary || ""),
+        accelerationTip: String(parsed.accelerationTip || ""),
+        generatedAt: new Date().toLocaleTimeString("id-ID", {
+          hour: "2-digit",
+          minute: "2-digit",
+        }),
+      });
+    } catch (error: any) {
+      console.error("[AI Savings Projection Error]:", error);
+      const status =
+        typeof error?.status === "number" && error.status >= 400
+          ? error.status
+          : 500;
+      return res.status(status).json({
+        error:
+          error?.message ||
+          "Gagal menghubungi layanan AI untuk memproyeksikan tanggal target tabungan.",
+      });
     }
   });
 

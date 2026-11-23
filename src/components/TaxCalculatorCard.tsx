@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { Transaction } from '../types';
-import { isOperatingIncome } from '../utils/accountingEngine';
+import { isOperatingIncome, parseLocalDate } from '../utils/accountingEngine';
 import { formatterIDR } from '../utils/formatters';
 import { CalculatorIcon, FileText, Info } from 'lucide-react';
 
@@ -44,8 +44,8 @@ export const TaxCalculatorCard: React.FC<TaxCalculatorCardProps> = ({
     const years = new Set<number>([currentYear]);
     transactions.forEach((tx) => {
       if (tx.date) {
-        const y = new Date(tx.date).getFullYear();
-        if (!isNaN(y)) years.add(y);
+        const y = parseLocalDate(tx.date)?.getFullYear();
+        if (y !== undefined && !isNaN(y)) years.add(y);
       }
     });
     return Array.from(years).sort((a, b) => b - a);
@@ -57,7 +57,7 @@ export const TaxCalculatorCard: React.FC<TaxCalculatorCardProps> = ({
       .filter((t) => {
         if (!isOperatingIncome(t)) return false;
         if (!t.date) return true;
-        const y = new Date(t.date).getFullYear();
+        const y = parseLocalDate(t.date)?.getFullYear();
         return y === selectedYear;
       })
       .reduce((sum, t) => sum + t.amount, 0);
@@ -201,8 +201,16 @@ export const TaxCalculatorCard: React.FC<TaxCalculatorCardProps> = ({
       }
 
       if (remainingPKP > 0) {
-        const tax = remainingPKP * 0.30;
-        layerBreakdown.push({ label: 'Lapisan 4 (> Rp 500 Juta)', rate: '30%', taxableAmount: remainingPKP, taxAmount: tax });
+        const amountInLayer = Math.min(remainingPKP, 4500000000); // 5B - 500m
+        const tax = amountInLayer * 0.30;
+        layerBreakdown.push({ label: 'Lapisan 4 (> Rp 500 Juta - 5 Miliar)', rate: '30%', taxableAmount: amountInLayer, taxAmount: tax });
+        totalTaxAnnual += tax;
+        remainingPKP -= amountInLayer;
+      }
+
+      if (remainingPKP > 0) {
+        const tax = remainingPKP * 0.35;
+        layerBreakdown.push({ label: 'Lapisan 5 (> Rp 5 Miliar)', rate: '35%', taxableAmount: remainingPKP, taxAmount: tax });
         totalTaxAnnual += tax;
       }
     }

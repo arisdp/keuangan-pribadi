@@ -30,10 +30,14 @@ import {
   calculateBalanceSheet,
   calculateFixedAssetValuation,
   calculateTotalLiquidCash,
+  classifyTransaction,
   MonthlyIncomeStatementPoint,
+  isInternalTransfer,
   isOperatingIncome,
   isOperatingExpense,
+  parseLocalDate,
   syncKprDebtsToFixedAssets,
+  toLocalYYYYMMDD,
 } from '../utils/accountingEngine';
 import { formatterIDR } from '../utils/formatters';
 import { showToast } from '../utils/toast';
@@ -219,7 +223,7 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
       const pdfHeight = (canvas.height * pdfWidth) / canvas.width;
 
       pdf.addImage(imgData, 'PNG', 0, 0, pdfWidth, pdfHeight);
-      pdf.save(`Laporan_Keuangan_NusantaraWealth_${new Date().toISOString().split('T')[0]}.pdf`);
+      pdf.save(`Laporan_Keuangan_NusantaraWealth_${toLocalYYYYMMDD()}.pdf`);
       setShowExportModal(false);
     } catch (error) {
       console.error('Failed to export PDF:', error);
@@ -292,10 +296,10 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
         return tx.date.startsWith(`${currentYear}`);
       }
       if (periodFilter === 'last-3-months') {
-        const threeMonthsAgo = new Date();
-        threeMonthsAgo.setMonth(now.getMonth() - 3);
-        const txDate = new Date(tx.date);
-        return txDate >= threeMonthsAgo && txDate <= now;
+        const threeMonthsAgo = new Date(currentYear, currentMonth - 4, now.getDate(), 0, 0, 0, 0);
+        const nowEnd = new Date(currentYear, currentMonth - 1, now.getDate(), 23, 59, 59, 999);
+        const txDate = parseLocalDate(tx.date);
+        return txDate !== null && txDate >= threeMonthsAgo && txDate <= nowEnd;
       }
       return true;
     });
@@ -319,32 +323,49 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
   const budgetVsRealization = useMemo(() => {
     const now = new Date();
     const currentYM = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-    const monthlyExpenses = transactions.filter((tx) => isOperatingExpense(tx) && tx.date.startsWith(currentYM));
-
-    // Calculate actual spending per category
-    const categorySpendingMap: Record<string, number> = {};
-    monthlyExpenses.forEach((tx) => {
-      categorySpendingMap[tx.category] = (categorySpendingMap[tx.category] || 0) + tx.amount;
-    });
+    const monthlyTxs = transactions.filter((tx) => tx.date && tx.date.startsWith(currentYM));
 
     const result = budgets.map((b) => {
-      const actual = categorySpendingMap[b.category] || 0;
+      const actual = monthlyTxs
+        .filter((tx) => {
+          if (isInternalTransfer(tx) || classifyTransaction(tx) === 'debt_proceeds') return false;
+          if (b.type === 'expense') {
+            return isOperatingExpense(tx) && tx.category.toLowerCase() === b.category.toLowerCase();
+          }
+          return tx.type === b.type && tx.category.toLowerCase() === b.category.toLowerCase();
+        })
+        .reduce((sum, tx) => sum + tx.amount, 0);
+
       const limit = (b as any).monthlyLimit || b.limit || 0;
-      const variance = limit - actual; // Positive = Under budget (save), Negative = Over budget
+      const isGoalBudget = b.type === 'saving' || b.type === 'investment';
+      const variance = isGoalBudget ? actual - limit : limit - actual;
       const usagePercent = limit > 0 ? (actual / limit) * 100 : 0;
 
-      let status: 'Aman' | 'Waspada' | 'Kritis' | 'Over Budget' = 'Aman';
+      let status: 'Aman' | 'Waspada' | 'Kritis' | 'Over Budget' | 'Tercapai' | 'Progres Baik' | 'Belum Tercapai' = 'Aman';
       let statusBg = 'bg-emerald-50 text-emerald-700 border-emerald-200';
 
-      if (usagePercent > 100) {
-        status = 'Over Budget';
-        statusBg = 'bg-rose-100 text-rose-800 border-rose-300 font-extrabold animate-pulse';
-      } else if (usagePercent >= 90) {
-        status = 'Kritis';
-        statusBg = 'bg-rose-50 text-rose-700 border-rose-200';
-      } else if (usagePercent >= 75) {
-        status = 'Waspada';
-        statusBg = 'bg-amber-50 text-amber-700 border-amber-200';
+      if (isGoalBudget) {
+        if (usagePercent >= 100) {
+          status = 'Tercapai';
+          statusBg = 'bg-emerald-50 text-emerald-700 border-emerald-200 font-extrabold';
+        } else if (usagePercent >= 75) {
+          status = 'Progres Baik';
+          statusBg = 'bg-blue-50 text-blue-700 border-blue-200';
+        } else {
+          status = 'Belum Tercapai';
+          statusBg = 'bg-amber-50 text-amber-700 border-amber-200';
+        }
+      } else {
+        if (usagePercent > 100) {
+          status = 'Over Budget';
+          statusBg = 'bg-rose-100 text-rose-800 border-rose-300 font-extrabold animate-pulse';
+        } else if (usagePercent >= 90) {
+          status = 'Kritis';
+          statusBg = 'bg-rose-50 text-rose-700 border-rose-200';
+        } else if (usagePercent >= 75) {
+          status = 'Waspada';
+          statusBg = 'bg-amber-50 text-amber-700 border-amber-200';
+        }
       }
 
       return {
@@ -359,10 +380,15 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
       };
     });
 
-    // Add unbudgeted expense categories if any
-    Object.keys(categorySpendingMap).forEach((cat) => {
-      if (!budgets.some((b) => b.category === cat)) {
-        const actual = categorySpendingMap[cat];
+    // Add unbudgeted operating expense categories if any
+    const expenseSpendingMap: Record<string, number> = {};
+    monthlyTxs.filter(isOperatingExpense).forEach((tx) => {
+      expenseSpendingMap[tx.category] = (expenseSpendingMap[tx.category] || 0) + tx.amount;
+    });
+
+    Object.keys(expenseSpendingMap).forEach((cat) => {
+      if (!budgets.some((b) => b.category.toLowerCase() === cat.toLowerCase())) {
+        const actual = expenseSpendingMap[cat];
         result.push({
           id: `unbudgeted-${cat}`,
           category: cat,
@@ -381,9 +407,9 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
     );
   }, [budgets, transactions, searchQuery]);
 
-  // Overall Budget Savings & Efficiency Summary
+  // Overall Budget Savings & Efficiency Summary (consistent with search filter)
   const overallBudgetSummary = useMemo(() => {
-    const totalBudget = budgets.reduce((sum, b) => sum + ((b as any).monthlyLimit || b.limit || 0), 0);
+    const totalBudget = budgetVsRealization.reduce((sum, b) => sum + b.budgetLimit, 0);
     const totalActual = budgetVsRealization.reduce((sum, b) => sum + b.actualSpending, 0);
     const totalVariance = totalBudget - totalActual;
     const overallUsage = totalBudget > 0 ? (totalActual / totalBudget) * 100 : 0;
@@ -394,7 +420,7 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
       totalVariance,
       overallUsage,
     };
-  }, [budgets, budgetVsRealization]);
+  }, [budgetVsRealization]);
 
   // Visual Chart Data for Budget vs Realization (Recharts)
   const budgetVsRealizationChartData = useMemo(() => {
@@ -410,10 +436,11 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
   const projectionData = useMemo(() => {
     // 1. Get average net operating cash flow of the last 3 months
     const now = new Date();
-    const threeMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 3, 1);
+    const nowEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+    const threeMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 3, 1, 0, 0, 0, 0);
     const last3MonthsTxs = transactions.filter(tx => {
-      const d = new Date(tx.date);
-      return d >= threeMonthsAgo && d <= now;
+      const d = parseLocalDate(tx.date);
+      return d !== null && d >= threeMonthsAgo && d <= nowEnd;
     });
 
     const totalIncome = last3MonthsTxs.filter(isOperatingIncome).reduce((sum, tx) => sum + tx.amount, 0);
@@ -1013,6 +1040,8 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
       {activeReport === 'income-statement' && (
         <LaporanLabaRugi
           transactions={transactions}
+          accounts={accounts}
+          masterCategories={masterCategories}
           kprCoaMapping={kprCoaMapping}
           onSelectedMonthChange={(pt: MonthlyIncomeStatementPoint) => {
             setSelectedIncomeMonthPoint((prev) =>
@@ -1075,6 +1104,7 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
             transactions={transactions}
             accounts={accounts}
             debts={debts}
+            emergencyTransactions={emergencyTransactions}
           />
         </div>
       )}

@@ -76,6 +76,9 @@ export const DebtPriorityScheduler: React.FC<DebtPrioritySchedulerProps> = ({ de
 
     const activeList = sortedDebts.map((d) => ({ ...d }));
 
+    const totalMonthlyBudget =
+      sortedDebts.reduce((s, d) => s + Math.max(0, d.minPay), 0) + Math.max(0, extraPayment);
+
     while (activeList.some((d) => d.currentBalance > 0) && month < 360) {
       month++;
 
@@ -89,14 +92,14 @@ export const DebtPriorityScheduler: React.FC<DebtPrioritySchedulerProps> = ({ de
         }
       });
 
-      // 2. Pay minimums
-      let extraCash = extraPayment;
-
+      // 2. Pay minimums & track actual minimums paid (so paid-off minimums roll over)
+      let paidMinimums = 0;
       activeList.forEach((d) => {
         if (d.currentBalance > 0) {
-          const payAmt = Math.min(d.currentBalance, d.minPay);
+          const payAmt = Math.min(d.currentBalance, Math.max(0, d.minPay));
           d.currentBalance -= payAmt;
           totalPaidAccumulated += payAmt;
+          paidMinimums += payAmt;
 
           if (d.currentBalance <= 0) {
             d.currentBalance = 0;
@@ -107,18 +110,20 @@ export const DebtPriorityScheduler: React.FC<DebtPrioritySchedulerProps> = ({ de
         }
       });
 
-      // 3. Throw extra cash at highest priority active debt
-      const targetDebt = activeList.find((d) => d.currentBalance > 0);
-      if (targetDebt && extraCash > 0) {
-        const payAmt = Math.min(targetDebt.currentBalance, extraCash);
-        targetDebt.currentBalance -= payAmt;
-        totalPaidAccumulated += payAmt;
-        extraCash -= payAmt;
+      // 3. Rollover freed minimums + extraPayment, cascading across active priority debts
+      let extraCash = Math.max(0, totalMonthlyBudget - paidMinimums);
+      for (const targetDebt of activeList) {
+        if (targetDebt.currentBalance > 0 && extraCash > 0) {
+          const payAmt = Math.min(targetDebt.currentBalance, extraCash);
+          targetDebt.currentBalance -= payAmt;
+          totalPaidAccumulated += payAmt;
+          extraCash -= payAmt;
 
-        if (targetDebt.currentBalance <= 0) {
-          targetDebt.currentBalance = 0;
-          if (debtStats[targetDebt.id].payoffMonth === 0) {
-            debtStats[targetDebt.id].payoffMonth = month;
+          if (targetDebt.currentBalance <= 0) {
+            targetDebt.currentBalance = 0;
+            if (debtStats[targetDebt.id].payoffMonth === 0) {
+              debtStats[targetDebt.id].payoffMonth = month;
+            }
           }
         }
       }

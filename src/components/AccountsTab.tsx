@@ -15,6 +15,7 @@ import {
   getTransactionAccountDelta,
   isCreditAccount,
   normalizeAbsAmount,
+  toLocalYYYYMMDD,
 } from '../utils/accountingEngine';
 
 interface AccountsTabProps {
@@ -252,7 +253,7 @@ export const AccountsTab: React.FC<AccountsTabProps> = ({
         const cardCoa = getAccountCoaMapping(card);
         const srcCoa = getAccountCoaMapping(sourceAcc);
         const ok = onAddTransaction({
-          date: new Date().toISOString().split('T')[0],
+          date: toLocalYYYYMMDD(),
           accountId: sourceAccountId,
           type: 'expense',
           category: 'Cicilan / Pelunasan Utang',

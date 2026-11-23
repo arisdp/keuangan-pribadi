@@ -22,6 +22,7 @@ import {
   decryptBackupData,
   EncryptedBackupPayload
 } from '../utils/cryptoBackup';
+import { toLocalYYYYMMDD } from '../utils/accountingEngine';
 import {
   Transaction,
   Account,
@@ -103,7 +104,7 @@ export const BackupDataModal: React.FC<BackupDataModalProps> = ({
         JSON.stringify(payload, null, 2)
       )}`;
       const downloadAnchor = document.createElement('a');
-      const dateStr = new Date().toISOString().split('T')[0];
+      const dateStr = toLocalYYYYMMDD();
       const filename = `NusantaraWealth_Backup_${currentUser?.username || 'user'}_${dateStr}_encrypted.json`;
       
       downloadAnchor.setAttribute('href', jsonString);

@@ -3,6 +3,7 @@ import {
   calculateCombinedPortfolioWealth,
   calculateFixedAssetValuation,
   syncKprDebtsToFixedAssets,
+  toLocalYYYYMMDD,
 } from './accountingEngine';
 import jsPDF from 'jspdf';
 import html2canvas from 'html2canvas';
@@ -113,7 +114,7 @@ export const exportInvestmentsToCSV = (
   const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
-  const today = new Date().toISOString().split('T')[0];
+  const today = toLocalYYYYMMDD();
 
   link.setAttribute('href', url);
   link.setAttribute('download', `Portofolio_Investasi_Nusantara_${today}.csv`);
@@ -164,7 +165,7 @@ export const exportInvestmentsToPDF = async (
           heightLeft -= pageHeight;
         }
 
-        pdf.save(`Laporan_Portofolio_Investasi_${new Date().toISOString().split('T')[0]}.pdf`);
+        pdf.save(`Laporan_Portofolio_Investasi_${toLocalYYYYMMDD()}.pdf`);
         return;
       } catch (err) {
         console.error('Failed to capture PDF canvas, fallback to generated PDF:', err);
@@ -292,5 +293,5 @@ export const exportInvestmentsToPDF = async (
     y += 8;
   });
 
-  doc.save(`Laporan_Portofolio_Investasi_${new Date().toISOString().split('T')[0]}.pdf`);
+  doc.save(`Laporan_Portofolio_Investasi_${toLocalYYYYMMDD()}.pdf`);
 };

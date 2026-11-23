@@ -3,6 +3,7 @@ import { Debt, InvestmentAsset, KprCoaMappingConfig, Transaction } from '../type
 import { AccountCOA, getStoredCoaList } from '../coaUtils';
 import { DEFAULT_KPR_COA_MAPPING, resolveEffectiveKprCoaMapping } from '../utils/kprPresets';
 import { formatterIDR } from '../utils/formatters';
+import { parseLocalDate, toLocalYYYYMMDD } from '../utils/accountingEngine';
 import { showToast } from '../utils/toast';
 import {
   AlertTriangle,
@@ -50,9 +51,9 @@ interface AdjustingEntriesPanelProps {
 }
 
 const calcDaysBetween = (startStr: string, endStr: string): number => {
-  const start = new Date(`${startStr}T00:00:00`);
-  const end = new Date(`${endStr}T00:00:00`);
-  if (isNaN(start.getTime()) || isNaN(end.getTime())) return 30;
+  const start = parseLocalDate(startStr);
+  const end = parseLocalDate(endStr);
+  if (!start || !end) return 30;
   const diffMs = end.getTime() - start.getTime();
   if (diffMs < 0) return 0;
   return Math.max(1, Math.floor(diffMs / (1000 * 60 * 60 * 24)) + 1);
@@ -68,7 +69,7 @@ export const AdjustingEntriesPanel: React.FC<AdjustingEntriesPanelProps> = ({
   onReverseAdjustment,
 }) => {
   const activeCoas = useMemo(() => (coaList && coaList.length > 0 ? coaList : getStoredCoaList()), [coaList]);
-  const todayStr = useMemo(() => new Date().toISOString().split('T')[0], []);
+  const todayStr = useMemo(() => toLocalYYYYMMDD(), []);
   const [cutoffDate, setCutoffDate] = useState<string>(todayStr);
   const [filterType, setFilterType] = useState<'all' | 'investment_depreciation' | 'debt_interest_accrual'>('all');
   const [defaultDepreciationRate, setDefaultDepreciationRate] = useState<number>(5);
@@ -106,10 +107,10 @@ export const AdjustingEntriesPanel: React.FC<AdjustingEntriesPanelProps> = ({
 
   // Compute default 30-day fallback date string
   const thirtyDaysAgoFromCutoff = useMemo(() => {
-    const d = new Date(`${cutoffDate}T00:00:00`);
-    if (isNaN(d.getTime())) return todayStr;
+    const d = parseLocalDate(cutoffDate);
+    if (!d) return todayStr;
     d.setDate(d.getDate() - 29);
-    return d.toISOString().split('T')[0];
+    return toLocalYYYYMMDD(d);
   }, [cutoffDate, todayStr]);
 
   // Build candidate adjusting entries

@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { Transaction, Account, CategoryBudget } from '../types';
+import { isOperatingExpense, isOperatingIncome, parseLocalDate } from '../utils/accountingEngine';
 import { Calculator, Sparkles, TrendingUp, PiggyBank, ArrowUpRight, CheckCircle2, Sliders, Calendar, ShieldCheck, Flame, PieChart as PieIcon } from 'lucide-react';
 import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend } from 'recharts';
 
@@ -26,15 +27,15 @@ export const WhatIfSavingsSimulator: React.FC<WhatIfSavingsSimulatorProps> = ({
 
   // Extract monthly expense categories and spending averages
   const { categoryAverages, totalMonthlyExpense } = useMemo(() => {
-    const expenseTxs = transactions.filter((t) => t.type === 'expense');
+    const expenseTxs = transactions.filter((t) => isOperatingExpense(t));
     if (expenseTxs.length === 0) {
       return { categoryAverages: [], totalMonthlyExpense: 0 };
     }
 
     // Determine total months span in dataset (at least 1)
-    const dates = expenseTxs.map((t) => t.date).sort();
-    const startDate = new Date(dates[0]);
-    const endDate = new Date(dates[dates.length - 1]);
+    const dates = expenseTxs.map((t) => t.date).filter(Boolean).sort();
+    const startDate = (dates[0] && parseLocalDate(dates[0])) || new Date();
+    const endDate = (dates[dates.length - 1] && parseLocalDate(dates[dates.length - 1])) || new Date();
     const monthDiff = Math.max(
       1,
       (endDate.getFullYear() - startDate.getFullYear()) * 12 + (endDate.getMonth() - startDate.getMonth()) + 1
@@ -75,12 +76,12 @@ export const WhatIfSavingsSimulator: React.FC<WhatIfSavingsSimulatorProps> = ({
 
   // Calculate monthly income baseline average
   const avgMonthlyIncome = useMemo(() => {
-    const incomeTxs = transactions.filter((t) => t.type === 'income');
+    const incomeTxs = transactions.filter((t) => isOperatingIncome(t));
     if (incomeTxs.length === 0) return totalMonthlyExpense * 1.3; // Default estimate
     const totalInc = incomeTxs.reduce((sum, t) => sum + t.amount, 0);
-    const dates = incomeTxs.map((t) => t.date).sort();
-    const startDate = new Date(dates[0]);
-    const endDate = new Date(dates[dates.length - 1]);
+    const dates = incomeTxs.map((t) => t.date).filter(Boolean).sort();
+    const startDate = (dates[0] && parseLocalDate(dates[0])) || new Date();
+    const endDate = (dates[dates.length - 1] && parseLocalDate(dates[dates.length - 1])) || new Date();
     const monthDiff = Math.max(
       1,
       (endDate.getFullYear() - startDate.getFullYear()) * 12 + (endDate.getMonth() - startDate.getMonth()) + 1

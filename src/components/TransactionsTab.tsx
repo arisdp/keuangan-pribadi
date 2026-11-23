@@ -15,6 +15,7 @@ import {
   getTransactionAccountDelta,
   isCreditAccount,
   normalizeAbsAmount,
+  toLocalYYYYMMDD,
 } from '../utils/accountingEngine';
 
 interface TransactionsTabProps {
@@ -172,7 +173,7 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
   };
 
   // Add Transaction Form States
-  const [date, setDate] = useState<string>(new Date().toISOString().split('T')[0]);
+  const [date, setDate] = useState<string>(toLocalYYYYMMDD());
   const [accountId, setAccountId] = useState<string>(accounts[0]?.id || '');
   const [type, setType] = useState<TransactionType>('expense');
   const [category, setCategory] = useState<string>('Makanan');
@@ -1338,11 +1339,15 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
       flat.forEach(node => {
         if (node.type !== 'type') {
           const pathStr = node.path;
-          if (pathStr.includes('Pendapatan') || node.transactionType === 'income') incomeSet.add(node.name);
+          if (node.transactionType === 'saving' || pathStr.includes('Tabungan')) savingSet.add(node.name);
+          else if (node.transactionType === 'investment' || pathStr.includes('Portofolio Investasi')) investmentSet.add(node.name);
+          else if (pathStr.includes('Pendapatan') || node.transactionType === 'income') incomeSet.add(node.name);
           else if (pathStr.includes('Pengeluaran') || node.transactionType === 'expense') expenseSet.add(node.name);
-          else if (pathStr.includes('Tabungan') || node.transactionType === 'saving') savingSet.add(node.name);
-          else if (pathStr.includes('Investasi') || node.transactionType === 'investment') investmentSet.add(node.name);
-          else if (node.type === 'item') expenseSet.add(node.name);
+          else if (node.transactionType === 'asset' || node.transactionType === 'liability' || node.transactionType === 'equity') {
+            // Balance sheet allocation / debt principal nodes stay out of operating expenseSet unless explicitly typed
+          } else if (node.type === 'item') {
+            expenseSet.add(node.name);
+          }
         }
       });
     }
@@ -3062,7 +3067,7 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
                 <button
                   type="button"
                   onClick={() => {
-                    const todayStr = new Date().toISOString().split('T')[0];
+                    const todayStr = toLocalYYYYMMDD();
                     setFilterStartDate(todayStr);
                     setFilterEndDate(todayStr);
                   }}
@@ -3074,10 +3079,10 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
                   type="button"
                   onClick={() => {
                     const today = new Date();
-                    const todayStr = today.toISOString().split('T')[0];
-                    const d = new Date();
+                    const todayStr = toLocalYYYYMMDD(today);
+                    const d = new Date(today.getTime());
                     d.setDate(today.getDate() - 6);
-                    setFilterStartDate(d.toISOString().split('T')[0]);
+                    setFilterStartDate(toLocalYYYYMMDD(d));
                     setFilterEndDate(todayStr);
                   }}
                   className="px-2 py-0.5 rounded bg-slate-100 hover:bg-blue-100 hover:text-blue-700 text-[10px] font-bold text-slate-600 cursor-pointer transition"
@@ -3088,10 +3093,10 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
                   type="button"
                   onClick={() => {
                     const today = new Date();
-                    const todayStr = today.toISOString().split('T')[0];
-                    const d = new Date();
+                    const todayStr = toLocalYYYYMMDD(today);
+                    const d = new Date(today.getTime());
                     d.setDate(today.getDate() - 29);
-                    setFilterStartDate(d.toISOString().split('T')[0]);
+                    setFilterStartDate(toLocalYYYYMMDD(d));
                     setFilterEndDate(todayStr);
                   }}
                   className="px-2 py-0.5 rounded bg-slate-100 hover:bg-blue-100 hover:text-blue-700 text-[10px] font-bold text-slate-600 cursor-pointer transition"
@@ -3105,7 +3110,7 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
                     const year = today.getFullYear();
                     const month = String(today.getMonth() + 1).padStart(2, '0');
                     setFilterStartDate(`${year}-${month}-01`);
-                    setFilterEndDate(today.toISOString().split('T')[0]);
+                    setFilterEndDate(toLocalYYYYMMDD(today));
                   }}
                   className="px-2 py-0.5 rounded bg-slate-100 hover:bg-blue-100 hover:text-blue-700 text-[10px] font-bold text-slate-600 cursor-pointer transition"
                 >

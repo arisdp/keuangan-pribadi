@@ -17,7 +17,9 @@ import {
   calculateFixedAssetValuation,
   getLiquidAccounts,
   getTransactionAccountDelta,
+  parseLocalDate,
   syncKprDebtsToFixedAssets,
+  toLocalYYYYMMDD,
 } from '../utils/accountingEngine';
 import { showToast } from '../utils/toast';
 
@@ -225,7 +227,7 @@ export const InvestmentTab: React.FC<InvestmentTabProps> = ({
     ...investmentTxs.map(tx => tx.date)
   ])).sort();
 
-  const todayStr = new Date().toISOString().split('T')[0];
+  const todayStr = toLocalYYYYMMDD();
   if (uniqueDates.length === 0) {
     uniqueDates.push(todayStr);
   } else if (!uniqueDates.includes(todayStr)) {
@@ -304,7 +306,7 @@ export const InvestmentTab: React.FC<InvestmentTabProps> = ({
 
   const trendChartData = uniqueDates.map(date => {
     const { totalValue, totalCapital, assetsSnapshot } = trendDataMap[date];
-    const dateObj = new Date(date);
+    const dateObj = parseLocalDate(date) || new Date();
     const displayDate = dateObj.toLocaleDateString('id-ID', {
       day: 'numeric',
       month: 'short'
@@ -329,9 +331,9 @@ export const InvestmentTab: React.FC<InvestmentTabProps> = ({
 
   if (trendChartData.length === 1) {
     const singlePoint = trendChartData[0];
-    const dateObj = new Date(singlePoint.date);
+    const dateObj = parseLocalDate(singlePoint.date) || new Date();
     dateObj.setDate(dateObj.getDate() - 30);
-    const prevDateStr = dateObj.toISOString().split('T')[0];
+    const prevDateStr = toLocalYYYYMMDD(dateObj);
     const prevDisplayDate = dateObj.toLocaleDateString('id-ID', {
       day: 'numeric',
       month: 'short'
@@ -537,7 +539,7 @@ export const InvestmentTab: React.FC<InvestmentTabProps> = ({
 
       const unitNameVal = inv.unitName || getDefaultUnitName(inv.category);
       const ok = onAddTransaction({
-        date: new Date().toISOString().split('T')[0],
+        date: toLocalYYYYMMDD(),
         accountId: topUpAccountId,
         type: 'investment',
         category: 'Investasi',
@@ -614,7 +616,7 @@ export const InvestmentTab: React.FC<InvestmentTabProps> = ({
       }
       const targetAcc = liquidCashAccounts.find((a) => a.id === logDividendAccountId);
       const ok = onAddTransaction({
-        date: new Date().toISOString().split('T')[0],
+        date: toLocalYYYYMMDD(),
         accountId: logDividendAccountId,
         type: 'income',
         category: 'Hasil Investasi / Dividen',
@@ -1246,7 +1248,7 @@ export const InvestmentTab: React.FC<InvestmentTabProps> = ({
               // If no price history exists yet, build points from purchase & current unit price
               if (points.length === 0) {
                 const addedDate = inv.dateAdded || '2026-01-01';
-                const today = new Date().toISOString().split('T')[0];
+                const today = toLocalYYYYMMDD();
                 const purchasePrice = inv.purchaseUnitPrice || (inv.units ? inv.balance / inv.units : inv.balance) || 0;
                 const currentPrice = inv.currentUnitPrice || inv.unitPrice || purchasePrice;
 
@@ -1287,7 +1289,7 @@ export const InvestmentTab: React.FC<InvestmentTabProps> = ({
 
             const priceChartData = allDates.map(date => {
               const dataPoint: any = { date };
-              const dateObj = new Date(date);
+              const dateObj = parseLocalDate(date) || new Date();
               dataPoint.displayDate = dateObj.toLocaleDateString('id-ID', {
                 day: 'numeric',
                 month: 'short'

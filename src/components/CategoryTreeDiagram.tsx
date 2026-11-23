@@ -28,12 +28,14 @@ export const CategoryTreeDiagram: React.FC<CategoryTreeDiagramProps> = ({
   categories,
   transactions = [],
 }) => {
-  const [filterType, setFilterType] = useState<'all' | 'equity' | 'income' | 'expense'>('all');
+  const [filterType, setFilterType] = useState<'all' | 'asset' | 'liability' | 'equity' | 'income' | 'expense'>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedNode, setSelectedNode] = useState<CategoryNode | null>(null);
 
   // State to track expanded nodes
   const [expandedNodes, setExpandedNodes] = useState<Record<string, boolean>>({
+    'type-asset': true,
+    'type-liability': true,
     'type-equity': true,
     'type-income': true,
     'type-expense': true,
@@ -125,6 +127,8 @@ export const CategoryTreeDiagram: React.FC<CategoryTreeDiagramProps> = ({
 
   const filteredRootCategories = categories.filter((cat) => {
     if (filterType === 'all') return true;
+    if (filterType === 'asset') return cat.transactionType === 'asset' || cat.id === 'type-asset';
+    if (filterType === 'liability') return cat.transactionType === 'liability' || cat.id === 'type-liability';
     if (filterType === 'equity') return cat.transactionType === 'equity' || cat.id === 'type-equity';
     if (filterType === 'income') return cat.transactionType === 'income' || cat.id === 'type-income';
     if (filterType === 'expense') return cat.transactionType === 'expense' || cat.id === 'type-expense';
@@ -140,6 +144,7 @@ export const CategoryTreeDiagram: React.FC<CategoryTreeDiagramProps> = ({
     const matchesSearch =
       !searchQuery ||
       node.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      (node.coaCode && node.coaCode.toLowerCase().includes(searchQuery.toLowerCase())) ||
       (node.children && node.children.some((c) => c.name.toLowerCase().includes(searchQuery.toLowerCase())));
 
     if (!matchesSearch) return null;
@@ -150,7 +155,15 @@ export const CategoryTreeDiagram: React.FC<CategoryTreeDiagramProps> = ({
     let iconBg = 'bg-slate-100 text-slate-600';
 
     if (node.type === 'type') {
-      if (node.transactionType === 'equity' || node.id === 'type-equity') {
+      if (node.transactionType === 'asset' || node.id === 'type-asset') {
+        rootTheme = 'border-cyan-300 bg-gradient-to-r from-cyan-50 via-sky-50 to-white text-cyan-950 shadow-sm';
+        badgeBg = 'bg-cyan-100 text-cyan-800 font-extrabold';
+        iconBg = 'bg-cyan-600 text-white';
+      } else if (node.transactionType === 'liability' || node.id === 'type-liability') {
+        rootTheme = 'border-amber-300 bg-gradient-to-r from-amber-50 via-orange-50 to-white text-amber-950 shadow-sm';
+        badgeBg = 'bg-amber-100 text-amber-800 font-extrabold';
+        iconBg = 'bg-amber-600 text-white';
+      } else if (node.transactionType === 'equity' || node.id === 'type-equity') {
         rootTheme = 'border-purple-300 bg-gradient-to-r from-purple-50 via-indigo-50 to-white text-purple-950 shadow-sm';
         badgeBg = 'bg-purple-100 text-purple-800 font-extrabold';
         iconBg = 'bg-purple-600 text-white';

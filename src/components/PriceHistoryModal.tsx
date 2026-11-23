@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { InvestmentAsset, InvestmentPriceHistory } from '../types';
+import { parseLocalDate, toLocalYYYYMMDD } from '../utils/accountingEngine';
 import { X, TrendingUp, Calendar, Plus, History, ArrowUpRight, ArrowDownRight, Tag, LineChart as LineChartIcon } from 'lucide-react';
 import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid } from 'recharts';
 
@@ -21,7 +22,7 @@ export const PriceHistoryModal: React.FC<PriceHistoryModalProps> = ({
 
   // Form State
   const [addAssetId, setAddAssetId] = useState<string>(investments[0]?.id || '');
-  const [addDate, setAddDate] = useState<string>(new Date().toISOString().split('T')[0]);
+  const [addDate, setAddDate] = useState<string>(toLocalYYYYMMDD());
   const [addUnitPrice, setAddUnitPrice] = useState<number>(0);
   const [addNote, setAddNote] = useState<string>('Pembaruan Harga Pasar');
 
@@ -46,7 +47,7 @@ export const PriceHistoryModal: React.FC<PriceHistoryModalProps> = ({
         id: `ph-default-${inv.id}`,
         assetId: inv.id,
         assetName: inv.name,
-        date: inv.dateAdded || new Date().toISOString().split('T')[0],
+        date: inv.dateAdded || toLocalYYYYMMDD(),
         unitPrice: currPrice,
         note: 'Harga Pembelian Awal',
       });
@@ -56,11 +57,11 @@ export const PriceHistoryModal: React.FC<PriceHistoryModalProps> = ({
   // Filter logs
   const filteredLogs = allLogs
     .filter((log) => selectedAssetId === 'all' || log.assetId === selectedAssetId)
-    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    .sort((a, b) => (parseLocalDate(b.date)?.getTime() ?? 0) - (parseLocalDate(a.date)?.getTime() ?? 0));
 
   // Chart data sorted chronologically
   const chartLogs = [...filteredLogs].sort(
-    (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()
+    (a, b) => (parseLocalDate(a.date)?.getTime() ?? 0) - (parseLocalDate(b.date)?.getTime() ?? 0)
   );
 
   const chartData = chartLogs.map((log) => ({

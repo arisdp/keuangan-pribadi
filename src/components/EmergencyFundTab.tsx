@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { EmergencyFundConfig, EmergencyFundTransaction } from '../types';
+import { toLocalYYYYMMDD } from '../utils/accountingEngine';
 import { FormattedNumberInput } from './FormattedNumberInput';
 import { PiggyBank, Calculator, History, AlertTriangle, ShieldCheck, TrendingUp, Info, BarChart2, LineChart as LineChartIcon } from 'lucide-react';
 import {
@@ -39,7 +40,7 @@ export const EmergencyFundTab: React.FC<EmergencyFundTabProps> = ({
   const [chartViewMode, setChartViewMode] = useState<'milestones' | 'accumulation'>('milestones');
 
   // Ledger Form State
-  const [txDate, setTxDate] = useState<string>(new Date().toISOString().split('T')[0]);
+  const [txDate, setTxDate] = useState<string>(toLocalYYYYMMDD());
   const [txType, setTxType] = useState<'addition' | 'reduction'>('addition');
   const [txAmount, setTxAmount] = useState<string>('');
   const [txLocation, setTxLocation] = useState<string>('Reksadana Pasar Uang');

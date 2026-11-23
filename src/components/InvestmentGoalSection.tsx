@@ -4,6 +4,7 @@ import { FormattedNumberInput } from './FormattedNumberInput';
 import { secureStorage } from '../utils/secureStorage';
 import { logger } from '../utils/logger';
 import { formatterIDR } from '../utils/formatters';
+import { parseLocalDate, toLocalYYYYMMDD } from '../utils/accountingEngine';
 import { showToast } from '../utils/toast';
 import {
   Target,
@@ -36,7 +37,8 @@ export function getGoalDaysRemaining(targetDateStr: string): {
   label: string;
 } {
   if (!targetDateStr) return { days: 0, status: 'upcoming', label: 'Belum diatur' };
-  const target = new Date(targetDateStr);
+  const target = parseLocalDate(targetDateStr);
+  if (!target) return { days: 0, status: 'upcoming', label: 'Tanggal tidak valid' };
   const now = new Date();
   target.setHours(0, 0, 0, 0);
   now.setHours(0, 0, 0, 0);
@@ -204,7 +206,7 @@ export const InvestmentGoalSection: React.FC<InvestmentGoalSectionProps> = ({
     setFormCurrentAmount(0);
     const futureDate = new Date();
     futureDate.setFullYear(futureDate.getFullYear() + 1);
-    setFormTargetDate(futureDate.toISOString().split('T')[0]);
+    setFormTargetDate(toLocalYYYYMMDD(futureDate));
     setFormCategory('Logam Mulia (Emas)');
     setFormLinkedAssetId('');
     setFormNotes('');
@@ -309,12 +311,17 @@ export const InvestmentGoalSection: React.FC<InvestmentGoalSectionProps> = ({
     setTopUpAmount(0);
   };
 
-  // Summary Metrics
+  // Summary Metrics (resolve linkedAssetId valuation consistently with cards)
+  const resolveGoalCurrentAmount = (goal: InvestmentGoal) =>
+    goal.linkedAssetId
+      ? investments.find((i) => i.id === goal.linkedAssetId)?.balance ?? goal.currentAmount
+      : goal.currentAmount;
+
   const totalTargetValue = goals.reduce((sum, g) => sum + g.targetAmount, 0);
-  const totalAccumulatedValue = goals.reduce((sum, g) => sum + g.currentAmount, 0);
+  const totalAccumulatedValue = goals.reduce((sum, g) => sum + resolveGoalCurrentAmount(g), 0);
   const overallCompletionPct =
     totalTargetValue > 0 ? Math.min(100, (totalAccumulatedValue / totalTargetValue) * 100) : 0;
-  const completedGoalsCount = goals.filter((g) => g.currentAmount >= g.targetAmount).length;
+  const completedGoalsCount = goals.filter((g) => resolveGoalCurrentAmount(g) >= g.targetAmount).length;
 
   return (
     <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-6 shadow-sm space-y-6">

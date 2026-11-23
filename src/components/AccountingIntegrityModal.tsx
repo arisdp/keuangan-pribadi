@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { Account, Transaction } from '../types';
 import { CategoryNode } from '../categoryHierarchy';
+import { toLocalYYYYMMDD } from '../utils/accountingEngine';
 import {
   getStoredCoaList,
   getAccountCoaMapping,
@@ -623,7 +624,7 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
     const encodedUri = encodeURI(csvContent);
     const link = document.createElement('a');
     link.setAttribute('href', encodedUri);
-    link.setAttribute('download', `Log_Perubahan_MasterData_${new Date().toISOString().split('T')[0]}.csv`);
+    link.setAttribute('download', `Log_Perubahan_MasterData_${toLocalYYYYMMDD()}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -1116,7 +1117,7 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
 
     if (!onApplyAdjustmentEntries) return;
 
-    const todayStr = new Date().toISOString().split('T')[0];
+    const todayStr = toLocalYYYYMMDD();
     const newTxEntries: Omit<Transaction, 'id'>[] = proposedAdjustmentEntries.map((e) => ({
       date: todayStr,
       accountId: e.accountId,

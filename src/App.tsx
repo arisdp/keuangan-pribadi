@@ -22,6 +22,7 @@ import {
   normalizeAbsAmount,
   resolveDebtInstallmentAccounting,
   syncKprDebtsToFixedAssets,
+  toLocalYYYYMMDD,
   updateAccountMetadataAndStartingBalance,
 } from './utils/accountingEngine';
 import { secureStorage } from './utils/secureStorage';
@@ -998,7 +999,7 @@ export default function App() {
     }
 
     const isEmergencyAddition =
-      newTx.category === 'Tabungan Darurat' && (newTx.type === 'saving' || newTx.type === 'income');
+      newTx.category === 'Tabungan Darurat' && newTx.type === 'saving';
     const isEmergencyReduction = newTx.category === 'Pencairan Dana Darurat';
     const resolvedEmergencyTxId =
       isEmergencyAddition || isEmergencyReduction
@@ -1380,7 +1381,7 @@ export default function App() {
       );
     }
 
-    // 3. Investment Revert (by linkedInvestmentId first, preserving unit quantities)
+    // 3. Investment Revert (by linkedInvestmentId first, preserving unit quantities & market valuation)
     if (targetTx.linkedInvestmentAction === 'buy') {
       setInvestments((prevInv) =>
         prevInv
@@ -1404,7 +1405,13 @@ export default function App() {
 
               const newQty = Math.max(0, currentQty - qtyToRemove);
               const newCap = Math.max(0, currentCap - targetTx.amount);
-              const newBal = Math.max(0, inv.balance - targetTx.amount);
+              const effectiveCurrentPrice =
+                inv.currentUnitPrice ||
+                inv.unitPrice ||
+                (currentQty > 0 ? inv.balance / currentQty : unitPx);
+              const newBal = newQty > 0 ? Math.max(0, newQty * effectiveCurrentPrice) : 0;
+              const nextAvgBuyPrice =
+                newQty > 0 ? newCap / newQty : inv.purchaseUnitPrice;
 
               return {
                 ...inv,
@@ -1412,6 +1419,7 @@ export default function App() {
                 units: newQty,
                 balance: newBal,
                 initialCapital: newCap,
+                ...(nextAvgBuyPrice !== undefined ? { purchaseUnitPrice: nextAvgBuyPrice } : {}),
               };
             }
             return inv;
@@ -1437,14 +1445,25 @@ export default function App() {
                 : inv.balance > 0 && currentQty > 0
                 ? (currentQty * targetTx.amount) / inv.balance
                 : 0;
-            const avgBuy = inv.purchaseUnitPrice ?? (currentQty > 0 ? currentCap / currentQty : unitPx);
-            const capToRestore = qtyToRestore > 0 && avgBuy > 0 ? qtyToRestore * avgBuy : targetTx.amount;
+            const avgBuy =
+              inv.purchaseUnitPrice ?? (currentQty > 0 ? currentCap / currentQty : unitPx);
+            const capToRestore =
+              qtyToRestore > 0 && avgBuy > 0 ? qtyToRestore * avgBuy : targetTx.amount;
+            const restoredQty = currentQty + qtyToRestore;
+            const effectiveCurrentPrice =
+              inv.currentUnitPrice ||
+              inv.unitPrice ||
+              (currentQty > 0 ? inv.balance / currentQty : unitPx);
+            const restoredBal =
+              restoredQty > 0 && effectiveCurrentPrice > 0
+                ? restoredQty * effectiveCurrentPrice
+                : inv.balance + targetTx.amount;
 
             return {
               ...inv,
-              quantity: currentQty + qtyToRestore,
-              units: currentQty + qtyToRestore,
-              balance: inv.balance + targetTx.amount,
+              quantity: restoredQty,
+              units: restoredQty,
+              balance: restoredBal,
               initialCapital: currentCap + capToRestore,
             };
           }
@@ -1487,7 +1506,7 @@ export default function App() {
     toAccountId: string,
     description: string
   ) => {
-    const dateStr = new Date().toISOString().split('T')[0];
+    const dateStr = toLocalYYYYMMDD();
 
     const outTxId = `tx-${Date.now()}-out`;
     const inTxId = `tx-${Date.now()}-in`;
@@ -1553,8 +1572,7 @@ export default function App() {
     const target = recurringTransactions.find((r) => r.id === id);
     if (!target) return;
 
-    const now = new Date();
-    const dateStr = now.toISOString().split('T')[0];
+    const dateStr = toLocalYYYYMMDD();
 
     const newTx: Transaction = {
       id: `tx-rec-manual-${Date.now()}`,
@@ -1787,7 +1805,7 @@ export default function App() {
       const bankCoa = getAccountCoaMapping(sourceAcc, getStoredCoaList());
       const ok = handleAddTransaction({
         id: preTxId,
-        date: payload.acquisitionDate || new Date().toISOString().split('T')[0],
+        date: payload.acquisitionDate || toLocalYYYYMMDD(),
         accountId: sourceAcc.id,
         type: 'expense',
         category: 'Pembelian Aset Tetap',
@@ -1807,9 +1825,9 @@ export default function App() {
       name: payload.name.trim(),
       category: payload.category,
       purchasePrice: normalizedPrice,
-      acquisitionDate: payload.acquisitionDate || new Date().toISOString().split('T')[0],
+      acquisitionDate: payload.acquisitionDate || toLocalYYYYMMDD(),
       annualRatePct: Number.isFinite(payload.annualRatePct) ? payload.annualRatePct : 0,
-      rateEffectiveDate: payload.acquisitionDate || new Date().toISOString().split('T')[0],
+      rateEffectiveDate: payload.acquisitionDate || toLocalYYYYMMDD(),
       fundingMode: payload.fundingMode,
       linkedAccountId: payload.fundingMode === 'account_deduction' ? payload.linkedAccountId : undefined,
       linkedTransactionId: linkedTxId,
@@ -2025,7 +2043,7 @@ export default function App() {
     if (resolvedAccountId) {
       const targetAcc = accounts.find((a) => a.id === resolvedAccountId);
       if (targetAcc) {
-        const todayStr = new Date().toISOString().split('T')[0];
+        const todayStr = toLocalYYYYMMDD();
         const isKprDebt = newDebt.category === 'KPR / Properti' || Boolean(newDebt.kprScheme);
         const coaList = getStoredCoaList();
         const bankCoa = getAccountCoaMapping(targetAcc, coaList);

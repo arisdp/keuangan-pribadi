@@ -23,6 +23,37 @@ export const ENGINE_DEFAULT_KPR_COA_MAPPING: KprCoaMappingConfig = {
   interestExpenseCategory: 'Beban Bunga KPR',
 };
 
+/**
+ * Mengubah objek Date menjadi string YYYY-MM-DD menggunakan komponen tanggal LOKAL
+ * (menghindari pergeseran mundur 1 hari akibat konversi zona waktu UTC).
+ */
+export function toLocalYYYYMMDD(date: Date = new Date()): string {
+  const safeDate = Number.isNaN(date.getTime()) ? new Date() : date;
+  const year = safeDate.getFullYear();
+  const month = String(safeDate.getMonth() + 1).padStart(2, '0');
+  const day = String(safeDate.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+/**
+ * Mengurai string tanggal (YYYY-MM-DD, DD/MM/YYYY, atau ISO timestamp) menjadi
+ * objek Date pada tengah malam waktu LOKAL tanpa pergeseran zona waktu UTC.
+ */
+export function parseLocalDate(rawDate: unknown): Date | null {
+  if (rawDate instanceof Date) {
+    return Number.isNaN(rawDate.getTime())
+      ? null
+      : new Date(rawDate.getFullYear(), rawDate.getMonth(), rawDate.getDate());
+  }
+  const normalized = normalizeLedgerDateYYYYMMDD(rawDate);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
+    return null;
+  }
+  const [y, m, d] = normalized.split('-').map((n) => parseInt(n, 10));
+  const dt = new Date(y, (m || 1) - 1, d || 1);
+  return Number.isNaN(dt.getTime()) ? null : dt;
+}
+
 export function resolveEffectiveKprCoaForEngine(
   baseMapping?: Partial<KprCoaMappingConfig>,
   debtSnapshot?: Partial<KprCoaMappingConfig>
@@ -100,7 +131,7 @@ export function calculateKprInstallmentBreakdown(params: {
   const safePay = normalizeAbsAmount(paymentAmount);
 
   let elapsedMonths = 1;
-  const payDateStr = (paymentDate || new Date().toISOString().split('T')[0]).slice(0, 10);
+  const payDateStr = (paymentDate || toLocalYYYYMMDD()).slice(0, 10);
   const startStr = (debt.startDate || '').slice(0, 10);
   if (/^\d{4}-\d{2}-\d{2}$/.test(startStr) && /^\d{4}-\d{2}-\d{2}$/.test(payDateStr)) {
     const [sy, sm] = startStr.split('-').map(Number);
@@ -377,7 +408,7 @@ export function syncKprDebtsToFixedAssets(
   const safeFixedAssets = Array.isArray(fixedAssets) ? fixedAssets : [];
   const safeDebts = Array.isArray(debts) ? debts : [];
   const defaultDate =
-    normalizeLedgerDateYYYYMMDD(todayStr) || new Date().toISOString().split('T')[0];
+    normalizeLedgerDateYYYYMMDD(todayStr) || toLocalYYYYMMDD();
 
   const kprDebts = safeDebts.filter((d) => isKprDebtRecord(d));
   const kprDebtMap = new Map<string, Debt>();
@@ -475,7 +506,7 @@ export function calculateFixedAssetValuation(
   asOfDateStr?: string
 ): FixedAssetValuationResult {
   const safeAsOfStr =
-    normalizeLedgerDateYYYYMMDD(asOfDateStr) || new Date().toISOString().split('T')[0];
+    normalizeLedgerDateYYYYMMDD(asOfDateStr) || toLocalYYYYMMDD();
   const linkedDebt = asset.linkedDebtId
     ? (debts || []).find((d) => d.id === asset.linkedDebtId)
     : undefined;
@@ -606,7 +637,7 @@ function calculateSingleAssetDepreciation(
   periodDaysOrOptions?: number | CalculateAssetDepreciationOptions
 ): FixedAssetDepreciationResult {
   const safeAsOfStr =
-    normalizeLedgerDateYYYYMMDD(asOfDateStr) || new Date().toISOString().split('T')[0];
+    normalizeLedgerDateYYYYMMDD(asOfDateStr) || toLocalYYYYMMDD();
   const valuation = calculateFixedAssetValuation(asset, debts, safeAsOfStr);
   const effectiveStartDate =
     normalizeLedgerDateYYYYMMDD(asset.rateEffectiveDate || asset.acquisitionDate) || safeAsOfStr;
@@ -711,7 +742,7 @@ export function calculateAssetDepreciation(
 ): FixedAssetDepreciationResult | BatchFixedAssetDepreciationResult {
   if (Array.isArray(assetOrAssets)) {
     const safeAsOfStr =
-      normalizeLedgerDateYYYYMMDD(asOfDateStr) || new Date().toISOString().split('T')[0];
+      normalizeLedgerDateYYYYMMDD(asOfDateStr) || toLocalYYYYMMDD();
     const items: FixedAssetDepreciationResult[] = [];
     const draftAdjustments: BatchFixedAssetDepreciationDraftEntry[] = [];
     let totalDepreciationAmount = 0;
@@ -788,7 +819,7 @@ export function calculateFixedAssetLifecycleMetrics(
   const safeAsOfStr =
     normalizeLedgerDateYYYYMMDD(asOfDateStr) ||
     depreciation?.asOfDate ||
-    new Date().toISOString().split('T')[0];
+    toLocalYYYYMMDD();
   const safeAcqStr = normalizeLedgerDateYYYYMMDD(asset.acquisitionDate) || safeAsOfStr;
 
   const asOfMs = Date.parse(`${safeAsOfStr}T00:00:00Z`);
@@ -1043,7 +1074,7 @@ export function computePendingYearEndFixedAssetDepreciations(
   todayStr?: string
 ): PendingYearEndDepreciationResult {
   const safeTodayStr =
-    normalizeLedgerDateYYYYMMDD(todayStr) || new Date().toISOString().split('T')[0];
+    normalizeLedgerDateYYYYMMDD(todayStr) || toLocalYYYYMMDD();
   const currentYear = parseInt(safeTodayStr.slice(0, 4), 10);
   if (!Number.isFinite(currentYear)) {
     return {
@@ -2389,7 +2420,11 @@ function rollbackAssetsAndDebtsAtDate(
           const principalPart = tx.linkedKprBreakdown
             ? Math.max(0, Number(tx.linkedKprBreakdown.principalPart) || 0)
             : amt;
-          rolledAssets += amt;
+          if (onCreditCard) {
+            rolledDebts -= amt;
+          } else {
+            rolledAssets += amt;
+          }
           rolledDebts += principalPart;
           break;
         }
@@ -2523,7 +2558,7 @@ export function calculateNetWorthHistory6Months(
 
   const safeTxs = Array.isArray(transactions) ? transactions : [];
   const safeTodayStr =
-    normalizeLedgerDateYYYYMMDD(systemTodayStr) || new Date().toISOString().split('T')[0];
+    normalizeLedgerDateYYYYMMDD(systemTodayStr) || toLocalYYYYMMDD();
   const baseYear = parseInt(safeTodayStr.slice(0, 4), 10);
   const baseMonth = parseInt(safeTodayStr.slice(5, 7), 10); // 1..12
 
@@ -2640,7 +2675,7 @@ export function calculateNetWorthTrendWithProjection(
 ): NetWorthTrendWithProjectionResult {
   const safeTxs = Array.isArray(transactions) ? transactions : [];
   const safeTodayStr =
-    normalizeLedgerDateYYYYMMDD(systemTodayStr) || new Date().toISOString().split('T')[0];
+    normalizeLedgerDateYYYYMMDD(systemTodayStr) || toLocalYYYYMMDD();
 
   const hist = calculateNetWorthHistory6Months(
     safeTxs,
@@ -3006,7 +3041,7 @@ export function calculateWeeklyFinancialPriorities(params: {
   } = params;
 
   const safeTodayStr =
-    normalizeLedgerDateYYYYMMDD(systemTodayStr) || new Date().toISOString().split('T')[0];
+    normalizeLedgerDateYYYYMMDD(systemTodayStr) || toLocalYYYYMMDD();
   const weekStartStr = shiftDateStringDays(safeTodayStr, -6);
   const prevWeekStartStr = shiftDateStringDays(safeTodayStr, -13);
   const prevWeekEndStr = shiftDateStringDays(safeTodayStr, -7);
@@ -3460,10 +3495,21 @@ export function calculateWeeklyFinancialPriorities(params: {
   };
 }
 
+export interface MonthlyCategoryTransactionItem {
+  id: string;
+  date: string;
+  description: string;
+  accountId: string;
+  amount: number;
+  isKprInterestSplit?: boolean;
+  isAdjustment?: boolean;
+}
+
 export interface MonthlyIncomeCategoryBreakdown {
   category: string;
   amount: number;
   percentage: number;
+  transactions: MonthlyCategoryTransactionItem[];
 }
 
 export interface MonthlyIncomeStatementPoint {
@@ -3564,15 +3610,36 @@ export function calculateMonthlyIncomeStatementSeries(
 
     const incomeMap: Record<string, number> = {};
     const expenseMap: Record<string, number> = {};
+    const incomeTxMap: Record<string, MonthlyCategoryTransactionItem[]> = {};
+    const expenseTxMap: Record<string, MonthlyCategoryTransactionItem[]> = {};
 
     for (const tx of monthTxs) {
       const amt = normalizeAbsAmount(tx.amount);
+      const normDate = normalizeLedgerDateYYYYMMDD(tx.date) || tx.date;
       if (isOperatingIncome(tx)) {
         const cat = tx.category || 'Pendapatan Lainnya';
         incomeMap[cat] = (incomeMap[cat] || 0) + amt;
+        if (!incomeTxMap[cat]) incomeTxMap[cat] = [];
+        incomeTxMap[cat].push({
+          id: tx.id,
+          date: normDate,
+          description: tx.description || cat,
+          accountId: tx.accountId,
+          amount: amt,
+          isAdjustment: tx.isAdjustment,
+        });
       } else if (isOperatingExpense(tx)) {
         const cat = tx.category || 'Pengeluaran Lainnya';
         expenseMap[cat] = (expenseMap[cat] || 0) + amt;
+        if (!expenseTxMap[cat]) expenseTxMap[cat] = [];
+        expenseTxMap[cat].push({
+          id: tx.id,
+          date: normDate,
+          description: tx.description || cat,
+          accountId: tx.accountId,
+          amount: amt,
+          isAdjustment: tx.isAdjustment,
+        });
       } else if (classifyTransaction(tx) === 'debt_principal_pay' && tx.linkedKprBreakdown) {
         const interestPart = Math.max(0, Number(tx.linkedKprBreakdown.interestPart) || 0);
         if (interestPart > 0) {
@@ -3584,6 +3651,15 @@ export function calculateMonthlyIncomeStatementSeries(
             'Beban Bunga KPR';
           const interestCat = `${baseCat} [${coaCode}]`;
           expenseMap[interestCat] = (expenseMap[interestCat] || 0) + interestPart;
+          if (!expenseTxMap[interestCat]) expenseTxMap[interestCat] = [];
+          expenseTxMap[interestCat].push({
+            id: `${tx.id}-kpr-int`,
+            date: normDate,
+            description: tx.description ? `${tx.description} (Porsi Bunga)` : `${baseCat} (Porsi Bunga)`,
+            accountId: tx.accountId,
+            amount: interestPart,
+            isKprInterestSplit: true,
+          });
         }
       }
     }
@@ -3593,11 +3669,15 @@ export function calculateMonthlyIncomeStatementSeries(
     const netProfitLoss = totalIncome - totalExpense;
     const marginPct = totalIncome > 0 ? (netProfitLoss / totalIncome) * 100 : 0;
 
+    const sortByDateDesc = (a: MonthlyCategoryTransactionItem, b: MonthlyCategoryTransactionItem) =>
+      b.date.localeCompare(a.date);
+
     const incomeCategories: MonthlyIncomeCategoryBreakdown[] = Object.entries(incomeMap)
       .map(([category, amount]) => ({
         category,
         amount,
         percentage: totalIncome > 0 ? (amount / totalIncome) * 100 : 0,
+        transactions: (incomeTxMap[category] || []).slice().sort(sortByDateDesc),
       }))
       .sort((a, b) => b.amount - a.amount);
 
@@ -3606,6 +3686,7 @@ export function calculateMonthlyIncomeStatementSeries(
         category,
         amount,
         percentage: totalExpense > 0 ? (amount / totalExpense) * 100 : 0,
+        transactions: (expenseTxMap[category] || []).slice().sort(sortByDateDesc),
       }))
       .sort((a, b) => b.amount - a.amount);
 

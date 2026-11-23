@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Transaction, CategoryBudget, Debt, EmergencyFundConfig, AIAnalysisResult, AIMonthlyComparisonResult, AICategoryConsolidationResult, CategoryConsolidationGroup, InvestmentAsset, Account } from '../types';
 import { Sparkles, Loader2, ArrowRightLeft, ShieldCheck, AlertTriangle, ArrowUpRight, ArrowDownRight, CheckCircle2, ChevronRight, HelpCircle, TrendingUp, TrendingDown, Coins, Percent, PiggyBank, Wallet, Calendar, Scale, Flame, Snowflake, Zap, Award, ListOrdered, Layers, ArrowRight, GitMerge } from 'lucide-react';
 import { CategoryNode, DEFAULT_CATEGORY_HIERARCHY, flattenCategoryHierarchy } from '../categoryHierarchy';
-import { isOperatingExpense } from '../utils/accountingEngine';
+import { getAccountCreditBill, getCreditAccounts, isOperatingExpense, isOperatingIncome, parseLocalDate } from '../utils/accountingEngine';
 import { showToast } from '../utils/toast';
 import { FormattedNumberInput } from './FormattedNumberInput';
 import { WhatIfSavingsSimulator } from './WhatIfSavingsSimulator';
@@ -91,6 +91,9 @@ export function runDebtPayoffSimulation(
   let totalPaid = 0;
   const maxMonths = 360; // 30 years cap
 
+  const totalMonthlyBudget =
+    simDebts.reduce((s, d) => s + Math.max(0, d.minPayment), 0) + Math.max(0, extraMonthly);
+
   while (simDebts.some((d) => d.balance > 0) && month < maxMonths) {
     month++;
 
@@ -105,20 +108,23 @@ export function runDebtPayoffSimulation(
       }
     }
 
-    // 2. Minimum payments across active debts
+    // 2. Minimum payments across active debts (track actual minimum cash paid for rollover)
+    let paidMinimums = 0;
     for (const debt of simDebts) {
       if (debt.balance > 0) {
-        const pay = Math.min(debt.balance, debt.minPayment);
+        const pay = Math.min(debt.balance, Math.max(0, debt.minPayment));
         debt.balance -= pay;
         totalPaid += pay;
+        paidMinimums += pay;
         if (debt.balance <= 0 && debt.payoffMonth === 0) {
+          debt.balance = 0;
           debt.payoffMonth = month;
         }
       }
     }
 
-    // 3. Extra allocation applied to top priority active debt
-    let extraRemaining = extraMonthly;
+    // 3. Rollover freed minimums + extraMonthly, cascading across active priority debts
+    let extraRemaining = Math.max(0, totalMonthlyBudget - paidMinimums);
     for (const debt of simDebts) {
       if (debt.balance > 0 && extraRemaining > 0) {
         const extraPay = Math.min(debt.balance, extraRemaining);
@@ -126,9 +132,9 @@ export function runDebtPayoffSimulation(
         totalPaid += extraPay;
         extraRemaining -= extraPay;
         if (debt.balance <= 0 && debt.payoffMonth === 0) {
+          debt.balance = 0;
           debt.payoffMonth = month;
         }
-        break; // apply extra to top priority first
       }
     }
   }
@@ -448,17 +454,18 @@ export const AiAnalysisTab: React.FC<AiAnalysisTabProps> = ({
       };
     }
 
-    const dates = expenseTxs.map(t => new Date(t.date).getTime()).sort((a, b) => b - a);
+    const getTxTime = (tx: Transaction) => parseLocalDate(tx.date)?.getTime() ?? 0;
+    const dates = expenseTxs.map(getTxTime).filter(Boolean).sort((a, b) => b - a);
     const latestMs = dates[0] || Date.now();
     const ONE_DAY = 24 * 60 * 60 * 1000;
 
     const currentWeekTxs = expenseTxs.filter(t => {
-      const diff = latestMs - new Date(t.date).getTime();
+      const diff = latestMs - getTxTime(t);
       return diff >= 0 && diff < 7 * ONE_DAY;
     });
 
     const prev3WeeksTxs = expenseTxs.filter(t => {
-      const diff = latestMs - new Date(t.date).getTime();
+      const diff = latestMs - getTxTime(t);
       return diff >= 7 * ONE_DAY && diff < 28 * ONE_DAY;
     });
 
@@ -467,12 +474,12 @@ export const AiAnalysisTab: React.FC<AiAnalysisTabProps> = ({
     const prevWeekAvgTotal = Math.round(prev3WeeksTotal / 3);
 
     const currentMonthTxs = expenseTxs.filter(t => {
-      const diff = latestMs - new Date(t.date).getTime();
+      const diff = latestMs - getTxTime(t);
       return diff >= 0 && diff < 30 * ONE_DAY;
     });
 
     const prev2MonthsTxs = expenseTxs.filter(t => {
-      const diff = latestMs - new Date(t.date).getTime();
+      const diff = latestMs - getTxTime(t);
       return diff >= 30 * ONE_DAY && diff < 90 * ONE_DAY;
     });
 
@@ -538,7 +545,23 @@ export const AiAnalysisTab: React.FC<AiAnalysisTabProps> = ({
   const [selectedDebtStrategy, setSelectedDebtStrategy] = useState<'avalanche' | 'snowball'>('avalanche');
 
   const debtAnalysis = React.useMemo(() => {
-    const activeDebts = debts.filter((d) => d.balance > 0);
+    const creditAccountDebts: Debt[] = getCreditAccounts(accounts)
+      .filter((acc) => getAccountCreditBill(acc) > 0)
+      .map((acc) => {
+        const bill = getAccountCreditBill(acc);
+        return {
+          id: `acc-debt-${acc.id}`,
+          name: `${acc.name} (Tagihan)`,
+          balance: bill,
+          interestRate: acc.interestRate ?? 21,
+          minPayment: acc.minPayment ?? Math.max(Math.round(bill * 0.1), 50000),
+          purpose: 'consumptive',
+          category: acc.type === 'credit-card' ? 'Kartu Kredit' : 'PayLater',
+          dueDay: acc.dueDay,
+        };
+      });
+
+    const activeDebts = [...debts.filter((d) => d.balance > 0), ...creditAccountDebts];
     const totalDebtBalance = activeDebts.reduce((sum, d) => sum + d.balance, 0);
     const totalMinPayment = activeDebts.reduce((sum, d) => sum + (d.minPayment || 0), 0);
 
@@ -572,7 +595,7 @@ export const AiAnalysisTab: React.FC<AiAnalysisTabProps> = ({
       monthsSavedByAvalanche,
       recommendedStrategy,
     };
-  }, [debts, extraDebtPayoff]);
+  }, [debts, accounts, extraDebtPayoff]);
 
   // --- KALKULATOR ZAKAT STATES & CALCULATIONS ---
   const [zakatTab, setZakatTab] = useState<'mal' | 'profesi'>('mal');
@@ -599,16 +622,19 @@ export const AiAnalysisTab: React.FC<AiAnalysisTabProps> = ({
   // Total Harta untuk Zakat Mal (Kas + Investasi + Dana Darurat)
   const currentHarta = customHarta !== null ? customHarta : (totalCashBank + totalInvestmentsVal + totalEmergencyVal);
 
-  // Pendapatan bulanan riil dari transaksi masuk (misal di simulasi bulan Juli 2026 atau terbaru)
+  // Pendapatan operasional bulanan riil dari bulan aktif terbaru
   const monthlyIncomeVal = React.useMemo(() => {
-    const july2026Txs = transactions.filter(tx => tx.type === 'income' && tx.date.startsWith('2026-07'));
-    if (july2026Txs.length > 0) {
-      return july2026Txs.reduce((sum, tx) => sum + tx.amount, 0);
-    }
-    // Jika tidak ada data Juli, cari pendapatan bulan apa saja yang tercatat
-    const allIncomes = transactions.filter(tx => tx.type === 'income');
-    if (allIncomes.length > 0) {
-      return allIncomes.reduce((sum, tx) => sum + tx.amount, 0);
+    const monthlyTotals: Record<string, number> = {};
+    transactions.forEach((tx) => {
+      if (!isOperatingIncome(tx)) return;
+      const dt = parseLocalDate(tx.date);
+      if (!dt) return;
+      const ym = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}`;
+      monthlyTotals[ym] = (monthlyTotals[ym] || 0) + Math.abs(tx.amount);
+    });
+    const sortedKeys = Object.keys(monthlyTotals).sort();
+    if (sortedKeys.length > 0) {
+      return monthlyTotals[sortedKeys[sortedKeys.length - 1]];
     }
     return 0;
   }, [transactions]);

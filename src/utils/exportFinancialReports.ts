@@ -19,6 +19,7 @@ import {
   getAccountCreditBill,
   getCreditAccounts,
   getLiquidAccounts,
+  toLocalYYYYMMDD,
 } from './accountingEngine';
 import { formatterIDR } from './formatters';
 import { showToast } from './toast';
@@ -122,7 +123,7 @@ export const exportIncomeStatementToCSV = (
 
   csv += `SURPLUS / DEFISIT OPERASIONAL BERSIH (NET OPERATING INCOME),${netSurplus}\n`;
 
-  downloadBlob(csv, `Laporan_Laba_Rugi_${new Date().toISOString().split('T')[0]}.csv`, 'text/csv;charset=utf-8;');
+  downloadBlob(csv, `Laporan_Laba_Rugi_${toLocalYYYYMMDD()}.csv`, 'text/csv;charset=utf-8;');
 };
 
 // 2. Export Neraca (Balance Sheet) to CSV
@@ -178,7 +179,7 @@ export const exportBalanceSheetToCSV = (
   csv += `EKUITAS BERSIH (NET WORTH = ASET - KEWAJIBAN),${data.equity}\n`;
   csv += `STATUS BALANCE,${data.isBalanced ? 'BALANCED (SEIMBANG)' : 'UNBALANCED'}\n`;
 
-  downloadBlob(csv, `Laporan_Neraca_${new Date().toISOString().split('T')[0]}.csv`, 'text/csv;charset=utf-8;');
+  downloadBlob(csv, `Laporan_Neraca_${toLocalYYYYMMDD()}.csv`, 'text/csv;charset=utf-8;');
 };
 
 // 3. Export Laporan Arus Kas (Cash Flow) to CSV
@@ -215,7 +216,7 @@ export const exportCashFlowToCSV = (data: CashFlowExportData) => {
     csv += `CATATAN NON-KAS: Belanja via Kartu Kredit / PayLater,${data.nonCashCreditOutflows}\n`;
   }
 
-  downloadBlob(csv, `Laporan_Arus_Kas_${new Date().toISOString().split('T')[0]}.csv`, 'text/csv;charset=utf-8;');
+  downloadBlob(csv, `Laporan_Arus_Kas_${toLocalYYYYMMDD()}.csv`, 'text/csv;charset=utf-8;');
 };
 
 // 4. Export Budget vs Realization to CSV
@@ -228,7 +229,7 @@ export const exportBudgetRealizationToCSV = (items: BudgetRealizationExportData[
     csv += `"${item.category}",${item.limit},${item.actual},${item.variance},${item.usagePercent.toFixed(1)}%,"${item.status}"\n`;
   });
 
-  downloadBlob(csv, `Analisis_Budget_vs_Realisasi_${new Date().toISOString().split('T')[0]}.csv`, 'text/csv;charset=utf-8;');
+  downloadBlob(csv, `Analisis_Budget_vs_Realisasi_${toLocalYYYYMMDD()}.csv`, 'text/csv;charset=utf-8;');
 };
 
 // 5. Generic PDF Exporter with Official Header Branding
@@ -273,7 +274,7 @@ export const exportReportSectionToPDF = async (
       heightLeft -= pageHeight;
     }
 
-    pdf.save(`${reportTitle.replace(/\s+/g, '_')}_${new Date().toISOString().split('T')[0]}.pdf`);
+    pdf.save(`${reportTitle.replace(/\s+/g, '_')}_${toLocalYYYYMMDD()}.pdf`);
   } catch (err) {
     console.error('Failed to export PDF:', err);
     showToast({

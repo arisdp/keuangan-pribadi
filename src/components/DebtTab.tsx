@@ -15,6 +15,8 @@ import {
   getTransactionAccountDelta,
   isCreditAccount,
   normalizeAbsAmount,
+  parseLocalDate,
+  toLocalYYYYMMDD,
 } from '../utils/accountingEngine';
 import {
   Calculator,
@@ -49,7 +51,8 @@ export function getDaysUntilDue(dueDate?: string, dueDay?: number) {
   today.setHours(0, 0, 0, 0);
 
   if (dueDate) {
-    const due = new Date(dueDate);
+    const due = parseLocalDate(dueDate);
+    if (!due) return { days: null, text: '-', status: 'none' as const };
     due.setHours(0, 0, 0, 0);
     const diffTime = due.getTime() - today.getTime();
     const days = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
@@ -558,7 +561,7 @@ export const DebtTab: React.FC<DebtTabProps> = ({
       return;
     }
 
-    const todayDateStr = new Date().toISOString().split('T')[0];
+    const todayDateStr = toLocalYYYYMMDD();
     const debtPayload: Omit<Debt, 'id'> = {
       name: name.trim(),
       balance: b,
@@ -610,7 +613,7 @@ export const DebtTab: React.FC<DebtTabProps> = ({
     const effectiveApr = Number(kprCalculation.effectiveApr.toFixed(2));
     const safeDueDay = Math.min(31, Math.max(1, Math.round(kprDueDay || 10)));
     const principalAmt = Math.round(kprCalculation.principal);
-    const todayDateStr = new Date().toISOString().split('T')[0];
+    const todayDateStr = toLocalYYYYMMDD();
 
     const kprPayload: Omit<Debt, 'id'> = {
       name: cleanName,

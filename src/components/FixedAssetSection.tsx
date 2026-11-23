@@ -15,6 +15,7 @@ import {
   getTransactionAccountDelta,
   isCreditAccount,
   syncKprDebtsToFixedAssets,
+  toLocalYYYYMMDD,
 } from '../utils/accountingEngine';
 import { formatterIDR } from '../utils/formatters';
 import { FormattedNumberInput } from './FormattedNumberInput';
@@ -121,7 +122,7 @@ export const FixedAssetSection: React.FC<FixedAssetSectionProps> = ({
   onSyncAssetDepreciation,
   showCombinedBanner = true,
 }) => {
-  const todayStr = new Date().toISOString().split('T')[0];
+  const todayStr = toLocalYYYYMMDD();
 
   const syncedFixedAssets = useMemo(
     () => syncKprDebtsToFixedAssets(fixedAssets, debts, todayStr),

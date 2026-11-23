@@ -16,10 +16,13 @@ import {
   CategoryNode,
   flattenCategoryHierarchy,
   addCategoryNode,
+  updateCategoryNodeCoa,
   deleteCategoryNode,
   renameCategoryNode,
   findCategoryNode,
   mergeMissingDefaultCategories,
+  resolveCategoryCoaInfo,
+  getCategoriesLinkedToCoa,
 } from '../categoryHierarchy';
 import { Account, Transaction, KprPreset, KprCoaMappingConfig } from '../types';
 import { DEFAULT_KPR_PRESETS, DEFAULT_KPR_COA_MAPPING } from '../utils/kprPresets';
@@ -35,6 +38,7 @@ import {
   getStoredCoaList,
   saveStoredCoaList,
   getAccountCoaMapping,
+  getCoaReportScope,
   synchronizeAccountsAndCOA,
   CoaSyncReport,
   addMasterChangeLog,
@@ -87,6 +91,7 @@ import {
   Square,
   ListFilter,
   Home,
+  Link2,
 } from 'lucide-react';
 
 interface MasterCategoryManagerProps {
@@ -424,6 +429,8 @@ export const MasterCategoryManager: React.FC<MasterCategoryManagerProps> = ({
 
   const [searchQuery, setSearchQuery] = useState('');
   const [expandedNodes, setExpandedNodes] = useState<Record<string, boolean>>({
+    'type-asset': true,
+    'type-liability': true,
     'type-equity': true,
     'type-income': true,
     'type-expense': true,
@@ -432,23 +439,11 @@ export const MasterCategoryManager: React.FC<MasterCategoryManagerProps> = ({
     'grp-kebutuhan-rumah-tangga': true,
     'grp-bank-finansial': true,
     'grp-pengeluaran-lainnya': true,
+    'grp-kpr-properti': true,
   });
 
-  // COA List state with Encrypted LocalStorage persistence
-  const [coaList, setCoaList] = useState<AccountCOA[]>(() => {
-    try {
-      const saved = secureStorage.getItem('app_coa_list');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          return parsed;
-        }
-      }
-    } catch (err) {
-      logger.error('Failed to load COA list from localStorage:', err);
-    }
-    return DEFAULT_COA_LIST;
-  });
+  // COA List state with Encrypted LocalStorage persistence (merges newly added default COA codes safely)
+  const [coaList, setCoaList] = useState<AccountCOA[]>(() => getStoredCoaList());
 
   React.useEffect(() => {
     try {
@@ -624,6 +619,13 @@ export const MasterCategoryManager: React.FC<MasterCategoryManagerProps> = ({
   const [selectedParentId, setSelectedParentId] = useState<string>('type-expense');
   const [newCategoryName, setNewCategoryName] = useState('');
   const [newCategoryType, setNewCategoryType] = useState<'group' | 'subgroup' | 'item'>('item');
+  const [newCategoryCoaCode, setNewCategoryCoaCode] = useState<string>('5900');
+  const [newCategoryExplanation, setNewCategoryExplanation] = useState<string>('');
+
+  // Modal state for editing Category -> COA link & explanation
+  const [editingCategoryCoaNode, setEditingCategoryCoaNode] = useState<CategoryNode | null>(null);
+  const [editCatCoaCode, setEditCatCoaCode] = useState<string>('5900');
+  const [editCatExplanation, setEditCatExplanation] = useState<string>('');
 
   // Rename state
   const [renamingNodeId, setRenamingNodeId] = useState<string | null>(null);
@@ -688,24 +690,108 @@ export const MasterCategoryManager: React.FC<MasterCategoryManagerProps> = ({
 
   const collapseAll = () => {
     setExpandedNodes({
+      'type-asset': true,
+      'type-liability': true,
       'type-equity': true,
       'type-income': true,
       'type-expense': true,
     });
   };
 
+  const suggestCoaForParent = (parentId: string): string => {
+    const parentNode = findCategoryNode(categories, parentId);
+    if (parentNode?.coaCode) return parentNode.coaCode;
+    if (parentId.includes('income')) return '4400';
+    if (parentId.includes('asset')) return '1500';
+    if (parentId.includes('liability')) return '2300';
+    if (parentId.includes('equity')) return '3100';
+    return '5900';
+  };
+
+  const openAddCategoryModal = (
+    parentId: string,
+    defaultLevel: 'group' | 'subgroup' | 'item'
+  ) => {
+    setSelectedParentId(parentId);
+    setNewCategoryType(defaultLevel);
+    setNewCategoryCoaCode(suggestCoaForParent(parentId));
+    setNewCategoryExplanation('');
+    setNewCategoryName('');
+    setShowAddModal(true);
+  };
+
   const handleAddSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newCategoryName.trim() || !selectedParentId) return;
 
-    const updated = addCategoryNode(categories, selectedParentId, newCategoryName, newCategoryType);
+    const selectedCoaObj = coaList.find((c) => c.code === newCategoryCoaCode);
+    const autoExplanation =
+      newCategoryExplanation.trim() ||
+      (selectedCoaObj
+        ? `Masuk ke akun [${selectedCoaObj.code}] ${selectedCoaObj.name} · ${getCoaReportScope(selectedCoaObj.category).impactSummary}`
+        : undefined);
+
+    const updated = addCategoryNode(
+      categories,
+      selectedParentId,
+      newCategoryName,
+      newCategoryType,
+      newCategoryCoaCode,
+      autoExplanation
+    );
     onUpdateCategories(updated);
+
+    addMasterChangeLog(
+      'Category',
+      newCategoryName.trim(),
+      'CREATE',
+      `Menambahkan kategori "${newCategoryName.trim()}" dengan tautan COA [${newCategoryCoaCode}${selectedCoaObj ? ` - ${selectedCoaObj.name}` : ''}]`,
+      'User Admin'
+    );
 
     // Expand parent node
     setExpandedNodes((prev) => ({ ...prev, [selectedParentId]: true }));
 
     setNewCategoryName('');
+    setNewCategoryExplanation('');
     setShowAddModal(false);
+  };
+
+  const openEditCategoryCoaModal = (node: CategoryNode) => {
+    const resolved = resolveCategoryCoaInfo(node.name, categories, coaList);
+    setEditingCategoryCoaNode(node);
+    setEditCatCoaCode(node.coaCode || resolved.coaCode);
+    setEditCatExplanation(node.reportExplanation || resolved.reportExplanation);
+  };
+
+  const handleSaveCategoryCoaLink = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingCategoryCoaNode || !editCatCoaCode.trim()) return;
+
+    const selectedCoaObj = coaList.find((c) => c.code === editCatCoaCode);
+    const updated = updateCategoryNodeCoa(
+      categories,
+      editingCategoryCoaNode.id,
+      editCatCoaCode,
+      editCatExplanation
+    );
+    onUpdateCategories(updated);
+
+    addMasterChangeLog(
+      'Category',
+      editingCategoryCoaNode.name,
+      'UPDATE',
+      `Tautan COA kategori "${editingCategoryCoaNode.name}" diperbarui ke [${editCatCoaCode}${selectedCoaObj ? ` - ${selectedCoaObj.name}` : ''}]`,
+      'User Admin'
+    );
+    setChangeLogs(getMasterChangeLogs());
+
+    showToast({
+      type: 'success',
+      title: 'Tautan COA Diperbarui',
+      message: `Kategori "${editingCategoryCoaNode.name}" kini terhubung ke COA [${editCatCoaCode}].`,
+    });
+    setEditingCategoryCoaNode(null);
   };
 
   // Delete category validation check with Bulk Move capability
@@ -1017,11 +1103,12 @@ export const MasterCategoryManager: React.FC<MasterCategoryManagerProps> = ({
       }
 
       const isActiveStatus = linkedCount > 0;
+      const coaInfo = resolveCategoryCoaInfo(node.name, categories, coaList);
 
       return (
         <div key={node.id} className="select-none">
           <div
-            className={`flex items-center justify-between py-2.5 px-3 rounded-xl hover:bg-slate-50 transition border border-transparent hover:border-slate-200 group ${
+            className={`flex items-start sm:items-center justify-between gap-2 py-2.5 px-3 rounded-xl hover:bg-slate-50 transition border border-transparent hover:border-slate-200 group ${
               node.type === 'type'
                 ? 'bg-slate-100/80 font-black text-slate-900 my-1'
                 : node.type === 'group'
@@ -1030,22 +1117,22 @@ export const MasterCategoryManager: React.FC<MasterCategoryManagerProps> = ({
             }`}
             style={{ paddingLeft: `${depth * 20 + 12}px` }}
           >
-            <div className="flex items-center gap-2 min-w-0 flex-1">
+            <div className="flex items-start gap-2 min-w-0 flex-1">
               {hasChildren ? (
                 <button
                   type="button"
                   onClick={() => toggleExpand(node.id)}
-                  className="p-1 hover:bg-slate-200 rounded-md transition text-slate-500 cursor-pointer shrink-0"
+                  className="p-1 hover:bg-slate-200 rounded-md transition text-slate-500 cursor-pointer shrink-0 mt-0.5"
                 >
                   {isExpanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
                 </button>
               ) : (
-                <span className="w-6 inline-block text-slate-300 text-center shrink-0">•</span>
+                <span className="w-6 inline-block text-slate-300 text-center shrink-0 mt-0.5">•</span>
               )}
 
-              <Tag className={`h-4 w-4 shrink-0 ${node.type === 'type' ? 'text-blue-600' : 'text-slate-400'}`} />
+              <Tag className={`h-4 w-4 shrink-0 mt-1 ${node.type === 'type' ? 'text-blue-600' : 'text-slate-400'}`} />
 
-              {/* Inline Rename Input or Name */}
+              {/* Inline Rename Input or Name + COA Link */}
               {isRenaming ? (
                 <form onSubmit={submitRename} className="flex items-center gap-1.5 flex-1 min-w-0">
                   <input
@@ -1075,37 +1162,49 @@ export const MasterCategoryManager: React.FC<MasterCategoryManagerProps> = ({
                   </button>
                 </form>
               ) : (
-                <div className="flex items-center gap-1.5 flex-wrap min-w-0">
-                  <span className={`truncate text-xs sm:text-sm ${queryLower && node.name.toLowerCase().includes(queryLower) ? 'bg-amber-200/80 font-black px-1 rounded' : 'font-semibold'}`}>
-                    {node.name}
-                  </span>
-                  <span className={`text-[10px] px-2 py-0.5 rounded-full uppercase tracking-wider shrink-0 ${badgeBg}`}>
-                    {typeLabel}
-                  </span>
+                <div className="min-w-0 flex-1 space-y-0.5">
+                  <div className="flex items-center gap-1.5 flex-wrap min-w-0">
+                    <span className={`truncate text-xs sm:text-sm ${queryLower && node.name.toLowerCase().includes(queryLower) ? 'bg-amber-200/80 font-black px-1 rounded' : 'font-semibold'}`}>
+                      {node.name}
+                    </span>
+                    <span className={`text-[10px] px-2 py-0.5 rounded-md uppercase tracking-wider shrink-0 ${badgeBg}`}>
+                      {typeLabel}
+                    </span>
 
-                  {/* STATUS INDICATOR BADGES (Aktif vs Pasif/Arsip) */}
-                  {node.type !== 'type' && (
-                    isActiveStatus ? (
-                      <span
-                        className="text-[10px] bg-emerald-50 text-emerald-700 border border-emerald-200 font-extrabold px-2 py-0.5 rounded-full flex items-center gap-1 shrink-0 shadow-2xs"
-                        title={`Aktif & Sering Digunakan: Digunakan oleh ${linkedCount} transaksi di jurnal`}
-                      >
-                        <span className="relative flex h-2 w-2">
-                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                          <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                    <span
+                      className="text-[11px] font-mono tabular-nums font-bold text-blue-700 shrink-0"
+                      title={`${coaInfo.coaName} · ${coaInfo.reportName}`}
+                    >
+                      [{coaInfo.coaCode}] {coaInfo.coaName}
+                    </span>
+
+                    {/* STATUS INDICATOR BADGES (Aktif vs Pasif/Arsip) */}
+                    {node.type !== 'type' && (
+                      isActiveStatus ? (
+                        <span
+                          className="text-[10px] bg-emerald-50 text-emerald-700 border border-emerald-200 font-extrabold px-2 py-0.5 rounded-md flex items-center gap-1 shrink-0"
+                          title={`Aktif: Digunakan oleh ${linkedCount} transaksi di jurnal`}
+                        >
+                          Aktif ({linkedCount} Tx)
                         </span>
-                        Aktif ({linkedCount} Tx)
-                      </span>
-                    ) : (
-                      <span
-                        className="text-[10px] bg-slate-100 text-slate-500 border border-slate-200 font-medium px-2 py-0.5 rounded-full flex items-center gap-1 shrink-0"
-                        title="Pasif / Arsip: Belum/tidak memiliki data transaksi terikat"
-                      >
-                        <Archive className="h-3 w-3 text-slate-400" />
-                        Pasif (0 Tx)
-                      </span>
-                    )
-                  )}
+                      ) : (
+                        <span
+                          className="text-[10px] bg-slate-100 text-slate-500 border border-slate-200 font-medium px-2 py-0.5 rounded-md flex items-center gap-1 shrink-0"
+                          title="Pasif / Arsip: Belum memiliki transaksi terikat"
+                        >
+                          <Archive className="h-3 w-3 text-slate-400" />
+                          Pasif (0 Tx)
+                        </span>
+                      )
+                    )}
+                  </div>
+
+                  {/* Accounting & Report Explanation line */}
+                  <p className="text-[11px] text-slate-500 leading-snug">
+                    <span className="font-semibold text-slate-700">{coaInfo.reportName}</span>
+                    {' · '}
+                    {coaInfo.reportExplanation}
+                  </p>
                 </div>
               )}
             </div>
@@ -1115,16 +1214,30 @@ export const MasterCategoryManager: React.FC<MasterCategoryManagerProps> = ({
                 {node.type !== 'item' && (
                   <button
                     type="button"
-                    onClick={() => {
-                      setSelectedParentId(node.id);
-                      setNewCategoryType(node.type === 'type' ? 'group' : node.type === 'group' ? 'subgroup' : 'item');
-                      setShowAddModal(true);
-                    }}
+                    onClick={() =>
+                      openAddCategoryModal(
+                        node.id,
+                        node.type === 'type' ? 'group' : node.type === 'group' ? 'subgroup' : 'item'
+                      )
+                    }
                     className="flex items-center gap-1 text-[11px] font-bold px-2 py-1 bg-blue-50 text-blue-600 hover:bg-blue-100 rounded-lg transition cursor-pointer"
                     title="Tambah Sub-Kategori Di Bawah Ini"
                   >
                     <Plus className="h-3.5 w-3.5" />
                     Tambah Sub
+                  </button>
+                )}
+
+                {/* Link/Edit COA Button */}
+                {node.type !== 'type' && (
+                  <button
+                    type="button"
+                    onClick={() => openEditCategoryCoaModal(node)}
+                    className="flex items-center gap-1 px-2 py-1 text-[11px] font-bold text-slate-600 hover:text-blue-700 hover:bg-blue-50 rounded-lg transition cursor-pointer"
+                    title="Atur Tautan COA & Penjelasan Laporan"
+                  >
+                    <Link2 className="h-3.5 w-3.5" />
+                    <span className="hidden sm:inline">COA</span>
                   </button>
                 )}
 
@@ -1503,11 +1616,7 @@ export const MasterCategoryManager: React.FC<MasterCategoryManagerProps> = ({
                 </button>
                 <button
                   type="button"
-                  onClick={() => {
-                    setSelectedParentId('type-expense');
-                    setNewCategoryType('group');
-                    setShowAddModal(true);
-                  }}
+                  onClick={() => openAddCategoryModal('type-expense', 'group')}
                   className="flex items-center gap-1.5 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-extrabold text-xs rounded-xl transition cursor-pointer shadow-md"
                 >
                   <Plus className="h-4 w-4" />
@@ -1770,9 +1879,9 @@ export const MasterCategoryManager: React.FC<MasterCategoryManagerProps> = ({
                   <tr>
                     <th className="py-3 px-4 font-mono">Kode COA</th>
                     <th className="py-3 px-4">Nama Perkiraan Akun</th>
-                    <th className="py-3 px-4">Kategori Akun</th>
-                    <th className="py-3 px-4">Saldo Normal</th>
-                    <th className="py-3 px-4">Deskripsi / Fungsi</th>
+                    <th className="py-3 px-4">Kategori & Saldo</th>
+                    <th className="py-3 px-4">Kategori Transaksi Terhubung</th>
+                    <th className="py-3 px-4">Penjelasan & Dampak Laporan</th>
                     <th className="py-3 px-4 text-center">Aksi (Ubah / Hapus)</th>
                   </tr>
                 </thead>
@@ -1781,60 +1890,93 @@ export const MasterCategoryManager: React.FC<MasterCategoryManagerProps> = ({
                     .filter((item) => {
                       if (!coaSearchQuery.trim()) return true;
                       const q = coaSearchQuery.toLowerCase();
+                      const linkedCats = getCategoriesLinkedToCoa(item.code, categories);
                       return (
                         item.code.toLowerCase().includes(q) ||
                         item.name.toLowerCase().includes(q) ||
                         item.category.toLowerCase().includes(q) ||
-                        item.description.toLowerCase().includes(q)
+                        item.description.toLowerCase().includes(q) ||
+                        linkedCats.some((c) => c.name.toLowerCase().includes(q))
                       );
                     })
-                    .map((item) => (
-                      <tr key={item.code} className="hover:bg-slate-50/80 transition group">
-                        <td className="py-3 px-4 font-mono font-black text-blue-700">{item.code}</td>
-                        <td className="py-3 px-4 font-extrabold text-slate-800">{item.name}</td>
-                        <td className="py-3 px-4">
-                          <span
-                            className={`px-2.5 py-0.5 rounded text-[10px] font-extrabold ${
-                              item.category === 'Asset'
-                                ? 'bg-emerald-100 text-emerald-800'
-                                : item.category === 'Liability'
-                                ? 'bg-rose-100 text-rose-800'
-                                : item.category === 'Equity'
-                                ? 'bg-purple-100 text-purple-800'
-                                : item.category === 'Income'
-                                ? 'bg-blue-100 text-blue-800'
-                                : 'bg-amber-100 text-amber-800'
-                            }`}
-                          >
-                            {item.category}
-                          </span>
-                        </td>
-                        <td className="py-3 px-4 font-mono text-slate-600 font-bold">{item.normalBalance}</td>
-                        <td className="py-3 px-4 text-slate-500 text-[11px]">{item.description}</td>
-                        <td className="py-3 px-4 text-center">
-                          <div className="flex items-center justify-center gap-1">
-                            <button
-                              type="button"
-                              onClick={() => startEditCoa(item)}
-                              className="p-1.5 text-slate-500 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition cursor-pointer flex items-center gap-1 text-[11px] font-bold"
-                              title="Edit Kode Akun COA Ini"
-                            >
-                              <Pencil className="h-3.5 w-3.5" />
-                              <span className="hidden sm:inline">Ubah</span>
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleDeleteCoa(item.code, item.name)}
-                              className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition cursor-pointer flex items-center gap-1 text-[11px] font-bold"
-                              title="Hapus Akun COA Ini"
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                              <span className="hidden sm:inline">Hapus</span>
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
+                    .map((item) => {
+                      const linkedCats = getCategoriesLinkedToCoa(item.code, categories);
+                      const leafCats = linkedCats.filter((c) => c.type === 'item');
+                      const displayCats = leafCats.length > 0 ? leafCats : linkedCats;
+                      const scope = getCoaReportScope(item.category);
+                      return (
+                        <tr key={item.code} className="hover:bg-slate-50/80 transition group align-top">
+                          <td className="py-3 px-4 font-mono font-black text-blue-700 whitespace-nowrap">{item.code}</td>
+                          <td className="py-3 px-4 font-extrabold text-slate-800">{item.name}</td>
+                          <td className="py-3 px-4 whitespace-nowrap">
+                            <div className="space-y-1">
+                              <span
+                                className={`inline-block px-2 py-0.5 rounded text-[10px] font-extrabold ${
+                                  item.category === 'Asset'
+                                    ? 'bg-emerald-100 text-emerald-800'
+                                    : item.category === 'Liability'
+                                    ? 'bg-rose-100 text-rose-800'
+                                    : item.category === 'Equity'
+                                    ? 'bg-purple-100 text-purple-800'
+                                    : item.category === 'Income'
+                                    ? 'bg-blue-100 text-blue-800'
+                                    : 'bg-amber-100 text-amber-800'
+                                }`}
+                              >
+                                {item.category}
+                              </span>
+                              <p className="text-[10px] font-mono text-slate-500 font-bold">
+                                Saldo: {item.normalBalance}
+                              </p>
+                            </div>
+                          </td>
+                          <td className="py-3 px-4 text-[11px] text-slate-700 max-w-[230px]">
+                            {displayCats.length > 0 ? (
+                              <p className="leading-relaxed">
+                                {displayCats.map((c, idx) => (
+                                  <span key={c.id}>
+                                    <span className="font-semibold text-slate-800">{c.name}</span>
+                                    {idx < displayCats.length - 1 ? ', ' : ''}
+                                  </span>
+                                ))}
+                              </p>
+                            ) : (
+                              <span className="text-slate-400 italic">
+                                {item.category === 'Asset' || item.category === 'Liability'
+                                  ? 'Terikat otomatis ke Master Rekening / Jurnal'
+                                  : 'Belum ada kategori terhubung'}
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-3 px-4 text-slate-600 text-[11px] max-w-[300px]">
+                            <p className="font-bold text-slate-800">{scope.reportName}</p>
+                            <p className="mt-0.5 leading-snug">{item.description}. {scope.impactSummary}</p>
+                          </td>
+                          <td className="py-3 px-4 text-center">
+                            <div className="flex items-center justify-center gap-1">
+                              <button
+                                type="button"
+                                onClick={() => startEditCoa(item)}
+                                className="p-1.5 text-slate-500 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition cursor-pointer flex items-center gap-1 text-[11px] font-bold"
+                                title="Edit Kode Akun COA Ini"
+                              >
+                                <Pencil className="h-3.5 w-3.5" />
+                                <span className="hidden sm:inline">Ubah</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteCoa(item.code, item.name)}
+                                className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition cursor-pointer flex items-center gap-1 text-[11px] font-bold"
+                                title="Hapus Akun COA Ini"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                                <span className="hidden sm:inline">Hapus</span>
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
                 </tbody>
               </table>
             </div>
@@ -2098,7 +2240,11 @@ export const MasterCategoryManager: React.FC<MasterCategoryManagerProps> = ({
                 </label>
                 <select
                   value={selectedParentId}
-                  onChange={(e) => setSelectedParentId(e.target.value)}
+                  onChange={(e) => {
+                    const pid = e.target.value;
+                    setSelectedParentId(pid);
+                    setNewCategoryCoaCode(suggestCoaForParent(pid));
+                  }}
                   className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 >
                   {flatCategories
@@ -2140,6 +2286,36 @@ export const MasterCategoryManager: React.FC<MasterCategoryManagerProps> = ({
                 />
               </div>
 
+              <div>
+                <label className="block text-slate-600 font-bold mb-1">
+                  Tautkan ke Kode Perkiraan (COA) <span className="text-rose-500">*</span>
+                </label>
+                <select
+                  value={newCategoryCoaCode}
+                  onChange={(e) => setNewCategoryCoaCode(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  {coaList.map((coa) => (
+                    <option key={coa.code} value={coa.code}>
+                      [{coa.code}] {coa.name} ({coa.category})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-slate-600 font-bold mb-1">
+                  Penjelasan Dampak di Laporan (Opsional)
+                </label>
+                <input
+                  type="text"
+                  placeholder="Contoh: Masuk ke Beban Operasional pada Laporan Laba-Rugi"
+                  value={newCategoryExplanation}
+                  onChange={(e) => setNewCategoryExplanation(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+
               <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
                 <button
                   type="button"
@@ -2154,6 +2330,89 @@ export const MasterCategoryManager: React.FC<MasterCategoryManagerProps> = ({
                 >
                   <Check className="h-4 w-4" />
                   Simpan Kategori
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL ATUR TAUTAN COA KATEGORI */}
+      {editingCategoryCoaNode && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 backdrop-blur-xs p-4 animate-fadeIn">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-200 space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div>
+                <h3 className="font-extrabold text-slate-800 text-sm uppercase tracking-wider">
+                  Atur Tautan COA & Penjelasan Laporan
+                </h3>
+                <p className="text-[11px] text-slate-500 mt-0.5">
+                  Kategori: <span className="font-bold text-slate-800">{editingCategoryCoaNode.name}</span>
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingCategoryCoaNode(null)}
+                className="text-slate-400 hover:text-slate-600 font-bold text-xs p-1 rounded-lg hover:bg-slate-100 transition cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveCategoryCoaLink} className="space-y-4 text-xs">
+              <div>
+                <label className="block text-slate-600 font-bold mb-1">
+                  Kode Perkiraan COA Terhubung
+                </label>
+                <select
+                  value={editCatCoaCode}
+                  onChange={(e) => {
+                    const code = e.target.value;
+                    setEditCatCoaCode(code);
+                    const matchedCoa = coaList.find((c) => c.code === code);
+                    if (matchedCoa) {
+                      setEditCatExplanation(
+                        `Masuk ke [${matchedCoa.code}] ${matchedCoa.name}. ${getCoaReportScope(matchedCoa.category).impactSummary}`
+                      );
+                    }
+                  }}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  {coaList.map((coa) => (
+                    <option key={coa.code} value={coa.code}>
+                      [{coa.code}] {coa.name} ({coa.category})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-slate-600 font-bold mb-1">
+                  Penjelasan untuk Laporan Keuangan
+                </label>
+                <textarea
+                  rows={3}
+                  value={editCatExplanation}
+                  onChange={(e) => setEditCatExplanation(e.target.value)}
+                  placeholder="Jelaskan masuk pos mana di Laba-Rugi atau Neraca..."
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setEditingCategoryCoaNode(null)}
+                  className="px-4 py-2 text-xs font-bold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-xl transition cursor-pointer"
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  className="flex items-center gap-1.5 px-5 py-2 text-xs font-black text-white bg-blue-600 hover:bg-blue-700 rounded-xl transition cursor-pointer shadow-xs"
+                >
+                  <Check className="h-4 w-4" />
+                  Simpan Tautan
                 </button>
               </div>
             </form>
