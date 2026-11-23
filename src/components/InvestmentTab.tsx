@@ -6,6 +6,7 @@ import { TrendingUp, Wallet, ArrowUpRight, ArrowDownLeft, Info, Activity, Landma
 import { AIDiversificationModal } from './AIDiversificationModal';
 import { PriceHistoryModal } from './PriceHistoryModal';
 import { InvestmentSimulationCalculator } from './InvestmentSimulationCalculator';
+import { DividendReinvestmentModal } from './DividendReinvestmentModal';
 import { InvestmentGoalSection } from './InvestmentGoalSection';
 import { InflationPurchasingPowerCalculator } from './InflationPurchasingPowerCalculator';
 import { InvestmentRoiD3Chart } from './InvestmentRoiD3Chart';
@@ -77,6 +78,8 @@ export const InvestmentTab: React.FC<InvestmentTabProps> = ({
   const [isAiModalOpen, setIsAiModalOpen] = React.useState(false);
   const [isHistoryModalOpen, setIsHistoryModalOpen] = React.useState(false);
   const [isSimulationModalOpen, setIsSimulationModalOpen] = React.useState(false);
+  const [isDripModalOpen, setIsDripModalOpen] = React.useState(false);
+  const [dripInitialAssetId, setDripInitialAssetId] = React.useState<string | null>(null);
 
   // Scope & Pie Chart Allocation View Mode
   const [portfolioScope, setPortfolioScope] = React.useState<'all' | 'financial' | 'fixed'>('all');
@@ -763,6 +766,18 @@ export const InvestmentTab: React.FC<InvestmentTabProps> = ({
           >
             <Calculator className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
             Kalkulator Simulasi
+          </button>
+
+          {/* Dividend Reinvestment (DRIP) Calculator Button */}
+          <button
+            onClick={() => {
+              setDripInitialAssetId(investments[0]?.id || 'all');
+              setIsDripModalOpen(true);
+            }}
+            className="px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-xs rounded-xl transition flex items-center gap-1.5 cursor-pointer shadow-xs whitespace-nowrap shrink-0"
+          >
+            <RefreshCw className="h-4 w-4" />
+            Kalkulator DRIP Dividen
           </button>
 
           {/* Export CSV */}
@@ -1672,6 +1687,16 @@ export const InvestmentTab: React.FC<InvestmentTabProps> = ({
                               <Gift className="h-3 w-3" /> Catat Dividen
                             </button>
                             <button
+                              onClick={() => {
+                                setDripInitialAssetId(inv.id);
+                                setIsDripModalOpen(true);
+                              }}
+                              className="bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 text-[10px] font-bold px-2.5 py-1 rounded-lg transition cursor-pointer flex items-center gap-1 whitespace-nowrap"
+                              title="Simulasi Reinvestasi Dividen (DRIP) berdasarkan tren historis aset ini"
+                            >
+                              <RefreshCw className="h-3 w-3" /> DRIP
+                            </button>
+                            <button
                               onClick={() => startEditing(inv)}
                               className="p-1.5 text-slate-500 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition cursor-pointer border border-slate-200"
                               title="Edit Detail Aset"
@@ -2279,6 +2304,14 @@ export const InvestmentTab: React.FC<InvestmentTabProps> = ({
         isOpen={isSimulationModalOpen}
         onClose={() => setIsSimulationModalOpen(false)}
         investments={investments}
+      />
+
+      <DividendReinvestmentModal
+        isOpen={isDripModalOpen}
+        onClose={() => setIsDripModalOpen(false)}
+        investments={investments}
+        transactions={transactions}
+        initialAssetId={dripInitialAssetId}
       />
     </div>
   );

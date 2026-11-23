@@ -1724,6 +1724,163 @@ Aturan Perhitungan:
     }
   });
 
+  // 12. AI Market Dividend Yield & Growth Estimator for DRIP Calculator
+  app.post('/api/estimate-asset-yield', async (req, res) => {
+    try {
+      const {
+        ticker,
+        assetName,
+        category,
+        shouldExtractTicker,
+        currentBalance,
+        localYieldPct,
+        localGrowthPct,
+      } = req.body || {};
+
+      if (!assetName || typeof assetName !== "string") {
+        return res.status(400).json({
+          error: "Nama aset atau ticker diperlukan untuk mengambil data pasar.",
+        });
+      }
+
+      const apiKey = process.env.GEMINI_API_KEY?.trim();
+      if (!apiKey) {
+        return res.status(503).json({
+          error:
+            "Kunci API Gemini belum terkonfigurasi di server. Tambahkan GEMINI_API_KEY di Settings > Secrets untuk mengambil data pasar AI.",
+        });
+      }
+
+      const ai = new GoogleGenAI({
+        apiKey,
+        httpOptions: {
+          headers: { "User-Agent": "aistudio-build" },
+        },
+      });
+
+      const rawTicker = typeof ticker === "string" ? ticker.trim().toUpperCase() : "";
+      const needsTickerExtraction = Boolean(shouldExtractTicker) || !rawTicker;
+      const tickerContext = needsTickerExtraction
+        ? `Belum ada ticker eksplisit (input saat ini: "${rawTicker || 'kosong'}"). Ekstrak atau identifikasi ticker saham/instrumen pasar resmi yang paling tepat dari nama aset (contoh: "Saham Bank Central Asia" -> "BBCA.JK", "Telkom Indonesia" -> "TLKM.JK", "Apple" -> "AAPL", atau simbol kategori seperti "SBN", "RDPT", "GOLD").`
+        : `Ticker eksplisit dari pengguna: "${rawTicker}". Gunakan ticker ini sebagai acuan utama (tambahkan akhiran bursa seperti ".JK" jika relevan untuk pencarian pasar BEI, dan kembalikan ticker terstandarisasi pada field extractedTicker).`;
+
+      const prompt = `Anda adalah analis riset investasi dan pasar modal Indonesia maupun global.
+Ekstrak ticker yang tepat dan berikan estimasi rata-rata dividend yield pasar terkini untuk simulasi Dividend Reinvestment (DRIP) dalam Bahasa Indonesia untuk aset berikut:
+- Nama Aset / Portofolio: ${String(assetName)}
+- Kategori Aset: ${String(category || "Investasi Umum")}
+- Instruksi Ticker: ${tickerContext}
+- Saldo Saat Ini (IDR): ${Number(currentBalance) || 0}
+- Referensi Yield Lokal Tercatat: ${Number(localYieldPct) || 0}%/tahun
+- Referensi Pertumbuhan Harga Lokal: ${Number(localGrowthPct) || 0}%/tahun
+
+Tugas:
+1. Tentukan simbol/ticker instrumen paling akurat dalam \`extractedTicker\` (huruf kapital ringkas, mis. "BBCA.JK", "BBRI.JK", "TLKM.JK", "VOO", "SBN", "GOLD", atau "PORTOFOLIO").
+2. Gunakan penelusuran web berdasarkan \`extractedTicker\` dan nama aset untuk mencari rata-rata dividend yield / kupon tahunan pasar terkini (%) serta estimasi pertumbuhan harga wajar tahunan (%) secara konservatif-moderat.
+3. Untuk aset yang umumnya tidak membagikan dividen (seperti Emas fisik/Crypto), jelaskan bahwa dividend yield pasar normalnya 0% atau sangat kecil dan fokus pada estimasi apresiasi harga.
+4. Tentukan frekuensi pembagian hasil yang paling lazim ('monthly', 'quarterly', atau 'annually').
+5. Tuliskan rationale singkat (maksimal 2 kalimat) yang jelas dan faktual dalam Bahasa Indonesia dengan menyebutkan ticker hasil ekstraksi.`;
+
+      const response = await ai.models.generateContent({
+        model: "gemini-4-hydrogen",
+        contents: prompt,
+        config: {
+          tools: [{ googleSearch: {} }],
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              extractedTicker: {
+                type: Type.STRING,
+                description: "Simbol ticker saham atau instrumen pasar yang diekstrak/terstandarisasi dalam huruf kapital (mis. BBCA.JK, TLKM.JK, VOO, SBN).",
+              },
+              estimatedDividendYieldPct: {
+                type: Type.NUMBER,
+                description: "Estimasi dividend yield / imbal hasil kupon tahunan dalam persen (mis. 4.2).",
+              },
+              estimatedPriceGrowthPct: {
+                type: Type.NUMBER,
+                description: "Estimasi pertumbuhan harga / capital appreciation tahunan dalam persen (mis. 8.5).",
+              },
+              suggestedPayoutFrequency: {
+                type: Type.STRING,
+                description: "Frekuensi pembagian dividen yang lazim: 'monthly', 'quarterly', atau 'annually'.",
+              },
+              rationale: {
+                type: Type.STRING,
+                description: "Penjelasan ringkas 1-2 kalimat dalam Bahasa Indonesia.",
+              },
+            },
+            required: [
+              "extractedTicker",
+              "estimatedDividendYieldPct",
+              "estimatedPriceGrowthPct",
+              "suggestedPayoutFrequency",
+              "rationale",
+            ],
+          },
+        },
+      });
+
+      const rawText = (response.text || "").trim();
+      if (!rawText) {
+        return res.status(502).json({
+          error: "Model AI tidak mengembalikan estimasi yield pasar. Silakan coba lagi.",
+        });
+      }
+
+      const parsed = JSON.parse(rawText);
+      const extractedTicker =
+        String(parsed.extractedTicker || rawTicker || assetName)
+          .trim()
+          .toUpperCase()
+          .slice(0, 24) || rawTicker;
+      const rawFreq = String(parsed.suggestedPayoutFrequency || "annually").toLowerCase();
+      const suggestedPayoutFrequency =
+        rawFreq === "monthly" || rawFreq === "quarterly" ? rawFreq : "annually";
+
+      const groundingChunks =
+        (response as any).candidates?.[0]?.groundingMetadata?.groundingChunks || [];
+      const sources = Array.isArray(groundingChunks)
+        ? groundingChunks
+            .filter((chunk: any) => chunk?.web?.uri)
+            .slice(0, 3)
+            .map((chunk: any) => ({
+              title: String(chunk.web.title || chunk.web.uri),
+              uri: String(chunk.web.uri),
+            }))
+        : [];
+
+      return res.json({
+        extractedTicker,
+        estimatedDividendYieldPct: Number.isFinite(Number(parsed.estimatedDividendYieldPct))
+          ? Math.max(0, Math.min(35, Number(parsed.estimatedDividendYieldPct)))
+          : 0,
+        estimatedPriceGrowthPct: Number.isFinite(Number(parsed.estimatedPriceGrowthPct))
+          ? Math.max(-20, Math.min(40, Number(parsed.estimatedPriceGrowthPct)))
+          : 0,
+        suggestedPayoutFrequency,
+        rationale: String(parsed.rationale || ""),
+        sources,
+        generatedAt: new Date().toLocaleTimeString("id-ID", {
+          hour: "2-digit",
+          minute: "2-digit",
+        }),
+      });
+    } catch (error: any) {
+      console.error("[AI Estimate Asset Yield Error]:", error);
+      const status =
+        typeof error?.status === "number" && error.status >= 400
+          ? error.status
+          : 500;
+      return res.status(status).json({
+        error:
+          error?.message ||
+          "Gagal mengambil estimasi yield pasar dari layanan AI.",
+      });
+    }
+  });
+
   // Vite integration
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({

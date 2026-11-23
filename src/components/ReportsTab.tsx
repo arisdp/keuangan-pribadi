@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { Transaction, Account, CategoryBudget, Debt, FixedAsset, InvestmentAsset, EmergencyFundTransaction, KprCoaMappingConfig } from '../types';
 import { CategoryNode, DEFAULT_CATEGORY_HIERARCHY } from '../categoryHierarchy';
 import { CoaScanResult } from '../coaUtils';
@@ -7,6 +7,15 @@ import { MasterCategoryManager } from './MasterCategoryManager';
 import { CategoryTreeDiagram } from './CategoryTreeDiagram';
 import { TaxCalculatorCard } from './TaxCalculatorCard';
 import { SankeyFlowChart } from './SankeyFlowChart';
+import { SankeyCashFlowSummary } from './SankeyCashFlowSummary';
+import {
+  aggregatePeriodCashFlow,
+  filterTransactionsBySankeyPeriod,
+  getAvailablePeriodOptions,
+  getPeriodRangeLabel,
+  QuarterNum,
+  SankeyPeriodMode,
+} from '../utils/cashFlowSankey';
 import { FinancialHealthRatios } from './FinancialHealthRatios';
 import { LiquidityProjectionCard } from './LiquidityProjectionCard';
 import { AiLedgerReconciliation } from './AiLedgerReconciliation';
@@ -141,6 +150,74 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
   const [showExportModal, setShowExportModal] = useState(false);
   const [exportMonth, setExportMonth] = useState<number>(() => new Date().getMonth() + 1);
   const [exportYear, setExportYear] = useState<number>(() => new Date().getFullYear());
+
+  // Synced Period State for SankeyCashFlowSummary & SankeyFlowChart
+  const sankeyPeriodOptions = useMemo(
+    () => getAvailablePeriodOptions(transactions),
+    [transactions]
+  );
+  const [sankeyPeriodMode, setSankeyPeriodMode] = useState<SankeyPeriodMode>('all');
+  const [sankeySelectedMonth, setSankeySelectedMonth] = useState<string>(
+    () => sankeyPeriodOptions.availableMonthKeys[0] || sankeyPeriodOptions.currentLocalMonth
+  );
+  const [sankeySelectedYear, setSankeySelectedYear] = useState<string>(
+    () => sankeyPeriodOptions.availableYears[0] || sankeyPeriodOptions.currentLocalYear
+  );
+  const [sankeySelectedQuarter, setSankeySelectedQuarter] = useState<QuarterNum>(
+    sankeyPeriodOptions.currentLocalQuarter
+  );
+
+  useEffect(() => {
+    if (
+      sankeyPeriodOptions.availableMonthKeys.length > 0 &&
+      !sankeyPeriodOptions.availableMonthKeys.includes(sankeySelectedMonth)
+    ) {
+      setSankeySelectedMonth(sankeyPeriodOptions.availableMonthKeys[0]);
+    }
+  }, [sankeyPeriodOptions.availableMonthKeys, sankeySelectedMonth]);
+
+  useEffect(() => {
+    if (
+      sankeyPeriodOptions.availableYears.length > 0 &&
+      !sankeyPeriodOptions.availableYears.includes(sankeySelectedYear)
+    ) {
+      setSankeySelectedYear(sankeyPeriodOptions.availableYears[0]);
+    }
+  }, [sankeyPeriodOptions.availableYears, sankeySelectedYear]);
+
+  const sankeyFilteredTransactions = useMemo(
+    () =>
+      filterTransactionsBySankeyPeriod(
+        transactions,
+        sankeyPeriodMode,
+        sankeySelectedMonth,
+        sankeySelectedQuarter,
+        sankeySelectedYear
+      ),
+    [
+      transactions,
+      sankeyPeriodMode,
+      sankeySelectedMonth,
+      sankeySelectedQuarter,
+      sankeySelectedYear,
+    ]
+  );
+
+  const sankeyPeriodSummary = useMemo(
+    () => aggregatePeriodCashFlow(sankeyFilteredTransactions, debts),
+    [sankeyFilteredTransactions, debts]
+  );
+
+  const sankeyPeriodRangeLabel = useMemo(
+    () =>
+      getPeriodRangeLabel(
+        sankeyPeriodMode,
+        sankeySelectedMonth,
+        sankeySelectedQuarter,
+        sankeySelectedYear
+      ),
+    [sankeyPeriodMode, sankeySelectedMonth, sankeySelectedQuarter, sankeySelectedYear]
+  );
 
   const availableExportYears = useMemo(() => {
     const currentYear = new Date().getFullYear();
@@ -1082,10 +1159,40 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
         />
       )}
 
-      {/* VIEW 0C: DIAGRAM ALIR SANKEY & DETEKSI KEBOCORAN */}
+      {/* VIEW 0C: RINGKASAN ARUS KAS + DIAGRAM ALIR SANKEY & DETEKSI KEBOCORAN */}
       {activeReport === 'sankey-flow' && (
-        <div className="animate-fadeIn">
-          <SankeyFlowChart transactions={transactions} />
+        <div className="space-y-6 animate-fadeIn">
+          <SankeyCashFlowSummary
+            summary={sankeyPeriodSummary}
+            transactionCount={sankeyFilteredTransactions.length}
+            periodRangeLabel={sankeyPeriodRangeLabel}
+            periodMode={sankeyPeriodMode}
+            onPeriodModeChange={setSankeyPeriodMode}
+            selectedMonth={sankeySelectedMonth}
+            onSelectedMonthChange={setSankeySelectedMonth}
+            selectedQuarter={sankeySelectedQuarter}
+            onSelectedQuarterChange={setSankeySelectedQuarter}
+            selectedYear={sankeySelectedYear}
+            onSelectedYearChange={setSankeySelectedYear}
+            availableMonthKeys={sankeyPeriodOptions.availableMonthKeys}
+            availableYears={sankeyPeriodOptions.availableYears}
+            currentLocalMonth={sankeyPeriodOptions.currentLocalMonth}
+          />
+          <SankeyFlowChart
+            transactions={transactions}
+            accounts={accounts}
+            debts={debts}
+            periodMode={sankeyPeriodMode}
+            onPeriodModeChange={setSankeyPeriodMode}
+            selectedMonth={sankeySelectedMonth}
+            onSelectedMonthChange={setSankeySelectedMonth}
+            selectedQuarter={sankeySelectedQuarter}
+            onSelectedQuarterChange={setSankeySelectedQuarter}
+            selectedYear={sankeySelectedYear}
+            onSelectedYearChange={setSankeySelectedYear}
+            hidePeriodControls
+            hideInlineSummaryStrip
+          />
         </div>
       )}
 
