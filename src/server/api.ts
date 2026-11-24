@@ -4,7 +4,8 @@ import { eq, inArray, or, sql } from 'drizzle-orm';
 import { 
   users, accounts, transactions, investments, 
   budgets, debts, fixedAssets, recurringTransactions, savingsGoals,
-  emergencyFundConfigs, emergencyFundTransactions, investmentPriceHistory, debtPayments
+  emergencyFundConfigs, emergencyFundTransactions, investmentPriceHistory, debtPayments,
+  userMasterConfigs
 } from '../db/schema';
 import { dbLogger } from '../utils/dbLogger';
 
@@ -58,6 +59,7 @@ export async function ensureTablesExist(): Promise<boolean> {
           interest_rate numeric(5, 2),
           min_payment numeric(15, 2)
         )`,
+        `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS coa_code text`,
         `CREATE TABLE IF NOT EXISTS transactions (
           id text PRIMARY KEY,
           user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -70,8 +72,40 @@ export async function ensureTablesExist(): Promise<boolean> {
           linked_debt_id text,
           linked_debt_action text,
           linked_investment_id text,
-          linked_investment_action text
+          linked_investment_action text,
+          linked_fixed_asset_id text,
+          linked_fixed_asset_action text,
+          linked_emergency_tx_id text,
+          unit_price numeric(15, 2),
+          units numeric(15, 4),
+          unit_name text,
+          is_adjustment boolean DEFAULT false,
+          adjustment_type text,
+          adjustment_period_key text,
+          adjustment_rate_pct numeric(6, 2),
+          adjustment_duration_days integer,
+          linked_fixed_asset_adjustment_id text,
+          previous_rate_effective_date text,
+          coa_debit_code text,
+          coa_credit_code text,
+          linked_kpr_breakdown jsonb
         )`,
+        `ALTER TABLE transactions ADD COLUMN IF NOT EXISTS linked_fixed_asset_id text`,
+        `ALTER TABLE transactions ADD COLUMN IF NOT EXISTS linked_fixed_asset_action text`,
+        `ALTER TABLE transactions ADD COLUMN IF NOT EXISTS linked_emergency_tx_id text`,
+        `ALTER TABLE transactions ADD COLUMN IF NOT EXISTS unit_price numeric(15, 2)`,
+        `ALTER TABLE transactions ADD COLUMN IF NOT EXISTS units numeric(15, 4)`,
+        `ALTER TABLE transactions ADD COLUMN IF NOT EXISTS unit_name text`,
+        `ALTER TABLE transactions ADD COLUMN IF NOT EXISTS is_adjustment boolean DEFAULT false`,
+        `ALTER TABLE transactions ADD COLUMN IF NOT EXISTS adjustment_type text`,
+        `ALTER TABLE transactions ADD COLUMN IF NOT EXISTS adjustment_period_key text`,
+        `ALTER TABLE transactions ADD COLUMN IF NOT EXISTS adjustment_rate_pct numeric(6, 2)`,
+        `ALTER TABLE transactions ADD COLUMN IF NOT EXISTS adjustment_duration_days integer`,
+        `ALTER TABLE transactions ADD COLUMN IF NOT EXISTS linked_fixed_asset_adjustment_id text`,
+        `ALTER TABLE transactions ADD COLUMN IF NOT EXISTS previous_rate_effective_date text`,
+        `ALTER TABLE transactions ADD COLUMN IF NOT EXISTS coa_debit_code text`,
+        `ALTER TABLE transactions ADD COLUMN IF NOT EXISTS coa_credit_code text`,
+        `ALTER TABLE transactions ADD COLUMN IF NOT EXISTS linked_kpr_breakdown jsonb`,
         `CREATE TABLE IF NOT EXISTS recurring_transactions (
           id text PRIMARY KEY,
           user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -129,6 +163,7 @@ export async function ensureTablesExist(): Promise<boolean> {
           purpose text NOT NULL,
           category text NOT NULL,
           due_day integer,
+          due_date text,
           start_date text,
           kpr_scheme text,
           kpr_preset_id text,
@@ -137,8 +172,11 @@ export async function ensureTablesExist(): Promise<boolean> {
           tenor_months integer,
           fixed_rate numeric(5, 2),
           fixed_years integer,
-          floating_rate numeric(5, 2)
+          floating_rate numeric(5, 2),
+          kpr_fees_summary jsonb,
+          kpr_coa_snapshot jsonb
         )`,
+        `ALTER TABLE debts ADD COLUMN IF NOT EXISTS due_date text`,
         `ALTER TABLE debts ADD COLUMN IF NOT EXISTS start_date text`,
         `ALTER TABLE debts ADD COLUMN IF NOT EXISTS kpr_scheme text`,
         `ALTER TABLE debts ADD COLUMN IF NOT EXISTS kpr_preset_id text`,
@@ -148,6 +186,8 @@ export async function ensureTablesExist(): Promise<boolean> {
         `ALTER TABLE debts ADD COLUMN IF NOT EXISTS fixed_rate numeric(5, 2)`,
         `ALTER TABLE debts ADD COLUMN IF NOT EXISTS fixed_years integer`,
         `ALTER TABLE debts ADD COLUMN IF NOT EXISTS floating_rate numeric(5, 2)`,
+        `ALTER TABLE debts ADD COLUMN IF NOT EXISTS kpr_fees_summary jsonb`,
+        `ALTER TABLE debts ADD COLUMN IF NOT EXISTS kpr_coa_snapshot jsonb`,
         `CREATE TABLE IF NOT EXISTS fixed_assets (
           id text PRIMARY KEY,
           user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -197,6 +237,16 @@ export async function ensureTablesExist(): Promise<boolean> {
           target_date text NOT NULL,
           category text,
           notes text
+        )`,
+        `CREATE TABLE IF NOT EXISTS user_master_configs (
+          user_id text PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+          coa_list jsonb,
+          master_categories jsonb,
+          kpr_presets jsonb,
+          kpr_coa_mapping jsonb,
+          master_change_logs jsonb,
+          investment_goals jsonb,
+          updated_at timestamp DEFAULT NOW() NOT NULL
         )`,
         `INSERT INTO users (id, username, password, password_hash, email, full_name, is_premium)
           VALUES ('user-ariesd', 'ariesD', '123456', '123456', 'ariesd@nusantara.app', 'Aries D', true)
@@ -829,41 +879,71 @@ apiRouter.post('/init-user', async (req, res) => {
 apiRouter.get('/sync', async (req, res) => {
   try {
     const userId = (req as any).userId;
-    await ensureUserExists(userId);
+    await withDbRetry(async () => {
+      await ensureTablesExist();
+      await ensureUserExists(userId);
+    });
     
-    // Fetch all related entities
-    const allAccounts = await db.select().from(accounts).where(eq(accounts.userId, userId));
-    const allTransactions = await db.select().from(transactions).where(eq(transactions.userId, userId));
-    const allBudgets = await db.select().from(budgets).where(eq(budgets.userId, userId));
-    const allDebts = await db.select().from(debts).where(eq(debts.userId, userId));
-    const allInvestments = await db.select().from(investments).where(eq(investments.userId, userId));
-    const allFixedAssets = await db.select().from(fixedAssets).where(eq(fixedAssets.userId, userId));
-    const allRecurringTxs = await db.select().from(recurringTransactions).where(eq(recurringTransactions.userId, userId));
-    const allSavingsGoals = await db.select().from(savingsGoals).where(eq(savingsGoals.userId, userId));
-    
-    const efConfigs = await db.select().from(emergencyFundConfigs).where(eq(emergencyFundConfigs.userId, userId));
-    const allEfTxs = await db.select().from(emergencyFundTransactions).where(eq(emergencyFundTransactions.userId, userId));
+    // Fetch all related entities scoped to userId
+    const [
+      allAccounts,
+      allTransactions,
+      allBudgets,
+      allDebts,
+      allInvestments,
+      allFixedAssets,
+      allRecurringTxs,
+      allSavingsGoals,
+      efConfigs,
+      allEfTxs,
+      masterConfigRows
+    ] = await Promise.all([
+      db.select().from(accounts).where(eq(accounts.userId, userId)),
+      db.select().from(transactions).where(eq(transactions.userId, userId)),
+      db.select().from(budgets).where(eq(budgets.userId, userId)),
+      db.select().from(debts).where(eq(debts.userId, userId)),
+      db.select().from(investments).where(eq(investments.userId, userId)),
+      db.select().from(fixedAssets).where(eq(fixedAssets.userId, userId)),
+      db.select().from(recurringTransactions).where(eq(recurringTransactions.userId, userId)),
+      db.select().from(savingsGoals).where(eq(savingsGoals.userId, userId)),
+      db.select().from(emergencyFundConfigs).where(eq(emergencyFundConfigs.userId, userId)),
+      db.select().from(emergencyFundTransactions).where(eq(emergencyFundTransactions.userId, userId)),
+      db.select().from(userMasterConfigs).where(eq(userMasterConfigs.userId, userId))
+    ]);
 
-    const allInvestmentPriceHistories = await db.select().from(investmentPriceHistory); // Filter manually below
-    const allDebtPayments = await db.select().from(debtPayments); // Filter manually below
+    const userInvestmentIds = allInvestments.map(i => i.id);
+    const userDebtIds = allDebts.map(d => d.id);
 
-    // We must map properties and cast decimals back to numbers for the frontend
+    const allInvestmentPriceHistories = userInvestmentIds.length > 0
+      ? await db.select().from(investmentPriceHistory).where(inArray(investmentPriceHistory.assetId, userInvestmentIds))
+      : [];
+    const allDebtPayments = userDebtIds.length > 0
+      ? await db.select().from(debtPayments).where(inArray(debtPayments.debtId, userDebtIds))
+      : [];
+
+    // Cast PostgreSQL decimal string columns back to numbers while preserving IDs/codes/dates
+    const NUMERIC_KEYS = new Set([
+      'startingBalance', 'currentBalance', 'creditLimit', 'usedLimit', 'initialDebt',
+      'interestRate', 'minPayment', 'amount', 'unitPrice', 'units', 'adjustmentRatePct',
+      'balance', 'initialCapital', 'quantity', 'purchaseUnitPrice', 'currentUnitPrice',
+      'dividendsOrInterest', 'previousUnitPrice', 'changePercentage', 'limitAmount',
+      'propertyPrice', 'downPayment', 'fixedRate', 'floatingRate', 'purchasePrice',
+      'annualRatePct', 'kprPaidPrincipalLock', 'amountPaid', 'monthlyExpense',
+      'targetAmount', 'currentAmount'
+    ]);
+
     const mapToNum = (obj: any) => {
-      const res: any = { ...obj };
-      for (const key in res) {
-        if (typeof res[key] === 'string' && !isNaN(Number(res[key])) && (
-            key.toLowerCase().includes('amount') || key.toLowerCase().includes('balance') || 
-            key.toLowerCase().includes('price') || key.toLowerCase().includes('rate') ||
-            key.toLowerCase().includes('limit') || key.toLowerCase().includes('payment') ||
-            key.toLowerCase().includes('quantity') || key.toLowerCase().includes('units') ||
-            key.toLowerCase().includes('dividends') || key.toLowerCase().includes('debt') ||
-            key.toLowerCase().includes('lock')
-          )) {
-          // Careful with string dates parsing as numbers. We only cast specific keys.
-          res[key] = Number(res[key]);
+      const result: any = {};
+      for (const key in obj) {
+        const val = obj[key];
+        if (val === null || val === undefined) continue;
+        if (NUMERIC_KEYS.has(key) && typeof val === 'string' && val.trim() !== '' && !isNaN(Number(val))) {
+          result[key] = Number(val);
+        } else {
+          result[key] = val;
         }
       }
-      return res;
+      return result;
     };
 
     const formattedInvestments = allInvestments.map(inv => {
@@ -881,7 +961,22 @@ apiRouter.get('/sync', async (req, res) => {
       manualAdjustments: Array.isArray(fa.manualAdjustments) ? fa.manualAdjustments : [],
     }));
 
+    const masterCfg = masterConfigRows[0];
+    const hasSavedState =
+      allAccounts.length > 0 ||
+      allTransactions.length > 0 ||
+      allBudgets.length > 0 ||
+      allDebts.length > 0 ||
+      allInvestments.length > 0 ||
+      allFixedAssets.length > 0 ||
+      allRecurringTxs.length > 0 ||
+      allSavingsGoals.length > 0 ||
+      allEfTxs.length > 0 ||
+      efConfigs.length > 0 ||
+      Boolean(masterCfg);
+
     res.json({
+      hasSavedState,
       accounts: allAccounts.map(mapToNum),
       transactions: allTransactions.map(mapToNum),
       budgets: allBudgets.map((b: any) => {
@@ -896,11 +991,17 @@ apiRouter.get('/sync', async (req, res) => {
       recurringTransactions: allRecurringTxs.map(mapToNum),
       savingsGoals: allSavingsGoals.map(mapToNum),
       emergencyConfig: efConfigs.length > 0 ? mapToNum(efConfigs[0]) : { jobStability: 'medium', dependents: 0, monthlyExpense: 0 },
-      emergencyTransactions: allEfTxs.map(mapToNum)
+      emergencyTransactions: allEfTxs.map(mapToNum),
+      coaList: Array.isArray(masterCfg?.coaList) ? masterCfg.coaList : null,
+      masterCategories: Array.isArray(masterCfg?.masterCategories) ? masterCfg.masterCategories : null,
+      kprPresets: Array.isArray(masterCfg?.kprPresets) ? masterCfg.kprPresets : null,
+      kprCoaMapping: masterCfg?.kprCoaMapping && typeof masterCfg.kprCoaMapping === 'object' ? masterCfg.kprCoaMapping : null,
+      masterChangeLogs: Array.isArray(masterCfg?.masterChangeLogs) ? masterCfg.masterChangeLogs : null,
+      investmentGoals: Array.isArray(masterCfg?.investmentGoals) ? masterCfg.investmentGoals : null,
     });
   } catch (error: any) {
     console.error("GET /sync Error:", error);
-    res.status(500).json({ error: 'Failed to sync data' });
+    res.status(500).json({ error: 'Failed to sync data', details: error?.message || String(error) });
   }
 });
 
@@ -1055,54 +1156,65 @@ apiRouter.post('/sync', async (req, res) => {
         dueDay: safeNullableInt(a.dueDay),
         interestRate: safeNullableNumberString(a.interestRate),
         minPayment: safeNullableNumberString(a.minPayment),
+        coaCode: a.coaCode ? String(a.coaCode) : null,
       }));
 
-      let uniqueAccounts = deduplicateById(mappedAccounts);
-      if (uniqueAccounts.length === 0) {
-        const defaultAcc = {
-          id: `${userId}_acc_default`,
-          userId,
-          name: 'Dompet Tunai',
-          type: 'cash',
-          startingBalance: '0',
-          currentBalance: '0',
-          accountNumber: null,
-          creditLimit: null,
-          usedLimit: null,
-          initialDebt: null,
-          dueDay: null,
-          interestRate: null,
-          minPayment: null,
-        };
-        uniqueAccounts = [defaultAcc];
+      const uniqueAccounts = deduplicateById(mappedAccounts);
+      if (uniqueAccounts.length > 0) {
+        await tx.insert(accounts).values(uniqueAccounts as any).onConflictDoNothing();
       }
-
-      await tx.insert(accounts).values(uniqueAccounts as any).onConflictDoNothing();
       const validAccountIds = new Set(uniqueAccounts.map(a => a.id));
-      const fallbackAccountId = uniqueAccounts[0].id;
+      const fallbackAccountId = uniqueAccounts[0]?.id;
 
       // 2b. TRANSACTIONS
-      const mappedTransactions = (body.transactions || []).map((t: any, idx: number) => {
-        const mappedAccId = t.accountId ? ensureUserScopedId(t.accountId, 'acc', 0) : null;
-        const finalAccId = (mappedAccId && validAccountIds.has(mappedAccId)) ? mappedAccId : fallbackAccountId;
-        return {
-          id: ensureUserScopedId(t.id, 'tx', idx),
-          userId,
-          date: String(t.date || new Date().toISOString().split('T')[0]),
-          accountId: finalAccId,
-          type: String(t.type || 'expense'),
-          category: String(t.category || 'Lainnya'),
-          description: String(t.description || ''),
-          amount: safeNumberString(t.amount, '0'),
-          linkedDebtId: t.linkedDebtId ? ensureUserScopedId(t.linkedDebtId, 'debt', 0) : null,
-          linkedDebtAction: t.linkedDebtAction ? String(t.linkedDebtAction) : null,
-          linkedInvestmentId: t.linkedInvestmentId ? ensureUserScopedId(t.linkedInvestmentId, 'inv', 0) : null,
-          linkedInvestmentAction: t.linkedInvestmentAction ? String(t.linkedInvestmentAction) : null,
-        };
-      });
-      const uniqueTransactions = deduplicateById(mappedTransactions);
-      if (uniqueTransactions.length > 0) {
-        await tx.insert(transactions).values(uniqueTransactions as any).onConflictDoNothing();
+      if (fallbackAccountId) {
+        const mappedTransactions = (body.transactions || []).map((t: any, idx: number) => {
+          const mappedAccId = t.accountId ? ensureUserScopedId(t.accountId, 'acc', 0) : null;
+          const finalAccId = (mappedAccId && validAccountIds.has(mappedAccId)) ? mappedAccId : fallbackAccountId;
+          let mappedLinkedDebtId: string | null = null;
+          if (t.linkedDebtId && typeof t.linkedDebtId === 'string') {
+            if (t.linkedDebtId.startsWith('acc-debt-')) {
+              const targetAccRaw = t.linkedDebtId.slice('acc-debt-'.length);
+              mappedLinkedDebtId = `acc-debt-${ensureUserScopedId(targetAccRaw, 'acc', 0)}`;
+            } else {
+              mappedLinkedDebtId = ensureUserScopedId(t.linkedDebtId, 'debt', 0);
+            }
+          }
+          return {
+            id: ensureUserScopedId(t.id, 'tx', idx),
+            userId,
+            date: String(t.date || new Date().toISOString().split('T')[0]),
+            accountId: finalAccId,
+            type: String(t.type || 'expense'),
+            category: String(t.category || 'Lainnya'),
+            description: String(t.description || ''),
+            amount: safeNumberString(t.amount, '0'),
+            linkedDebtId: mappedLinkedDebtId,
+            linkedDebtAction: t.linkedDebtAction ? String(t.linkedDebtAction) : null,
+            linkedInvestmentId: t.linkedInvestmentId ? ensureUserScopedId(t.linkedInvestmentId, 'inv', 0) : null,
+            linkedInvestmentAction: t.linkedInvestmentAction ? String(t.linkedInvestmentAction) : null,
+            linkedFixedAssetId: t.linkedFixedAssetId ? ensureUserScopedId(t.linkedFixedAssetId, 'fa', 0) : null,
+            linkedFixedAssetAction: t.linkedFixedAssetAction ? String(t.linkedFixedAssetAction) : null,
+            linkedEmergencyTxId: t.linkedEmergencyTxId ? ensureUserScopedId(t.linkedEmergencyTxId, 'etx', 0) : null,
+            unitPrice: safeNullableNumberString(t.unitPrice),
+            units: safeNullableNumberString(t.units),
+            unitName: t.unitName ? String(t.unitName) : null,
+            isAdjustment: Boolean(t.isAdjustment),
+            adjustmentType: t.adjustmentType ? String(t.adjustmentType) : null,
+            adjustmentPeriodKey: t.adjustmentPeriodKey ? String(t.adjustmentPeriodKey) : null,
+            adjustmentRatePct: safeNullableNumberString(t.adjustmentRatePct),
+            adjustmentDurationDays: safeNullableInt(t.adjustmentDurationDays),
+            linkedFixedAssetAdjustmentId: t.linkedFixedAssetAdjustmentId ? String(t.linkedFixedAssetAdjustmentId) : null,
+            previousRateEffectiveDate: t.previousRateEffectiveDate ? String(t.previousRateEffectiveDate) : null,
+            coaDebitCode: t.coaDebitCode ? String(t.coaDebitCode) : null,
+            coaCreditCode: t.coaCreditCode ? String(t.coaCreditCode) : null,
+            linkedKprBreakdown: t.linkedKprBreakdown && typeof t.linkedKprBreakdown === 'object' ? t.linkedKprBreakdown : null,
+          };
+        });
+        const uniqueTransactions = deduplicateById(mappedTransactions);
+        if (uniqueTransactions.length > 0) {
+          await tx.insert(transactions).values(uniqueTransactions as any).onConflictDoNothing();
+        }
       }
 
       // 2c. BUDGETS
@@ -1129,6 +1241,7 @@ apiRouter.post('/sync', async (req, res) => {
         purpose: String(d.purpose || 'Lainnya'),
         category: String(d.category || 'Utang Konsumtif'),
         dueDay: safeNullableInt(d.dueDay),
+        dueDate: d.dueDate ? String(d.dueDate) : null,
         startDate: d.startDate ? String(d.startDate) : null,
         kprScheme: d.kprScheme ? String(d.kprScheme) : null,
         kprPresetId: d.kprPresetId ? String(d.kprPresetId) : null,
@@ -1138,6 +1251,8 @@ apiRouter.post('/sync', async (req, res) => {
         fixedRate: safeNullableNumberString(d.fixedRate),
         fixedYears: safeNullableInt(d.fixedYears),
         floatingRate: safeNullableNumberString(d.floatingRate),
+        kprFeesSummary: d.kprFeesSummary && typeof d.kprFeesSummary === 'object' ? d.kprFeesSummary : null,
+        kprCoaSnapshot: d.kprCoaSnapshot && typeof d.kprCoaSnapshot === 'object' ? d.kprCoaSnapshot : null,
       }));
       const uniqueDebts = deduplicateById(mappedDebts);
       if (uniqueDebts.length > 0) {
@@ -1238,27 +1353,29 @@ apiRouter.post('/sync', async (req, res) => {
       }
 
       // 2f. RECURRING TRANSACTIONS
-      const mappedRecurring = (body.recurringTransactions || []).map((r: any, idx: number) => {
-        const mappedAccId = r.accountId ? ensureUserScopedId(r.accountId, 'acc', 0) : null;
-        const finalAccId = (mappedAccId && validAccountIds.has(mappedAccId)) ? mappedAccId : fallbackAccountId;
-        return {
-          id: ensureUserScopedId(r.id, 'rec', idx),
-          userId,
-          title: String(r.title || 'Transaksi Rutin'),
-          type: String(r.type || 'expense'),
-          category: String(r.category || 'Lainnya'),
-          amount: safeNumberString(r.amount, '0'),
-          accountId: finalAccId,
-          frequency: String(r.frequency || 'monthly'),
-          dayOfMonth: safeInt(r.dayOfMonth, 1),
-          isActive: Boolean(r.isActive ?? true),
-          description: r.description ? String(r.description) : null,
-          lastProcessedDate: r.lastProcessedDate ? String(r.lastProcessedDate) : null,
-        };
-      });
-      const uniqueRecurring = deduplicateById(mappedRecurring);
-      if (uniqueRecurring.length > 0) {
-        await tx.insert(recurringTransactions).values(uniqueRecurring as any).onConflictDoNothing();
+      if (fallbackAccountId) {
+        const mappedRecurring = (body.recurringTransactions || []).map((r: any, idx: number) => {
+          const mappedAccId = r.accountId ? ensureUserScopedId(r.accountId, 'acc', 0) : null;
+          const finalAccId = (mappedAccId && validAccountIds.has(mappedAccId)) ? mappedAccId : fallbackAccountId;
+          return {
+            id: ensureUserScopedId(r.id, 'rec', idx),
+            userId,
+            title: String(r.title || 'Transaksi Rutin'),
+            type: String(r.type || 'expense'),
+            category: String(r.category || 'Lainnya'),
+            amount: safeNumberString(r.amount, '0'),
+            accountId: finalAccId,
+            frequency: String(r.frequency || 'monthly'),
+            dayOfMonth: safeInt(r.dayOfMonth, 1),
+            isActive: Boolean(r.isActive ?? true),
+            description: r.description ? String(r.description) : null,
+            lastProcessedDate: r.lastProcessedDate ? String(r.lastProcessedDate) : null,
+          };
+        });
+        const uniqueRecurring = deduplicateById(mappedRecurring);
+        if (uniqueRecurring.length > 0) {
+          await tx.insert(recurringTransactions).values(uniqueRecurring as any).onConflictDoNothing();
+        }
       }
 
       // 2g. SAVINGS GOALS
@@ -1301,6 +1418,39 @@ apiRouter.post('/sync', async (req, res) => {
       if (uniqueEfTxs.length > 0) {
         await tx.insert(emergencyFundTransactions).values(uniqueEfTxs as any).onConflictDoNothing();
       }
+
+      // 2j. USER MASTER CONFIGS (COA List, Master Categories, KPR Presets, KPR COA Mapping, Change Logs, Investment Goals)
+      const scopedInvestmentGoals = Array.isArray(body.investmentGoals)
+        ? body.investmentGoals.map((g: any) => ({
+            ...g,
+            linkedAssetId: g?.linkedAssetId ? ensureUserScopedId(g.linkedAssetId, 'inv', 0) : undefined,
+          }))
+        : null;
+
+      await tx
+        .insert(userMasterConfigs)
+        .values({
+          userId,
+          coaList: Array.isArray(body.coaList) ? body.coaList : null,
+          masterCategories: Array.isArray(body.masterCategories) ? body.masterCategories : null,
+          kprPresets: Array.isArray(body.kprPresets) ? body.kprPresets : null,
+          kprCoaMapping: body.kprCoaMapping && typeof body.kprCoaMapping === 'object' ? body.kprCoaMapping : null,
+          masterChangeLogs: Array.isArray(body.masterChangeLogs) ? body.masterChangeLogs.slice(0, 100) : null,
+          investmentGoals: scopedInvestmentGoals,
+          updatedAt: new Date(),
+        })
+        .onConflictDoUpdate({
+          target: userMasterConfigs.userId,
+          set: {
+            coaList: Array.isArray(body.coaList) ? body.coaList : sql`${userMasterConfigs.coaList}`,
+            masterCategories: Array.isArray(body.masterCategories) ? body.masterCategories : sql`${userMasterConfigs.masterCategories}`,
+            kprPresets: Array.isArray(body.kprPresets) ? body.kprPresets : sql`${userMasterConfigs.kprPresets}`,
+            kprCoaMapping: body.kprCoaMapping && typeof body.kprCoaMapping === 'object' ? body.kprCoaMapping : sql`${userMasterConfigs.kprCoaMapping}`,
+            masterChangeLogs: Array.isArray(body.masterChangeLogs) ? body.masterChangeLogs.slice(0, 100) : sql`${userMasterConfigs.masterChangeLogs}`,
+            investmentGoals: Array.isArray(body.investmentGoals) ? scopedInvestmentGoals : sql`${userMasterConfigs.investmentGoals}`,
+            updatedAt: new Date(),
+          },
+        });
     });
   });
 

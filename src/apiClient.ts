@@ -546,11 +546,10 @@ export const requestForgotPasswordPostgres = async (identifier: string) => {
 
 export const syncToPostgres = async (data: any, userId: string) => {
   if (!userId || typeof userId !== 'string' || !userId.trim()) {
-    return { success: false, fallback: true, error: 'User ID is missing' };
+    return { success: false, fallback: false, error: 'User ID is missing' };
   }
 
   const cleanUserId = userId.trim();
-  const LOCAL_STORAGE_KEY = `nusantara_wealth_backup_${cleanUserId}`;
 
   // Enforce valid userId association across accounts and all child data collections
   const sanitizedData = { ...data };
@@ -565,16 +564,6 @@ export const syncToPostgres = async (data: any, userId: string) => {
       ...t,
       userId: t.userId && String(t.userId).trim() ? String(t.userId).trim() : cleanUserId
     }));
-  }
-  
-  // Always save a copy to encrypted localStorage as resilient offline backup
-  try {
-    secureStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify({
-      ...sanitizedData,
-      _lastUpdated: new Date().toISOString()
-    }));
-  } catch {
-    // Ignore LocalStorage write quota error silently
   }
 
   // Exponential backoff retry mechanism with error classification
@@ -632,13 +621,13 @@ export const syncToPostgres = async (data: any, userId: string) => {
           });
 
           showToast({
-            type: 'warning',
+            type: 'error',
             title: `Kesalahan Skema Database (SQL ${sqlState})`,
-            message: `[Error ${sqlState}]: ${details}. Data aman tersimpan di cadangan lokal.`,
+            message: `[Error ${sqlState}]: ${details}. Perubahan belum tersimpan di PostgreSQL.`,
             duration: 6000
           });
 
-          return { success: false, fallback: true, error: lastErrorMsg, isSchemaError: true, sqlState };
+          return { success: false, fallback: false, error: lastErrorMsg, isSchemaError: true, sqlState };
         }
 
         if (isConnectionError) {
@@ -661,13 +650,13 @@ export const syncToPostgres = async (data: any, userId: string) => {
         }
 
         showToast({
-          type: 'warning',
-          title: `Mode Cadangan Lokal (SQL ${sqlState})`,
-          message: `Gagal sinkron [SQL ${sqlState}]: ${details}. Data tersimpan di perangkat.`,
+          type: 'error',
+          title: `Gagal Menyimpan ke PostgreSQL (SQL ${sqlState})`,
+          message: `Gagal sinkron [SQL ${sqlState}]: ${details}. Periksa koneksi server lalu coba ulang.`,
           duration: 5000
         });
 
-        return { success: false, fallback: true, error: lastErrorMsg, sqlState };
+        return { success: false, fallback: false, error: lastErrorMsg, sqlState };
       }
 
       logClientInteraction({
@@ -703,28 +692,26 @@ export const syncToPostgres = async (data: any, userId: string) => {
       logClientInteraction({
         action: 'POST /api/db/sync',
         status: 'FAILURE',
-        message: 'Gagal koneksi sinkronisasi cloud DB, beralih ke cadangan lokal',
+        message: 'Gagal koneksi sinkronisasi ke PostgreSQL',
         details: `SQL State [${sqlState}]`,
         errorCode: 'NET_CONN_ERROR'
       });
       
       showToast({
         type: 'error',
-        title: `Gagal Koneksi Cloud (${sqlState})`,
-        message: `[Error ${sqlState}]: ${errorDetails}. Beroperasi dengan cadangan lokal.`,
+        title: `Gagal Koneksi PostgreSQL (${sqlState})`,
+        message: `[Error ${sqlState}]: ${errorDetails}. Perubahan belum tersimpan ke database server.`,
         duration: 5000
       });
 
-      return { success: false, fallback: true, error: lastErrorMsg, sqlState };
+      return { success: false, fallback: false, error: lastErrorMsg, sqlState };
     }
   }
 
-  return { success: false, fallback: true, error: lastErrorMsg };
+  return { success: false, fallback: false, error: lastErrorMsg };
 };
 
 export const syncFromPostgres = async (userId: string) => {
-  const LOCAL_STORAGE_KEY = `nusantara_wealth_backup_${userId}`;
-
   try {
     const res = await fetch('/api/db/sync', {
       headers: buildSecureDbHeaders({
@@ -746,13 +733,6 @@ export const syncFromPostgres = async (userId: string) => {
       message: 'Berhasil mengunduh data dari Neon PostgreSQL'
     });
 
-    try {
-      secureStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify({
-        ...data,
-        _lastUpdated: new Date().toISOString()
-      }));
-    } catch {}
-
     return data;
   } catch (error: any) {
     const errorMsg = error?.message || 'Database sync query failed';
@@ -760,40 +740,15 @@ export const syncFromPostgres = async (userId: string) => {
     logClientInteraction({
       action: 'GET /api/db/sync',
       status: 'FAILURE',
-      message: 'Gagal mengunduh data cloud DB, memulihkan cadangan lokal',
+      message: 'Gagal mengunduh data dari PostgreSQL',
       details: errorMsg,
       errorCode: 'SYNC_FETCH_FAILED'
     });
-    
-    try {
-      const cachedStr = secureStorage.getItem(LOCAL_STORAGE_KEY);
-      if (cachedStr) {
-        const cachedData = JSON.parse(cachedStr);
-        
-        logClientInteraction({
-          action: 'RESTORE_CACHE',
-          status: 'SUCCESS',
-          message: 'Berhasil memulihkan data lokal pengguna dari LocalStorage',
-          details: `Diperbarui pada: ${cachedData._lastUpdated || 'Sebelumnya'}`
-        });
 
-        return {
-          ...cachedData,
-          _restoredFromCache: true,
-          _syncErrorMessage: errorMsg
-        };
-      }
-    } catch (restoreErr: any) {
-      logClientInteraction({
-        action: 'RESTORE_CACHE',
-        status: 'FAILURE',
-        message: 'Gagal membaca cadangan LocalStorage',
-        details: restoreErr?.message,
-        errorCode: 'CACHE_PARSE_ERROR'
-      });
-    }
-
-    return null;
+    return {
+      _syncError: true,
+      _syncErrorMessage: errorMsg
+    };
   }
 };
 

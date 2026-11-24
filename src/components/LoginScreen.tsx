@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { 
   Lock, User as UserIcon, UserPlus, Key, Shield, ShieldAlert, 
   Sparkles, CheckCircle2, Eye, EyeOff, Cloud, Database, Mail, 
-  Activity, RefreshCw, ArrowLeft, ArrowRight, Send, AlertTriangle, Wifi, Server,
+  Activity, RefreshCw, ArrowLeft, Send, AlertTriangle, Wifi, Server,
   Terminal, Trash2, Info
 } from 'lucide-react';
 import { User } from '../types';
@@ -20,7 +20,7 @@ import {
 } from '../apiClient';
 
 interface LoginScreenProps {
-  onLoginSuccess: (user: User, dataChoice: 'empty' | 'sample') => void;
+  onLoginSuccess: (user: User, dataChoice: 'empty' | 'sample', isNewRegistration?: boolean) => void;
 }
 
 export function LoginScreen({ onLoginSuccess }: LoginScreenProps) {
@@ -90,16 +90,6 @@ export function LoginScreen({ onLoginSuccess }: LoginScreenProps) {
     setClientLogs([]);
   };
 
-  const handleOfflineLogin = () => {
-    const cleanUser = username.trim() || 'ariesD';
-    onLoginSuccess({
-      username: cleanUser,
-      fullName: cleanUser === 'ariesD' ? 'Aries D (Mode Offline)' : cleanUser,
-      uid: `user-local-${cleanUser}`,
-      isPremium: true
-    }, 'sample');
-  };
-
   const handleLoginLocal = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
@@ -127,7 +117,7 @@ export function LoginScreen({ onLoginSuccess }: LoginScreenProps) {
         fullName: data.user.fullName,
         uid: data.user.id,
         isPremium: true
-      }, 'sample');
+      }, 'empty', false);
     } catch (err: any) {
       const rawMsg = err?.message || 'Login database PostgreSQL gagal.';
       const cleanMsg = rawMsg.replace(/^\[Database Error\]\s*/i, '');
@@ -145,7 +135,7 @@ export function LoginScreen({ onLoginSuccess }: LoginScreenProps) {
         runDiagnosticCheck();
       } else {
         setError(cleanMsg);
-        setErrorDetails(err?.details || 'Periksa kembali data masukan Anda atau gunakan opsi login mode offline.');
+        setErrorDetails(err?.details || 'Periksa kembali data masukan Anda dan pastikan server PostgreSQL terhubung.');
         setErrorCode('DB_QUERY_ERR');
         setShowDiagnostic(true);
         runDiagnosticCheck();
@@ -195,7 +185,7 @@ export function LoginScreen({ onLoginSuccess }: LoginScreenProps) {
           fullName: data.user.fullName,
           uid: data.user.id,
           isPremium: true
-        }, dataChoice);
+        }, dataChoice, true);
       }, 1200);
     } catch (err: any) {
       const rawMsg = err?.message || 'Pendaftaran ke database PostgreSQL gagal.';
@@ -268,7 +258,7 @@ export function LoginScreen({ onLoginSuccess }: LoginScreenProps) {
       const googleUser = await loginWithGoogleSheets();
       setSuccess('Masuk berhasil! Mengunduh data dari Cloud...');
       setTimeout(() => {
-        onLoginSuccess(googleUser, 'sample');
+        onLoginSuccess(googleUser, 'empty', false);
       }, 1000);
     } catch (err: any) {
       setSuccess('');
@@ -321,18 +311,21 @@ export function LoginScreen({ onLoginSuccess }: LoginScreenProps) {
                 <div className="text-[10px] text-rose-300/80 font-normal leading-relaxed break-words">{errorDetails}</div>
               )}
 
-              {/* Actionable offline login bypass option */}
+              {/* Actionable PostgreSQL connection retry option */}
               <div className="pt-2 border-t border-rose-500/20 mt-2 space-y-1.5">
                 <p className="text-[9.5px] text-slate-300 font-normal">
-                  💡 Tetap bisa masuk tanpa PostgreSQL! Lanjutkan dengan penyimpanan lokal:
+                  Pastikan database PostgreSQL aktif agar data selalu sinkron lintas komputer:
                 </p>
                 <button
                   type="button"
-                  onClick={handleOfflineLogin}
-                  className="w-full py-2 px-3 bg-emerald-600/30 hover:bg-emerald-600/50 active:scale-[0.98] text-emerald-200 font-bold text-[10.5px] rounded-lg border border-emerald-500/40 transition cursor-pointer flex items-center justify-center gap-1.5 shadow-sm"
+                  onClick={() => {
+                    setShowDiagnostic(true);
+                    runDiagnosticCheck();
+                  }}
+                  className="w-full py-2 px-3 bg-blue-600/30 hover:bg-blue-600/50 active:scale-[0.98] text-blue-200 font-bold text-[10.5px] rounded-lg border border-blue-500/40 transition cursor-pointer flex items-center justify-center gap-1.5 shadow-sm"
                 >
-                  <span>Masuk dengan Mode Offline (Data Lokal)</span>
-                  <ArrowRight className="h-3.5 w-3.5" />
+                  <RefreshCw className="h-3.5 w-3.5" />
+                  <span>Uji Koneksi PostgreSQL Sekarang</span>
                 </button>
               </div>
             </div>
@@ -387,7 +380,7 @@ export function LoginScreen({ onLoginSuccess }: LoginScreenProps) {
                   }}
                   className="w-full text-center py-2.5 px-3 bg-blue-600/20 hover:bg-blue-600/40 text-blue-300 font-black text-[10px] uppercase tracking-wider rounded-lg border border-blue-500/35 transition cursor-pointer"
                 >
-                  Beralih ke Jurnal Lokal (Offline-first)
+                  Masuk dengan Username &amp; Password
                 </button>
               </div>
             )}
@@ -401,7 +394,7 @@ export function LoginScreen({ onLoginSuccess }: LoginScreenProps) {
                 }}
                 className="text-[10px] text-blue-400 hover:text-blue-300 font-black uppercase tracking-wider cursor-pointer"
               >
-                Gunakan Jurnal Lokal (Offline)
+                Gunakan Login PostgreSQL
               </button>
             </div>
           </div>

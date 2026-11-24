@@ -1,8 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { InvestmentGoal, InvestmentAsset } from '../types';
 import { FormattedNumberInput } from './FormattedNumberInput';
-import { secureStorage } from '../utils/secureStorage';
-import { logger } from '../utils/logger';
 import { formatterIDR } from '../utils/formatters';
 import { parseLocalDate, toLocalYYYYMMDD } from '../utils/accountingEngine';
 import { showToast } from '../utils/toast';
@@ -29,6 +27,8 @@ import {
 
 interface InvestmentGoalSectionProps {
   investments?: InvestmentAsset[];
+  investmentGoals?: InvestmentGoal[];
+  onUpdateInvestmentGoals?: (goals: InvestmentGoal[]) => void;
 }
 
 export function getGoalDaysRemaining(targetDateStr: string): {
@@ -110,7 +110,7 @@ export function calculateInvestmentDuration(
   return { months, years, remMonths, targetReachedDateStr };
 }
 
-const DEFAULT_INVESTMENT_GOALS: InvestmentGoal[] = [
+export const DEFAULT_INVESTMENT_GOALS: InvestmentGoal[] = [
   {
     id: 'inv-goal-1',
     title: 'Beli Emas Antam 100 Gram',
@@ -148,36 +148,32 @@ const DEFAULT_INVESTMENT_GOALS: InvestmentGoal[] = [
 
 export const InvestmentGoalSection: React.FC<InvestmentGoalSectionProps> = ({
   investments = [],
+  investmentGoals,
+  onUpdateInvestmentGoals,
 }) => {
+  const [localGoals, setLocalGoals] = useState<InvestmentGoal[]>(() => investmentGoals ?? []);
+  const goals = investmentGoals ?? localGoals;
 
-  const [goals, setGoals] = useState<InvestmentGoal[]>(() => {
-    try {
-      const saved = secureStorage.getItem('nusantara_investment_goals');
-      if (saved !== null) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) return parsed;
-      }
-    } catch (e) {
-      logger.error('Failed to parse investment goals:', e);
+  const setGoals = (updater: InvestmentGoal[] | ((prev: InvestmentGoal[]) => InvestmentGoal[])) => {
+    const next = typeof updater === 'function' ? updater(goals) : updater;
+    if (onUpdateInvestmentGoals) {
+      onUpdateInvestmentGoals(next);
+    } else {
+      setLocalGoals(next);
     }
-    return DEFAULT_INVESTMENT_GOALS;
-  });
+  };
 
   useEffect(() => {
     const handleDataReset = () => {
-      setGoals([]);
+      if (onUpdateInvestmentGoals) {
+        onUpdateInvestmentGoals([]);
+      } else {
+        setLocalGoals([]);
+      }
     };
     window.addEventListener('nusantara:data-reset', handleDataReset);
     return () => window.removeEventListener('nusantara:data-reset', handleDataReset);
-  }, []);
-
-  useEffect(() => {
-    try {
-      secureStorage.setItem('nusantara_investment_goals', JSON.stringify(goals));
-    } catch (e) {
-      logger.error('Failed to save investment goals:', e);
-    }
-  }, [goals]);
+  }, [onUpdateInvestmentGoals]);
 
   // Modal State
   const [isModalOpen, setIsModalOpen] = useState<boolean>(false);

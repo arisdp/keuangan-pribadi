@@ -39,6 +39,7 @@ import {
   FixedAssetAdjustment,
   FixedAssetCategory,
   InvestmentAsset,
+  InvestmentGoal,
   User,
   RecurringTransaction,
   SavingsGoal,
@@ -48,13 +49,11 @@ import {
 import {
   DEFAULT_KPR_COA_MAPPING,
   DEFAULT_KPR_PRESETS,
-  getStoredKprPresets,
   saveStoredKprPresets,
   resetStoredKprPresets,
-  getStoredKprCoaMapping,
   saveStoredKprCoaMapping,
   resetStoredKprCoaMapping,
-  resolveEffectiveKprCoaMapping
+  resolveEffectiveKprCoaMapping,
 } from './utils/kprPresets';
 import { 
   INITIAL_ACCOUNTS, 
@@ -69,7 +68,7 @@ import {
 import { 
   CategoryNode, 
   DEFAULT_CATEGORY_HIERARCHY, 
-  getStoredCategories, 
+  mergeMissingDefaultCategories,
   saveStoredCategories 
 } from './categoryHierarchy';
 
@@ -89,16 +88,20 @@ import { MasterCategoryManager } from './components/MasterCategoryManager';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { BackupDataModal } from './components/BackupDataModal';
 import { AccountingIntegrityModal } from './components/AccountingIntegrityModal';
+import { DEFAULT_INVESTMENT_GOALS } from './components/InvestmentGoalSection';
 import {
   validateMasterIntegrityOnLoad,
   getStoredCoaList,
   getAccountCoaMapping,
   factoryResetMasterData,
   DEFAULT_COA_LIST,
-  saveStoredCoaList,
-  clearMasterChangeLogs,
   scanCoaDuplicatesAndUnused,
-  CoaScanResult
+  CoaScanResult,
+  AccountCOA,
+  MasterChangeLog,
+  getMasterChangeLogs,
+  hydrateMasterCoaAndLogs,
+  subscribeMasterConfigUpdates,
 } from './coaUtils';
 import { motion, AnimatePresence } from 'motion/react';
 import { useTheme } from './ThemeContext';
@@ -132,7 +135,9 @@ import {
   AlertTriangle,
   ChevronDown,
   ChevronRight,
-  FolderTree
+  FolderTree,
+  Database,
+  RefreshCw
 } from 'lucide-react';
 
 export default function App() {
@@ -144,135 +149,58 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  // --- 1. CURRENT USER STATE ---
+  // --- 1. CURRENT USER SESSION ---
   const [currentUser, setCurrentUser] = useState<User | null>(() => {
     const saved = secureStorage.getItem('fin_current_user');
     return saved ? JSON.parse(saved) : null;
   });
 
-  // --- 2. CORE STATES WITH LOCALSTORAGE PERSISTENCE (USER SPECIFIC) ---
-  const [transactions, setTransactions] = useState<Transaction[]>(() => {
-    const user = secureStorage.getItem('fin_current_user');
-    if (user) {
-      const u: User = JSON.parse(user);
-      const saved = secureStorage.getItem(`fin_${u.username}_transactions`);
-      return saved ? JSON.parse(saved) : [];
-    }
-    return [];
+  // --- 2. CORE STATES (IN-MEMORY, AUTHORITATIVELY HYDRATED FROM POSTGRESQL) ---
+  const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [budgets, setBudgets] = useState<CategoryBudget[]>([]);
+  const [debts, setDebts] = useState<Debt[]>([]);
+  const [investments, setInvestments] = useState<InvestmentAsset[]>([]);
+  const [fixedAssets, setFixedAssets] = useState<FixedAsset[]>([]);
+  const [emergencyConfig, setEmergencyConfig] = useState<EmergencyFundConfig>({
+    jobStability: 'medium',
+    dependents: 0,
+    monthlyExpense: 0,
   });
+  const [emergencyTransactions, setEmergencyTransactions] = useState<EmergencyFundTransaction[]>([]);
 
-  const [accounts, setAccounts] = useState<Account[]>(() => {
-    const user = secureStorage.getItem('fin_current_user');
-    if (user) {
-      const u: User = JSON.parse(user);
-      const saved = secureStorage.getItem(`fin_${u.username}_accounts`);
-      return saved ? JSON.parse(saved) : [];
-    }
-    return [];
-  });
-
-  const [budgets, setBudgets] = useState<CategoryBudget[]>(() => {
-    const user = secureStorage.getItem('fin_current_user');
-    if (user) {
-      const u: User = JSON.parse(user);
-      const saved = secureStorage.getItem(`fin_${u.username}_budgets`);
-      return saved ? JSON.parse(saved) : [];
-    }
-    return [];
-  });
-
-  const [debts, setDebts] = useState<Debt[]>(() => {
-    const user = secureStorage.getItem('fin_current_user');
-    if (user) {
-      const u: User = JSON.parse(user);
-      const saved = secureStorage.getItem(`fin_${u.username}_debts`);
-      return saved ? JSON.parse(saved) : [];
-    }
-    return [];
-  });
-
-  const [investments, setInvestments] = useState<InvestmentAsset[]>(() => {
-    const user = secureStorage.getItem('fin_current_user');
-    if (user) {
-      const u: User = JSON.parse(user);
-      const saved = secureStorage.getItem(`fin_${u.username}_investments`);
-      return saved ? JSON.parse(saved) : [];
-    }
-    return [];
-  });
-
-  const [fixedAssets, setFixedAssets] = useState<FixedAsset[]>(() => {
-    const user = secureStorage.getItem('fin_current_user');
-    if (user) {
-      const u: User = JSON.parse(user);
-      const saved = secureStorage.getItem(`fin_${u.username}_fixed_assets`);
-      return saved ? JSON.parse(saved) : [];
-    }
-    return [];
-  });
-
-  const [emergencyConfig, setEmergencyConfig] = useState<EmergencyFundConfig>(() => {
-    const user = secureStorage.getItem('fin_current_user');
-    if (user) {
-      const u: User = JSON.parse(user);
-      const saved = secureStorage.getItem(`fin_${u.username}_emergency_config`);
-      return saved ? JSON.parse(saved) : { jobStability: 'medium', dependents: 0, monthlyExpense: 0 };
-    }
-    return { jobStability: 'medium', dependents: 0, monthlyExpense: 0 };
-  });
-
-  const [emergencyTransactions, setEmergencyTransactions] = useState<EmergencyFundTransaction[]>(() => {
-    const user = secureStorage.getItem('fin_current_user');
-    if (user) {
-      const u: User = JSON.parse(user);
-      const saved = secureStorage.getItem(`fin_${u.username}_emergency_transactions`);
-      return saved ? JSON.parse(saved) : [];
-    }
-    return [];
-  });
-
-  // --- MASTER CATEGORIES STATE (HIERARCHICAL) ---
-  const [masterCategories, setMasterCategories] = useState<CategoryNode[]>(() => {
-    const user = secureStorage.getItem('fin_current_user');
-    const u = user ? JSON.parse(user) : null;
-    return getStoredCategories(u?.username);
-  });
+  // --- MASTER DATA & CONFIG STATES (POSTGRESQL BACKED) ---
+  const [masterCategories, setMasterCategories] = useState<CategoryNode[]>(DEFAULT_CATEGORY_HIERARCHY);
+  const [coaList, setCoaList] = useState<AccountCOA[]>(() => [...DEFAULT_COA_LIST]);
+  const [masterChangeLogs, setMasterChangeLogs] = useState<MasterChangeLog[]>([]);
+  const [kprPresets, setKprPresets] = useState<KprPreset[]>(DEFAULT_KPR_PRESETS);
+  const [kprCoaMapping, setKprCoaMapping] = useState<KprCoaMappingConfig>(DEFAULT_KPR_COA_MAPPING);
+  const [investmentGoals, setInvestmentGoals] = useState<InvestmentGoal[]>([]);
 
   useEffect(() => {
-    saveStoredCategories(masterCategories, currentUser?.username);
-  }, [masterCategories, currentUser]);
-
-  // --- KPR PRESETS & COA MAPPING STATE ---
-  const [kprPresets, setKprPresets] = useState<KprPreset[]>(() => {
-    const user = secureStorage.getItem('fin_current_user');
-    const u = user ? JSON.parse(user) : null;
-    return getStoredKprPresets(u?.username);
-  });
+    saveStoredCategories(masterCategories);
+  }, [masterCategories]);
 
   useEffect(() => {
-    saveStoredKprPresets(kprPresets, currentUser?.username);
-  }, [kprPresets, currentUser]);
-
-  const [kprCoaMapping, setKprCoaMapping] = useState<KprCoaMappingConfig>(() => {
-    const user = secureStorage.getItem('fin_current_user');
-    const u = user ? JSON.parse(user) : null;
-    return getStoredKprCoaMapping(u?.username);
-  });
+    saveStoredKprPresets(kprPresets);
+  }, [kprPresets]);
 
   useEffect(() => {
-    saveStoredKprCoaMapping(kprCoaMapping, currentUser?.username);
-  }, [kprCoaMapping, currentUser]);
+    saveStoredKprCoaMapping(kprCoaMapping);
+  }, [kprCoaMapping]);
+
+  useEffect(() => {
+    const unsubscribe = subscribeMasterConfigUpdates(() => {
+      const latestCoas = getStoredCoaList();
+      setCoaList((prev) => (JSON.stringify(prev) === JSON.stringify(latestCoas) ? prev : latestCoas));
+      const latestLogs = getMasterChangeLogs();
+      setMasterChangeLogs((prev) => (JSON.stringify(prev) === JSON.stringify(latestLogs) ? prev : latestLogs));
+    });
+    return unsubscribe;
+  }, []);
 
   // --- RECURRING TRANSACTIONS STATE ---
-  const [recurringTransactions, setRecurringTransactions] = useState<RecurringTransaction[]>(() => {
-    const user = secureStorage.getItem('fin_current_user');
-    if (user) {
-      const u: User = JSON.parse(user);
-      const saved = secureStorage.getItem(`fin_${u.username}_recurring_transactions`);
-      if (saved !== null) return JSON.parse(saved);
-    }
-    return [];
-  });
+  const [recurringTransactions, setRecurringTransactions] = useState<RecurringTransaction[]>([]);
 
   // Sync recurring transactions to Service Worker (sw.js) for local push notifications (due <= 3 days)
   useEffect(() => {
@@ -300,15 +228,7 @@ export default function App() {
   }, [recurringTransactions]);
 
   // --- SAVINGS GOALS (GOAL TRACKER) STATE ---
-  const [savingsGoals, setSavingsGoals] = useState<SavingsGoal[]>(() => {
-    const user = secureStorage.getItem('fin_current_user');
-    if (user) {
-      const u: User = JSON.parse(user);
-      const saved = secureStorage.getItem(`fin_${u.username}_savings_goals`);
-      if (saved !== null) return JSON.parse(saved);
-    }
-    return [];
-  });
+  const [savingsGoals, setSavingsGoals] = useState<SavingsGoal[]>([]);
 
   const handleAddSavingsGoal = (newGoal: Omit<SavingsGoal, 'id'>) => {
     const goal: SavingsGoal = {
@@ -336,9 +256,18 @@ export default function App() {
     );
   };
 
-  // Automatic scheduled transaction processing on mount / active user
+  // --- Cloud & PostgreSQL Authoritative Sync State ---
+  const [cloudSync, setCloudSync] = useState<boolean>(false);
+  const [loadingPg, setLoadingPg] = useState<boolean>(false);
+  const [isPgHydrated, setIsPgHydrated] = useState<boolean>(false);
+  const [pgHydrationError, setPgHydrationError] = useState<string | null>(null);
+  const [pgReloadCounter, setPgReloadCounter] = useState<number>(0);
+  const [loadingCloudData, setLoadingCloudData] = useState<boolean>(false);
+  const pendingInitialSeedRef = useRef<'empty' | 'sample' | null>(null);
+
+  // Automatic scheduled transaction processing after PostgreSQL hydration
   useEffect(() => {
-    if (!currentUser || recurringTransactions.length === 0) return;
+    if (!currentUser || loadingPg || !isPgHydrated || recurringTransactions.length === 0) return;
 
     const now = new Date();
     const currentYear = now.getFullYear();
@@ -397,7 +326,7 @@ export default function App() {
       setAccounts(updatedAccounts);
       setRecurringTransactions(updatedRecurring);
     }
-  }, [currentUser]);
+  }, [currentUser, loadingPg, isPgHydrated]);
 
   // UI Navigation states & Grouped Sub-menus
   const NAV_GROUPS = [
@@ -467,81 +396,82 @@ export default function App() {
 
   // --- CENTRALIZED COA & LEDGER ANOMALY SCAN STATE (LIFTED) ---
   const [coaScanResult, setCoaScanResult] = useState<CoaScanResult>(() =>
-    scanCoaDuplicatesAndUnused(getStoredCoaList(), accounts, transactions)
+    scanCoaDuplicatesAndUnused(DEFAULT_COA_LIST, [], [])
   );
 
   const handleRescanCoa = (): CoaScanResult => {
-    const freshScan = scanCoaDuplicatesAndUnused(getStoredCoaList(), accounts, transactions);
+    const freshScan = scanCoaDuplicatesAndUnused(coaList, accounts, transactions);
     setCoaScanResult(freshScan);
     return freshScan;
   };
 
   useEffect(() => {
-    setCoaScanResult(scanCoaDuplicatesAndUnused(getStoredCoaList(), accounts, transactions));
-  }, [accounts, transactions, showIntegrityModal, activeTab]);
+    setCoaScanResult(scanCoaDuplicatesAndUnused(coaList, accounts, transactions));
+  }, [coaList, accounts, transactions, showIntegrityModal, activeTab]);
 
-  // --- AUTOMATIC DATA INTEGRITY VALIDATION ON APPLICATION LOAD ---
+  // --- AUTOMATIC DATA INTEGRITY VALIDATION ON APPLICATION LOAD (POST-POSTGRES HYDRATION) ---
   useEffect(() => {
-    if (!currentUser || (accounts.length === 0 && transactions.length === 0)) return;
+    if (!currentUser || !isPgHydrated || (accounts.length === 0 && transactions.length === 0)) return;
     if (startupIntegrityCheckedUserRef.current === currentUser.username) return;
     startupIntegrityCheckedUserRef.current = currentUser.username;
 
-    const coaList = getStoredCoaList();
     const result = validateMasterIntegrityOnLoad(accounts, coaList, transactions);
 
     // If orphaned accounts, unlinked COAs, orphaned transactions, or duplicate ledger entries exist, prompt user
     if (!result.isValid || result.totalIssuesCount > 0) {
       setShowIntegrityModal(true);
     }
-  }, [currentUser, accounts, transactions]);
+  }, [currentUser, isPgHydrated, accounts, transactions, coaList]);
 
   const handleRestoreData = (restoredData: any) => {
     if (!currentUser) return;
-    const username = currentUser.username;
 
     if (Array.isArray(restoredData.transactions)) {
       setTransactions(restoredData.transactions);
-      secureStorage.setItem(`fin_${username}_transactions`, JSON.stringify(restoredData.transactions));
     }
     if (Array.isArray(restoredData.accounts)) {
       setAccounts(restoredData.accounts);
-      secureStorage.setItem(`fin_${username}_accounts`, JSON.stringify(restoredData.accounts));
     }
     if (Array.isArray(restoredData.budgets)) {
       setBudgets(restoredData.budgets);
-      secureStorage.setItem(`fin_${username}_budgets`, JSON.stringify(restoredData.budgets));
     }
     if (Array.isArray(restoredData.debts)) {
       setDebts(restoredData.debts);
-      secureStorage.setItem(`fin_${username}_debts`, JSON.stringify(restoredData.debts));
     }
     if (Array.isArray(restoredData.investments)) {
       setInvestments(restoredData.investments);
-      secureStorage.setItem(`fin_${username}_investments`, JSON.stringify(restoredData.investments));
     }
     if (Array.isArray(restoredData.fixedAssets)) {
       setFixedAssets(restoredData.fixedAssets);
-      secureStorage.setItem(`fin_${username}_fixed_assets`, JSON.stringify(restoredData.fixedAssets));
     }
     if (restoredData.emergencyConfig) {
       setEmergencyConfig(restoredData.emergencyConfig);
-      secureStorage.setItem(`fin_${username}_emergency_config`, JSON.stringify(restoredData.emergencyConfig));
     }
     if (Array.isArray(restoredData.emergencyTransactions)) {
       setEmergencyTransactions(restoredData.emergencyTransactions);
-      secureStorage.setItem(`fin_${username}_emergency_transactions`, JSON.stringify(restoredData.emergencyTransactions));
     }
     if (Array.isArray(restoredData.masterCategories)) {
-      setMasterCategories(restoredData.masterCategories);
-      saveStoredCategories(restoredData.masterCategories, username);
+      const mergedCats = mergeMissingDefaultCategories(restoredData.masterCategories);
+      setMasterCategories(mergedCats);
+      saveStoredCategories(mergedCats);
     }
     if (Array.isArray(restoredData.recurringTransactions)) {
       setRecurringTransactions(restoredData.recurringTransactions);
-      secureStorage.setItem(`fin_${username}_recurring_transactions`, JSON.stringify(restoredData.recurringTransactions));
     }
     if (Array.isArray(restoredData.savingsGoals)) {
       setSavingsGoals(restoredData.savingsGoals);
-      secureStorage.setItem(`fin_${username}_savings_goals`, JSON.stringify(restoredData.savingsGoals));
+    }
+    if (Array.isArray(restoredData.coaList)) {
+      hydrateMasterCoaAndLogs(restoredData.coaList, restoredData.masterChangeLogs || masterChangeLogs, true);
+    }
+    if (Array.isArray(restoredData.kprPresets)) {
+      setKprPresets(restoredData.kprPresets);
+    }
+    if (restoredData.kprCoaMapping && typeof restoredData.kprCoaMapping === 'object') {
+      setKprCoaMapping({ ...DEFAULT_KPR_COA_MAPPING, ...restoredData.kprCoaMapping });
+    }
+    if (Array.isArray(restoredData.investmentGoals)) {
+      setInvestmentGoals(restoredData.investmentGoals);
     }
   };
 
@@ -557,12 +487,7 @@ export default function App() {
     }
   }, [currentUser]);
 
-  // --- Cloud Sync State ---
-  const [cloudSync, setCloudSync] = useState<boolean>(false);
-  const [loadingPg, setLoadingPg] = useState<boolean>(false);
-  const [loadingCloudData, setLoadingCloudData] = useState<boolean>(false);
-
-  // Sync Conflict Modal State
+  // Sync Conflict Modal State (retained for optional Google Sheets cloud resolution)
   const [conflictState, setConflictState] = useState<{
     isOpen: boolean;
     localData: SyncDataPackage;
@@ -573,25 +498,81 @@ export default function App() {
     cloudData: {}
   });
 
-  const applySyncPackage = (pkg: SyncDataPackage) => {
-    const hasCloudState =
-      (Array.isArray(pkg.accounts) && pkg.accounts.length > 0) ||
-      (Array.isArray(pkg.transactions) && pkg.transactions.length > 0) ||
-      (Array.isArray(pkg.budgets) && pkg.budgets.length > 0) ||
-      (Array.isArray(pkg.fixedAssets) && pkg.fixedAssets.length > 0);
+  const applySyncPackage = (pkg: SyncDataPackage & Record<string, any>) => {
+    const nextTransactions = Array.isArray(pkg.transactions) ? pkg.transactions : [];
+    const nextAccounts = Array.isArray(pkg.accounts) ? pkg.accounts : [];
+    const nextBudgets = Array.isArray(pkg.budgets) ? pkg.budgets : [];
+    const nextDebts = Array.isArray(pkg.debts) ? pkg.debts : [];
+    const nextInvestments = Array.isArray(pkg.investments) ? pkg.investments : [];
+    const nextFixedAssets = syncKprDebtsToFixedAssets(
+      Array.isArray(pkg.fixedAssets) ? pkg.fixedAssets : [],
+      nextDebts
+    );
+    const nextEmergencyConfig = pkg.emergencyConfig || { jobStability: 'medium', dependents: 0, monthlyExpense: 0 };
+    const nextEmergencyTxs = Array.isArray(pkg.emergencyTransactions) ? pkg.emergencyTransactions : [];
+    const nextRecurring = Array.isArray(pkg.recurringTransactions) ? pkg.recurringTransactions : [];
+    const nextSavingsGoals = Array.isArray(pkg.savingsGoals) ? pkg.savingsGoals : [];
 
-    if (!hasCloudState) return;
+    const nextMasterCategories =
+      Array.isArray(pkg.masterCategories) && pkg.masterCategories.length > 0
+        ? mergeMissingDefaultCategories(pkg.masterCategories)
+        : DEFAULT_CATEGORY_HIERARCHY;
+    const nextKprPresets =
+      Array.isArray(pkg.kprPresets) && pkg.kprPresets.length > 0
+        ? pkg.kprPresets
+        : DEFAULT_KPR_PRESETS;
+    const nextKprCoaMapping =
+      pkg.kprCoaMapping && typeof pkg.kprCoaMapping === 'object'
+        ? { ...DEFAULT_KPR_COA_MAPPING, ...pkg.kprCoaMapping }
+        : DEFAULT_KPR_COA_MAPPING;
+    const nextCoaList =
+      Array.isArray(pkg.coaList) && pkg.coaList.length > 0
+        ? pkg.coaList
+        : [...DEFAULT_COA_LIST];
+    const nextChangeLogs = Array.isArray(pkg.masterChangeLogs) ? pkg.masterChangeLogs : [];
+    const nextInvestmentGoals = Array.isArray(pkg.investmentGoals) ? pkg.investmentGoals : [];
 
-    if (Array.isArray(pkg.transactions)) setTransactions(pkg.transactions);
-    if (Array.isArray(pkg.accounts) && pkg.accounts.length > 0) setAccounts(pkg.accounts);
-    if (Array.isArray(pkg.budgets)) setBudgets(pkg.budgets);
-    if (Array.isArray(pkg.debts)) setDebts(pkg.debts);
-    if (Array.isArray(pkg.investments)) setInvestments(pkg.investments);
-    if (Array.isArray(pkg.fixedAssets)) setFixedAssets(pkg.fixedAssets);
-    if (pkg.emergencyConfig) setEmergencyConfig(pkg.emergencyConfig);
-    if (Array.isArray(pkg.emergencyTransactions)) setEmergencyTransactions(pkg.emergencyTransactions);
-    if (Array.isArray(pkg.recurringTransactions)) setRecurringTransactions(pkg.recurringTransactions);
-    if (Array.isArray(pkg.savingsGoals)) setSavingsGoals(pkg.savingsGoals);
+    setTransactions(nextTransactions);
+    setAccounts(nextAccounts);
+    setBudgets(nextBudgets);
+    setDebts(nextDebts);
+    setInvestments(nextInvestments);
+    setFixedAssets(nextFixedAssets);
+    setEmergencyConfig(nextEmergencyConfig);
+    setEmergencyTransactions(nextEmergencyTxs);
+    setRecurringTransactions(nextRecurring);
+    setSavingsGoals(nextSavingsGoals);
+
+    setMasterCategories(nextMasterCategories);
+    saveStoredCategories(nextMasterCategories);
+    setKprPresets(nextKprPresets);
+    saveStoredKprPresets(nextKprPresets);
+    setKprCoaMapping(nextKprCoaMapping);
+    saveStoredKprCoaMapping(nextKprCoaMapping);
+
+    hydrateMasterCoaAndLogs(nextCoaList, nextChangeLogs, false);
+    setCoaList(getStoredCoaList());
+    setMasterChangeLogs(getMasterChangeLogs());
+    setInvestmentGoals(nextInvestmentGoals);
+
+    return {
+      transactions: nextTransactions,
+      accounts: nextAccounts,
+      budgets: nextBudgets,
+      debts: nextDebts,
+      investments: nextInvestments,
+      fixedAssets: nextFixedAssets,
+      recurringTransactions: nextRecurring,
+      savingsGoals: nextSavingsGoals,
+      emergencyConfig: nextEmergencyConfig,
+      emergencyTransactions: nextEmergencyTxs,
+      coaList: getStoredCoaList(),
+      masterCategories: nextMasterCategories,
+      kprPresets: nextKprPresets,
+      kprCoaMapping: nextKprCoaMapping,
+      masterChangeLogs: getMasterChangeLogs(),
+      investmentGoals: nextInvestmentGoals,
+    };
   };
 
   useEffect(() => {
@@ -599,64 +580,147 @@ export default function App() {
     setCloudSync(isGoogleSheetsSyncActive());
   }, [currentUser]);
 
-  
-  // Download from Postgres on login & detect data conflicts
-  useEffect(() => {
-    if (currentUser) {
-      const activeUserId = currentUser.uid || (currentUser as any).id || `user-${currentUser.username}`;
-      const loadPgData = async () => {
-        setLoadingPg(true);
-        try {
-          const pgData = await syncFromPostgres(activeUserId);
-          if (pgData) {
-            let localDataStr = secureStorage.getItem(`nusantara_wealth_backup_${activeUserId}`);
-            let localDataPkg: SyncDataPackage | null = null;
-            if (localDataStr) {
-              try { localDataPkg = JSON.parse(localDataStr); } catch {}
-            }
-
-            if (localDataPkg && detectDataConflict(localDataPkg, pgData)) {
-              setConflictState({
-                isOpen: true,
-                localData: localDataPkg,
-                cloudData: pgData
-              });
-            } else {
-              applySyncPackage(pgData);
-            }
-          }
-        } catch {
-          // Fallback handled inside syncFromPostgres via LocalStorage
-        } finally {
-          setLoadingPg(false);
-        }
-      };
-      loadPgData();
-    }
-  }, [currentUser]);
-
   const lastPgSyncSignatureRef = useRef<string>('');
   const lastSheetsSyncSignatureRef = useRef<string>('');
   const transactionsRef = useRef<Transaction[]>(transactions);
   transactionsRef.current = transactions;
 
-  const lastPersistedSlicesRef = useRef<{
-    username?: string;
-    transactions?: Transaction[];
-    accounts?: Account[];
-    budgets?: CategoryBudget[];
-    debts?: Debt[];
-    investments?: InvestmentAsset[];
-    fixedAssets?: FixedAsset[];
-    recurringTransactions?: RecurringTransaction[];
-    savingsGoals?: SavingsGoal[];
-    emergencyConfig?: EmergencyFundConfig;
-    emergencyTransactions?: EmergencyFundTransaction[];
-  }>({});
-
-  // Debounced upload to Postgres on state change + signature deduplication
+  // Authoritative Download from PostgreSQL on login / reload (NEVER loads browser financial cache or overwrites with sample)
   useEffect(() => {
-    if (!currentUser || loadingPg) return;
+    if (!currentUser) {
+      setIsPgHydrated(false);
+      setPgHydrationError(null);
+      return;
+    }
+
+    const activeUserId = currentUser.uid || (currentUser as any).id || `user-${currentUser.username}`;
+    let cancelled = false;
+
+    const loadPgData = async () => {
+      setLoadingPg(true);
+      setIsPgHydrated(false);
+      setPgHydrationError(null);
+
+      try {
+        const pgData = await syncFromPostgres(activeUserId);
+        if (cancelled) return;
+
+        if (!pgData || pgData._syncError) {
+          setPgHydrationError(
+            pgData?._syncErrorMessage || 'Gagal terhubung ke database PostgreSQL untuk memuat data keuangan Anda.'
+          );
+          return;
+        }
+
+        const pendingSeed = pendingInitialSeedRef.current;
+        pendingInitialSeedRef.current = null;
+
+        // Seed ONLY during brand-new account registration when PostgreSQL has no saved state yet
+        if (pendingSeed && !pgData.hasSavedState) {
+          const starterPkg =
+            pendingSeed === 'sample'
+              ? {
+                  transactions: INITIAL_TRANSACTIONS,
+                  accounts: INITIAL_ACCOUNTS,
+                  budgets: INITIAL_BUDGETS,
+                  debts: INITIAL_DEBTS,
+                  investments: INITIAL_INVESTMENTS,
+                  fixedAssets: syncKprDebtsToFixedAssets([], INITIAL_DEBTS),
+                  recurringTransactions: INITIAL_RECURRING_TRANSACTIONS,
+                  savingsGoals: [
+                    {
+                      id: 'goal-1',
+                      title: 'Dana Liburan Akhir Tahun',
+                      targetAmount: 15000000,
+                      currentAmount: 6500000,
+                      targetDate: '2026-12-25',
+                      category: 'Liburan',
+                      notes: 'Target menabung bulanan Rp 1.500.000'
+                    },
+                    {
+                      id: 'goal-2',
+                      title: 'DP Rumah Impian',
+                      targetAmount: 100000000,
+                      currentAmount: 42000000,
+                      targetDate: '2028-06-01',
+                      category: 'Rumah',
+                      notes: 'Alokasi dari bonus tahunan & simpanan rutin'
+                    }
+                  ],
+                  emergencyConfig: INITIAL_EMERGENCY_CONFIG,
+                  emergencyTransactions: INITIAL_EMERGENCY_TXS,
+                  coaList: [...DEFAULT_COA_LIST],
+                  masterCategories: DEFAULT_CATEGORY_HIERARCHY,
+                  kprPresets: DEFAULT_KPR_PRESETS,
+                  kprCoaMapping: DEFAULT_KPR_COA_MAPPING,
+                  masterChangeLogs: [],
+                  investmentGoals: DEFAULT_INVESTMENT_GOALS,
+                }
+              : (() => {
+                  const { cleanAccounts, cleanBudgets, cleanEmergencyConfig } = getDefaultCleanStarterData();
+                  return {
+                    transactions: [],
+                    accounts: cleanAccounts,
+                    budgets: cleanBudgets,
+                    debts: [],
+                    investments: [],
+                    fixedAssets: [],
+                    recurringTransactions: [],
+                    savingsGoals: [],
+                    emergencyConfig: cleanEmergencyConfig,
+                    emergencyTransactions: [],
+                    coaList: [...DEFAULT_COA_LIST],
+                    masterCategories: DEFAULT_CATEGORY_HIERARCHY,
+                    kprPresets: DEFAULT_KPR_PRESETS,
+                    kprCoaMapping: DEFAULT_KPR_COA_MAPPING,
+                    masterChangeLogs: [],
+                    investmentGoals: [],
+                  };
+                })();
+
+          const applied = applySyncPackage(starterPkg);
+          const payloadToSave = {
+            ...applied,
+            userFullName: currentUser.fullName,
+            username: currentUser.username,
+          };
+          lastPgSyncSignatureRef.current = `${activeUserId}:${JSON.stringify(payloadToSave)}`;
+          await syncToPostgres(payloadToSave, activeUserId);
+          if (!cancelled) {
+            setIsPgHydrated(true);
+          }
+          return;
+        }
+
+        // Standard authoritative hydration from PostgreSQL
+        const applied = applySyncPackage(pgData);
+        const hydratedPayload = {
+          ...applied,
+          userFullName: currentUser.fullName,
+          username: currentUser.username,
+        };
+        lastPgSyncSignatureRef.current = `${activeUserId}:${JSON.stringify(hydratedPayload)}`;
+        setIsPgHydrated(true);
+      } catch (err: any) {
+        if (!cancelled) {
+          setPgHydrationError(err?.message || 'Terjadi kesalahan saat memuat data dari PostgreSQL.');
+        }
+      } finally {
+        if (!cancelled) {
+          setLoadingPg(false);
+        }
+      }
+    };
+
+    loadPgData();
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUser, pgReloadCounter]);
+
+  // Debounced upload to PostgreSQL on state change + signature deduplication
+  useEffect(() => {
+    if (!currentUser || loadingPg || !isPgHydrated || pgHydrationError) return;
     const activeUserId = currentUser.uid || (currentUser as any).id || `user-${currentUser.username}`;
     const timer = setTimeout(() => {
       const payload = {
@@ -670,6 +734,12 @@ export default function App() {
         savingsGoals,
         emergencyConfig,
         emergencyTransactions,
+        coaList,
+        masterCategories,
+        kprPresets,
+        kprCoaMapping,
+        masterChangeLogs,
+        investmentGoals,
         userFullName: currentUser.fullName,
         username: currentUser.username
       };
@@ -677,7 +747,11 @@ export default function App() {
       if (signature === lastPgSyncSignatureRef.current) return;
       lastPgSyncSignatureRef.current = signature;
 
-      syncToPostgres(payload, activeUserId).catch(() => {
+      syncToPostgres(payload, activeUserId).then((res) => {
+        if (!res?.success) {
+          lastPgSyncSignatureRef.current = '';
+        }
+      }).catch(() => {
         lastPgSyncSignatureRef.current = '';
       });
     }, 450);
@@ -694,26 +768,46 @@ export default function App() {
     savingsGoals,
     emergencyConfig,
     emergencyTransactions,
+    coaList,
+    masterCategories,
+    kprPresets,
+    kprCoaMapping,
+    masterChangeLogs,
+    investmentGoals,
     currentUser,
-    loadingPg
+    loadingPg,
+    isPgHydrated,
+    pgHydrationError
   ]);
 
-  // Download from Cloud on login
+  // Optional Google Sheets sync: download only when Postgres is already hydrated and Sheets is enabled
   useEffect(() => {
-    if (currentUser && cloudSync) {
+    if (currentUser && cloudSync && isPgHydrated) {
       const loadCloudData = async () => {
         setLoadingCloudData(true);
         try {
           const cloudData = await downloadFinancesFromSheets();
           if (cloudData) {
-            setTransactions(cloudData.transactions || []);
-            setAccounts(cloudData.accounts || []);
-            setBudgets(cloudData.budgets || []);
-            setDebts(cloudData.debts || []);
-            setInvestments(cloudData.investments || []);
-            setFixedAssets(cloudData.fixedAssets || []);
-            setEmergencyConfig(cloudData.emergencyFund || { jobStability: 'medium', dependents: 0, monthlyExpense: 0 });
-            setEmergencyTransactions(cloudData.emergencyTransactions || []);
+            const currentPgPkg: SyncDataPackage = {
+              transactions,
+              accounts,
+              budgets,
+              debts,
+              investments,
+              fixedAssets,
+              emergencyConfig,
+              emergencyTransactions,
+            };
+            if (detectDataConflict(currentPgPkg, cloudData)) {
+              setConflictState({
+                isOpen: true,
+                localData: currentPgPkg,
+                cloudData: {
+                  ...cloudData,
+                  emergencyConfig: cloudData.emergencyFund || emergencyConfig,
+                },
+              });
+            }
           }
         } catch {
           // Ignore cloud sync read errors silently
@@ -723,11 +817,11 @@ export default function App() {
       };
       loadCloudData();
     }
-  }, [currentUser, cloudSync]);
+  }, [currentUser, cloudSync, isPgHydrated]);
 
   // Debounced upload to Google Sheets (650ms) + payload signature deduplication
   useEffect(() => {
-    if (!currentUser || !cloudSync || loadingCloudData) return;
+    if (!currentUser || !cloudSync || loadingCloudData || !isPgHydrated) return;
     const timer = setTimeout(() => {
       const sheetsPayload = {
         transactions,
@@ -737,7 +831,8 @@ export default function App() {
         investments,
         fixedAssets,
         emergencyFund: emergencyConfig,
-        emergencyTransactions
+        emergencyTransactions,
+        investmentGoals,
       };
       const signature = `${currentUser.username}:${JSON.stringify(sheetsPayload)}`;
       if (signature === lastSheetsSyncSignatureRef.current) return;
@@ -758,88 +853,11 @@ export default function App() {
     fixedAssets,
     emergencyConfig,
     emergencyTransactions,
+    investmentGoals,
     currentUser,
     cloudSync,
-    loadingCloudData
-  ]);
-
-  // Consolidated dirty-checked debounced (150ms) persistence to encrypted localStorage
-  useEffect(() => {
-    if (!currentUser) return;
-    const uname = currentUser.username;
-
-    const flushDirtySlices = () => {
-      const prev = lastPersistedSlicesRef.current;
-      const isNewUser = prev.username !== uname;
-      const nextCache = isNewUser ? { username: uname } : { ...prev, username: uname };
-
-      if (isNewUser || prev.transactions !== transactions) {
-        secureStorage.setItem(`fin_${uname}_transactions`, JSON.stringify(transactions));
-        nextCache.transactions = transactions;
-      }
-      if (isNewUser || prev.accounts !== accounts) {
-        secureStorage.setItem(`fin_${uname}_accounts`, JSON.stringify(accounts));
-        nextCache.accounts = accounts;
-      }
-      if (isNewUser || prev.budgets !== budgets) {
-        secureStorage.setItem(`fin_${uname}_budgets`, JSON.stringify(budgets));
-        nextCache.budgets = budgets;
-      }
-      if (isNewUser || prev.debts !== debts) {
-        secureStorage.setItem(`fin_${uname}_debts`, JSON.stringify(debts));
-        nextCache.debts = debts;
-      }
-      if (isNewUser || prev.investments !== investments) {
-        secureStorage.setItem(`fin_${uname}_investments`, JSON.stringify(investments));
-        nextCache.investments = investments;
-      }
-      if (isNewUser || prev.fixedAssets !== fixedAssets) {
-        secureStorage.setItem(`fin_${uname}_fixed_assets`, JSON.stringify(fixedAssets));
-        nextCache.fixedAssets = fixedAssets;
-      }
-      if (isNewUser || prev.recurringTransactions !== recurringTransactions) {
-        secureStorage.setItem(`fin_${uname}_recurring_transactions`, JSON.stringify(recurringTransactions));
-        nextCache.recurringTransactions = recurringTransactions;
-      }
-      if (isNewUser || prev.savingsGoals !== savingsGoals) {
-        secureStorage.setItem(`fin_${uname}_savings_goals`, JSON.stringify(savingsGoals));
-        nextCache.savingsGoals = savingsGoals;
-      }
-      if (isNewUser || prev.emergencyConfig !== emergencyConfig) {
-        secureStorage.setItem(`fin_${uname}_emergency_config`, JSON.stringify(emergencyConfig));
-        nextCache.emergencyConfig = emergencyConfig;
-      }
-      if (isNewUser || prev.emergencyTransactions !== emergencyTransactions) {
-        secureStorage.setItem(`fin_${uname}_emergency_transactions`, JSON.stringify(emergencyTransactions));
-        nextCache.emergencyTransactions = emergencyTransactions;
-      }
-
-      lastPersistedSlicesRef.current = nextCache;
-    };
-
-    const timer = setTimeout(flushDirtySlices, 150);
-    const handleBeforeUnload = () => {
-      clearTimeout(timer);
-      flushDirtySlices();
-    };
-    window.addEventListener('beforeunload', handleBeforeUnload);
-
-    return () => {
-      clearTimeout(timer);
-      window.removeEventListener('beforeunload', handleBeforeUnload);
-    };
-  }, [
-    currentUser,
-    transactions,
-    accounts,
-    budgets,
-    debts,
-    investments,
-    fixedAssets,
-    recurringTransactions,
-    savingsGoals,
-    emergencyConfig,
-    emergencyTransactions,
+    loadingCloudData,
+    isPgHydrated
   ]);
 
   // Sinkronisasi otomatis fasilitas KPR di modul Utang ke daftar Aset Tetap
@@ -850,9 +868,9 @@ export default function App() {
     });
   }, [debts]);
 
-  // Penyesuaian penyusutan aset tetap otomatis jika tanggal mencapai akhir tahun (atau tutup tahun sebelumnya belum terposting)
+  // Penyesuaian penyusutan aset tetap otomatis jika tanggal mencapai akhir tahun (setelah hidrasi PostgreSQL selesai)
   useEffect(() => {
-    if (!currentUser || loadingPg || fixedAssets.length === 0) return;
+    if (!currentUser || loadingPg || !isPgHydrated || fixedAssets.length === 0) return;
 
     const now = new Date();
     const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
@@ -877,7 +895,7 @@ export default function App() {
         duration: 5000,
       });
     }
-  }, [currentUser, loadingPg, fixedAssets, debts]);
+  }, [currentUser, loadingPg, isPgHydrated, fixedAssets, debts]);
 
   // --- 2. CORE ACTION HANDLERS ---
 
@@ -2454,30 +2472,23 @@ export default function App() {
       setEmergencyConfig(cleanEmergencyConfig);
       setEmergencyTransactions([]);
       setMasterCategories(DEFAULT_CATEGORY_HIERARCHY);
+      setKprPresets(DEFAULT_KPR_PRESETS);
+      setKprCoaMapping(DEFAULT_KPR_COA_MAPPING);
+      setInvestmentGoals([]);
       setActiveTab('dashboard');
 
       // 2. Reset auxiliary master COA, logs, and investment goals back to clean default state
-      saveStoredCoaList(DEFAULT_COA_LIST);
-      clearMasterChangeLogs();
-      secureStorage.setItem('nusantara_investment_goals', JSON.stringify([]));
+      hydrateMasterCoaAndLogs(DEFAULT_COA_LIST, [], true);
+      saveStoredCategories(DEFAULT_CATEGORY_HIERARCHY);
+      saveStoredKprPresets(DEFAULT_KPR_PRESETS);
+      saveStoredKprCoaMapping(DEFAULT_KPR_COA_MAPPING);
+      setCoaList([...DEFAULT_COA_LIST]);
+      setMasterChangeLogs([]);
       window.dispatchEvent(new CustomEvent('nusantara:data-reset'));
 
-      // 3. Persist clean state synchronously to encrypted LocalStorage & immediately sync wipe to Cloud DB
+      // 3. Immediately persist clean state to PostgreSQL (single source of truth)
       if (currentUser) {
-        const username = currentUser.username;
-        const activeUserId = currentUser.uid || (currentUser as any).id || `user-${username}`;
-
-        secureStorage.setItem(`fin_${username}_transactions`, JSON.stringify([]));
-        secureStorage.setItem(`fin_${username}_accounts`, JSON.stringify(cleanAccounts));
-        secureStorage.setItem(`fin_${username}_budgets`, JSON.stringify(cleanBudgets));
-        secureStorage.setItem(`fin_${username}_debts`, JSON.stringify([]));
-        secureStorage.setItem(`fin_${username}_investments`, JSON.stringify([]));
-        secureStorage.setItem(`fin_${username}_fixed_assets`, JSON.stringify([]));
-        secureStorage.setItem(`fin_${username}_recurring_transactions`, JSON.stringify([]));
-        secureStorage.setItem(`fin_${username}_savings_goals`, JSON.stringify([]));
-        secureStorage.setItem(`fin_${username}_emergency_config`, JSON.stringify(cleanEmergencyConfig));
-        secureStorage.setItem(`fin_${username}_emergency_transactions`, JSON.stringify([]));
-        saveStoredCategories(DEFAULT_CATEGORY_HIERARCHY, username);
+        const activeUserId = currentUser.uid || (currentUser as any).id || `user-${currentUser.username}`;
 
         const cleanPayload = {
           transactions: [],
@@ -2490,10 +2501,17 @@ export default function App() {
           savingsGoals: [],
           emergencyConfig: cleanEmergencyConfig,
           emergencyTransactions: [],
+          coaList: [...DEFAULT_COA_LIST],
+          masterCategories: DEFAULT_CATEGORY_HIERARCHY,
+          kprPresets: DEFAULT_KPR_PRESETS,
+          kprCoaMapping: DEFAULT_KPR_COA_MAPPING,
+          masterChangeLogs: [],
+          investmentGoals: [],
           userFullName: currentUser.fullName,
           username: currentUser.username
         };
 
+        lastPgSyncSignatureRef.current = `${activeUserId}:${JSON.stringify(cleanPayload)}`;
         await syncToPostgres(cleanPayload, activeUserId);
 
         if (cloudSync) {
@@ -2505,7 +2523,8 @@ export default function App() {
             investments: [],
             fixedAssets: [],
             emergencyFund: cleanEmergencyConfig,
-            emergencyTransactions: []
+            emergencyTransactions: [],
+            investmentGoals: [],
           }).catch(() => {});
         }
       }
@@ -2515,7 +2534,7 @@ export default function App() {
       showToast({
         type: 'success',
         title: 'Data Berhasil Direset ke Awal',
-        message: 'Seluruh transaksi lama, utang, investasi, dan target telah dihapus. Hanya data default (saldo Rp 0) yang dipertahankan.',
+        message: 'Seluruh transaksi lama, utang, investasi, dan target telah dihapus di PostgreSQL. Hanya data default (saldo Rp 0) yang dipertahankan.',
         duration: 5000
       });
     } finally {
@@ -2523,75 +2542,18 @@ export default function App() {
     }
   };
 
-  const handleLoginSuccess = (user: User, dataChoice: 'empty' | 'sample') => {
+  const handleLoginSuccess = (
+    user: User,
+    dataChoice: 'empty' | 'sample',
+    isNewRegistration = false
+  ) => {
+    pendingInitialSeedRef.current = isNewRegistration ? dataChoice : null;
+    lastPgSyncSignatureRef.current = '';
+    startupIntegrityCheckedUserRef.current = null;
+    setIsPgHydrated(false);
+    setPgHydrationError(null);
     setCurrentUser(user);
     secureStorage.setItem('fin_current_user', JSON.stringify(user));
-
-    const username = user.username;
-    const hasData = secureStorage.getItem(`fin_${username}_accounts`);
-    if (!hasData) {
-      if (dataChoice === 'sample') {
-        setTransactions(INITIAL_TRANSACTIONS);
-        setAccounts(INITIAL_ACCOUNTS);
-        setBudgets(INITIAL_BUDGETS);
-        setDebts(INITIAL_DEBTS);
-        setInvestments(INITIAL_INVESTMENTS);
-        setFixedAssets(syncKprDebtsToFixedAssets([], INITIAL_DEBTS));
-        setRecurringTransactions(INITIAL_RECURRING_TRANSACTIONS);
-        setSavingsGoals([
-          {
-            id: 'goal-1',
-            title: 'Dana Liburan Akhir Tahun',
-            targetAmount: 15000000,
-            currentAmount: 6500000,
-            targetDate: '2026-12-25',
-            category: 'Liburan',
-            notes: 'Target menabung bulanan Rp 1.500.000'
-          },
-          {
-            id: 'goal-2',
-            title: 'DP Rumah Impian',
-            targetAmount: 100000000,
-            currentAmount: 42000000,
-            targetDate: '2028-06-01',
-            category: 'Rumah',
-            notes: 'Alokasi dari bonus tahunan & simpanan rutin'
-          }
-        ]);
-        setEmergencyConfig(INITIAL_EMERGENCY_CONFIG);
-        setEmergencyTransactions(INITIAL_EMERGENCY_TXS);
-      } else {
-        const { cleanAccounts, cleanBudgets, cleanEmergencyConfig } = getDefaultCleanStarterData();
-
-        setTransactions([]);
-        setAccounts(cleanAccounts);
-        setBudgets(cleanBudgets);
-        setDebts([]);
-        setInvestments([]);
-        setFixedAssets([]);
-        setRecurringTransactions([]);
-        setSavingsGoals([]);
-        setEmergencyConfig(cleanEmergencyConfig);
-        setEmergencyTransactions([]);
-        secureStorage.setItem('nusantara_investment_goals', JSON.stringify([]));
-      }
-    } else {
-      setTransactions(JSON.parse(secureStorage.getItem(`fin_${username}_transactions`) || '[]'));
-      setAccounts(JSON.parse(secureStorage.getItem(`fin_${username}_accounts`) || '[]'));
-      setBudgets(JSON.parse(secureStorage.getItem(`fin_${username}_budgets`) || '[]'));
-      const loadedDebts = JSON.parse(secureStorage.getItem(`fin_${username}_debts`) || '[]');
-      setDebts(loadedDebts);
-      setInvestments(JSON.parse(secureStorage.getItem(`fin_${username}_investments`) || '[]'));
-      const loadedFixed = JSON.parse(secureStorage.getItem(`fin_${username}_fixed_assets`) || '[]');
-      setFixedAssets(syncKprDebtsToFixedAssets(loadedFixed, loadedDebts));
-      setRecurringTransactions(JSON.parse(secureStorage.getItem(`fin_${username}_recurring_transactions`) || '[]'));
-      setSavingsGoals(JSON.parse(secureStorage.getItem(`fin_${username}_savings_goals`) || '[]'));
-      setEmergencyConfig(JSON.parse(secureStorage.getItem(`fin_${username}_emergency_config`) || '{"jobStability":"medium","dependents":0,"monthlyExpense":0}'));
-      setEmergencyTransactions(JSON.parse(secureStorage.getItem(`fin_${username}_emergency_transactions`) || '[]'));
-    }
-    setMasterCategories(getStoredCategories(username));
-    setKprPresets(getStoredKprPresets(username));
-    setKprCoaMapping(getStoredKprCoaMapping(username));
     setActiveTab('dashboard');
   };
 
@@ -2606,6 +2568,10 @@ export default function App() {
       } catch {}
     }
     startupIntegrityCheckedUserRef.current = null;
+    pendingInitialSeedRef.current = null;
+    lastPgSyncSignatureRef.current = '';
+    setIsPgHydrated(false);
+    setPgHydrationError(null);
     setCurrentUser(null);
     secureStorage.removeItem('fin_current_user');
     setTransactions([]);
@@ -2621,6 +2587,10 @@ export default function App() {
     setMasterCategories(DEFAULT_CATEGORY_HIERARCHY);
     setKprPresets(DEFAULT_KPR_PRESETS);
     setKprCoaMapping(DEFAULT_KPR_COA_MAPPING);
+    setInvestmentGoals([]);
+    hydrateMasterCoaAndLogs(DEFAULT_COA_LIST, [], false);
+    setCoaList([...DEFAULT_COA_LIST]);
+    setMasterChangeLogs([]);
     setShowLogoutModal(false);
     setMobileMenuOpen(false);
   };
@@ -2663,6 +2633,65 @@ export default function App() {
 
   if (!currentUser) {
     return <LoginScreen onLoginSuccess={handleLoginSuccess} />;
+  }
+
+  if (!isPgHydrated) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-white flex items-center justify-center p-6 font-sans">
+        <div className="max-w-md w-full bg-slate-900 border border-slate-800 rounded-2xl p-6 sm:p-8 shadow-2xl text-center space-y-5">
+          <div className="w-14 h-14 mx-auto rounded-2xl bg-blue-600/20 border border-blue-500/30 flex items-center justify-center text-blue-400">
+            {pgHydrationError ? (
+              <AlertTriangle className="h-7 w-7 text-rose-400" />
+            ) : (
+              <Database className="h-7 w-7 animate-pulse" />
+            )}
+          </div>
+
+          {pgHydrationError ? (
+            <>
+              <div className="space-y-2">
+                <h2 className="text-lg font-extrabold text-white">Gagal Memuat Data dari PostgreSQL</h2>
+                <p className="text-xs text-slate-300 leading-relaxed">
+                  Untuk menjaga konsistensi saldo dan mencegah perbedaan data antar komputer, aplikasi hanya memuat data langsung dari PostgreSQL.
+                </p>
+                <div className="p-2.5 bg-rose-950/60 border border-rose-800/60 rounded-xl text-[11px] font-mono text-rose-300 break-words">
+                  {pgHydrationError}
+                </div>
+              </div>
+              <div className="flex flex-col sm:flex-row gap-2.5 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setPgReloadCounter((c) => c + 1)}
+                  className="flex-1 py-2.5 px-4 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-xl transition cursor-pointer flex items-center justify-center gap-2"
+                >
+                  <RefreshCw className="h-4 w-4" />
+                  <span>Coba Muat Ulang</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={executeLogout}
+                  className="py-2.5 px-4 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold rounded-xl border border-slate-700 transition cursor-pointer"
+                >
+                  Keluar Akun
+                </button>
+              </div>
+            </>
+          ) : (
+            <div className="space-y-2">
+              <h2 className="text-lg font-extrabold text-white">Menyinkronkan Ledger PostgreSQL...</h2>
+              <p className="text-xs text-slate-400 leading-relaxed">
+                Mengambil data rekening, transaksi, Master COA, kategori, dan portofolio terbaru untuk{' '}
+                <strong className="text-slate-200">{currentUser.fullName || currentUser.username}</strong>.
+              </p>
+              <div className="flex items-center justify-center gap-2 pt-2 text-[11px] font-semibold text-blue-400">
+                <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                <span>PostgreSQL Single Source of Truth</span>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -3063,6 +3092,8 @@ export default function App() {
                     accounts={accounts}
                     fixedAssets={fixedAssets}
                     debts={debts}
+                    investmentGoals={investmentGoals}
+                    onUpdateInvestmentGoals={setInvestmentGoals}
                     onUpdateInvestment={handleUpdateInvestment}
                     onAddFixedAsset={handleAddFixedAsset}
                     onUpdateFixedAsset={handleUpdateFixedAsset}
@@ -3083,27 +3114,19 @@ export default function App() {
                       kprPresets={kprPresets}
                       kprCoaMapping={kprCoaMapping}
                       onUpdateKprPresets={(updated) => setKprPresets(updated)}
-                      onResetKprPresets={() => setKprPresets(resetStoredKprPresets(currentUser?.username))}
+                      onResetKprPresets={() => setKprPresets(resetStoredKprPresets())}
                       onUpdateKprCoaMapping={(updated) => setKprCoaMapping(updated)}
-                      onResetKprCoaMapping={() => setKprCoaMapping(resetStoredKprCoaMapping(currentUser?.username))}
+                      onResetKprCoaMapping={() => setKprCoaMapping(resetStoredKprCoaMapping())}
                       onUpdateCategories={(newCats) => setMasterCategories(newCats)}
                       onResetToDefault={() => setMasterCategories(DEFAULT_CATEGORY_HIERARCHY)}
                       onOpenBackupModal={() => setShowBackupModal(true)}
-                      onUpdateAccounts={(updated) => {
-                        setAccounts(updated);
-                        if (currentUser) {
-                          secureStorage.setItem(`fin_${currentUser.username}_accounts`, JSON.stringify(updated));
-                        }
-                      }}
+                      onUpdateAccounts={(updated) => setAccounts(updated)}
                       onFactoryReset={() => {
                         const { resetAccounts } = factoryResetMasterData();
                         setAccounts(resetAccounts);
                         setMasterCategories(DEFAULT_CATEGORY_HIERARCHY);
-                        setKprPresets(resetStoredKprPresets(currentUser?.username));
-                        setKprCoaMapping(resetStoredKprCoaMapping(currentUser?.username));
-                        if (currentUser) {
-                          secureStorage.setItem(`fin_${currentUser.username}_accounts`, JSON.stringify(resetAccounts));
-                        }
+                        setKprPresets(resetStoredKprPresets());
+                        setKprCoaMapping(resetStoredKprCoaMapping());
                       }}
                       onReassignTransactionCategory={(txId, newCategory) => {
                         setTransactions((prev) =>
@@ -3136,24 +3159,9 @@ export default function App() {
                     kprCoaMapping={kprCoaMapping}
                     onUpdateMasterCategories={(newCats) => setMasterCategories(newCats)}
                     onResetMasterCategories={() => setMasterCategories(DEFAULT_CATEGORY_HIERARCHY)}
-                    onUpdateAccounts={(updated) => {
-                      setAccounts(updated);
-                      if (currentUser) {
-                        secureStorage.setItem(`fin_${currentUser.username}_accounts`, JSON.stringify(updated));
-                      }
-                    }}
-                    onUpdateTransactions={(updated) => {
-                      setTransactions(updated);
-                      if (currentUser) {
-                        secureStorage.setItem(`fin_${currentUser.username}_transactions`, JSON.stringify(updated));
-                      }
-                    }}
-                    onUpdateInvestments={(updated) => {
-                      setInvestments(updated);
-                      if (currentUser) {
-                        secureStorage.setItem(`fin_${currentUser.username}_investments`, JSON.stringify(updated));
-                      }
-                    }}
+                    onUpdateAccounts={(updated) => setAccounts(updated)}
+                    onUpdateTransactions={(updated) => setTransactions(updated)}
+                    onUpdateInvestments={(updated) => setInvestments(updated)}
                     onApplyAdjustments={handleApplyAdjustingEntries}
                     onReverseAdjustment={handleReverseAdjustingEntry}
                     onOpenIntegrityModal={() => setShowIntegrityModal(true)}
@@ -3323,18 +3331,8 @@ export default function App() {
           masterCategories={masterCategories}
           coaScanResult={coaScanResult}
           onRescanCoa={handleRescanCoa}
-          onUpdateAccounts={(updatedAccs) => {
-            setAccounts(updatedAccs);
-            if (currentUser) {
-              secureStorage.setItem(`fin_${currentUser.username}_accounts`, JSON.stringify(updatedAccs));
-            }
-          }}
-          onUpdateTransactions={(updatedTxs) => {
-            setTransactions(updatedTxs);
-            if (currentUser) {
-              secureStorage.setItem(`fin_${currentUser.username}_transactions`, JSON.stringify(updatedTxs));
-            }
-          }}
+          onUpdateAccounts={(updatedAccs) => setAccounts(updatedAccs)}
+          onUpdateTransactions={(updatedTxs) => setTransactions(updatedTxs)}
           onHarmonize={(updatedAccs, missingCategories) => {
             if (missingCategories.length > 0) {
               const updatedTree = JSON.parse(JSON.stringify(masterCategories)) as CategoryNode[];
@@ -3404,32 +3402,58 @@ export default function App() {
                 savingsGoals,
                 emergencyConfig,
                 emergencyTransactions,
+                coaList,
+                masterCategories,
+                kprPresets,
+                kprCoaMapping,
+                masterChangeLogs,
+                investmentGoals,
                 userFullName: currentUser.fullName,
                 username: currentUser.username
               }, activeUserId);
             }
             showToast({
               type: 'info',
-              title: 'Pilihan Versi Lokal Diaktifkan',
-              message: 'Data perangkat lokal digunakan dan diperbarui ke Cloud PostgreSQL.'
+              title: 'Pilihan Data PostgreSQL Diaktifkan',
+              message: 'Data utama dari PostgreSQL dipertahankan dan disinkronkan.'
             });
           }}
           onSelectCloud={() => {
             setConflictState((prev) => ({ ...prev, isOpen: false }));
-            applySyncPackage(conflictState.cloudData);
+            applySyncPackage({
+              recurringTransactions,
+              savingsGoals,
+              coaList,
+              masterCategories,
+              kprPresets,
+              kprCoaMapping,
+              masterChangeLogs,
+              investmentGoals,
+              ...conflictState.cloudData,
+            });
             showToast({
               type: 'info',
               title: 'Pilihan Versi Cloud Diaktifkan',
-              message: 'Data dari Cloud PostgreSQL berhasil diterapkan.'
+              message: 'Data dari Google Sheets diterapkan dan akan disinkronkan ke PostgreSQL.'
             });
           }}
           onMerge={(mergedPkg) => {
             setConflictState((prev) => ({ ...prev, isOpen: false }));
-            applySyncPackage(mergedPkg);
+            const fullMerged = applySyncPackage({
+              recurringTransactions,
+              savingsGoals,
+              coaList,
+              masterCategories,
+              kprPresets,
+              kprCoaMapping,
+              masterChangeLogs,
+              investmentGoals,
+              ...mergedPkg,
+            });
             if (currentUser) {
               const activeUserId = currentUser.uid || (currentUser as any).id || `user-${currentUser.username}`;
               syncToPostgres({
-                ...mergedPkg,
+                ...fullMerged,
                 userFullName: currentUser.fullName,
                 username: currentUser.username
               }, activeUserId);
@@ -3437,7 +3461,7 @@ export default function App() {
             showToast({
               type: 'success',
               title: 'Data Berhasil Digabungkan (Merged)',
-              message: 'Seluruh catatan transaksi & rekening unik digabungkan dengan sukses.'
+              message: 'Seluruh catatan transaksi & rekening unik digabungkan dengan sukses ke PostgreSQL.'
             });
           }}
         />

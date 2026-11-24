@@ -25,6 +25,7 @@ export const accounts = pgTable('accounts', {
   dueDay: integer('due_day'),
   interestRate: decimal('interest_rate', { precision: 5, scale: 2 }),
   minPayment: decimal('min_payment', { precision: 15, scale: 2 }),
+  coaCode: text('coa_code'),
 });
 
 export const transactions = pgTable('transactions', {
@@ -40,6 +41,22 @@ export const transactions = pgTable('transactions', {
   linkedDebtAction: text('linked_debt_action'),
   linkedInvestmentId: text('linked_investment_id'),
   linkedInvestmentAction: text('linked_investment_action'),
+  linkedFixedAssetId: text('linked_fixed_asset_id'),
+  linkedFixedAssetAction: text('linked_fixed_asset_action'),
+  linkedEmergencyTxId: text('linked_emergency_tx_id'),
+  unitPrice: decimal('unit_price', { precision: 15, scale: 2 }),
+  units: decimal('units', { precision: 15, scale: 4 }),
+  unitName: text('unit_name'),
+  isAdjustment: boolean('is_adjustment').default(false),
+  adjustmentType: text('adjustment_type'),
+  adjustmentPeriodKey: text('adjustment_period_key'),
+  adjustmentRatePct: decimal('adjustment_rate_pct', { precision: 6, scale: 2 }),
+  adjustmentDurationDays: integer('adjustment_duration_days'),
+  linkedFixedAssetAdjustmentId: text('linked_fixed_asset_adjustment_id'),
+  previousRateEffectiveDate: text('previous_rate_effective_date'),
+  coaDebitCode: text('coa_debit_code'),
+  coaCreditCode: text('coa_credit_code'),
+  linkedKprBreakdown: jsonb('linked_kpr_breakdown'),
 });
 
 export const recurringTransactions = pgTable('recurring_transactions', {
@@ -103,6 +120,7 @@ export const debts = pgTable('debts', {
   purpose: text('purpose').notNull(),
   category: text('category').notNull(),
   dueDay: integer('due_day'),
+  dueDate: text('due_date'),
   startDate: text('start_date'),
   kprScheme: text('kpr_scheme'),
   kprPresetId: text('kpr_preset_id'),
@@ -112,6 +130,8 @@ export const debts = pgTable('debts', {
   fixedRate: decimal('fixed_rate', { precision: 5, scale: 2 }),
   fixedYears: integer('fixed_years'),
   floatingRate: decimal('floating_rate', { precision: 5, scale: 2 }),
+  kprFeesSummary: jsonb('kpr_fees_summary'),
+  kprCoaSnapshot: jsonb('kpr_coa_snapshot'),
 });
 
 export const fixedAssets = pgTable('fixed_assets', {
@@ -167,4 +187,15 @@ export const savingsGoals = pgTable('savings_goals', {
   targetDate: text('target_date').notNull(),
   category: text('category'),
   notes: text('notes'),
+});
+
+export const userMasterConfigs = pgTable('user_master_configs', {
+  userId: text('user_id').primaryKey().references(() => users.id, { onDelete: 'cascade' }),
+  coaList: jsonb('coa_list'),
+  masterCategories: jsonb('master_categories'),
+  kprPresets: jsonb('kpr_presets'),
+  kprCoaMapping: jsonb('kpr_coa_mapping'),
+  masterChangeLogs: jsonb('master_change_logs'),
+  investmentGoals: jsonb('investment_goals'),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });

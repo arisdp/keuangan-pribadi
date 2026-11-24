@@ -1,6 +1,4 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { secureStorage } from '../utils/secureStorage';
-import { logger } from '../utils/logger';
 import { showToast } from '../utils/toast';
 import {
   ResponsiveContainer,
@@ -44,6 +42,7 @@ import {
   addMasterChangeLog,
   getMasterChangeLogs,
   factoryResetMasterData,
+  subscribeMasterConfigUpdates,
   MasterChangeLog,
 } from '../coaUtils';
 export { DEFAULT_COA_LIST };
@@ -442,14 +441,23 @@ export const MasterCategoryManager: React.FC<MasterCategoryManagerProps> = ({
     'grp-kpr-properti': true,
   });
 
-  // COA List state with Encrypted LocalStorage persistence (merges newly added default COA codes safely)
+  // COA List state synced with PostgreSQL via centralized coaUtils store
   const [coaList, setCoaList] = useState<AccountCOA[]>(() => getStoredCoaList());
 
+  useEffect(() => {
+    const unsubscribe = subscribeMasterConfigUpdates(() => {
+      const latestCoas = getStoredCoaList();
+      setCoaList((prev) => (JSON.stringify(prev) === JSON.stringify(latestCoas) ? prev : latestCoas));
+      const latestLogs = getMasterChangeLogs();
+      setChangeLogs((prev) => (JSON.stringify(prev) === JSON.stringify(latestLogs) ? prev : latestLogs));
+    });
+    return unsubscribe;
+  }, []);
+
   React.useEffect(() => {
-    try {
-      secureStorage.setItem('app_coa_list', JSON.stringify(coaList));
-    } catch (err) {
-      logger.error('Failed to save COA list to localStorage:', err);
+    const currentStored = getStoredCoaList();
+    if (JSON.stringify(currentStored) !== JSON.stringify(coaList)) {
+      saveStoredCoaList(coaList);
     }
   }, [coaList]);
 
@@ -556,7 +564,7 @@ export const MasterCategoryManager: React.FC<MasterCategoryManagerProps> = ({
       isDanger: true,
       onConfirm: () => {
         setCoaList(DEFAULT_COA_LIST);
-        secureStorage.removeItem('app_coa_list');
+        saveStoredCoaList(DEFAULT_COA_LIST);
         addMasterChangeLog(
           'COA',
           'System Default COA',

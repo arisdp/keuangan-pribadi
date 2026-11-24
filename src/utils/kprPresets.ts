@@ -1,7 +1,5 @@
 import { Account, KprCoaMappingConfig, KprPreset, Transaction } from '../types';
 import { AccountCOA, getAccountCoaMapping } from '../coaUtils';
-import { secureStorage } from './secureStorage';
-import { logger } from './logger';
 
 export const DEFAULT_KPR_COA_MAPPING: KprCoaMappingConfig = {
   propertyAssetCode: '1600',
@@ -140,71 +138,43 @@ export function calculateKprClosingCosts(
   };
 }
 
-export function getStoredKprPresets(username?: string): KprPreset[] {
-  try {
-    const key = username ? `fin_${username}_kpr_presets` : 'fin_default_kpr_presets';
-    const saved = secureStorage.getItem(key);
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        return parsed.map((p: KprPreset) => ({
-          ...p,
-          appraisalFee: p.appraisalFee ?? 500000,
-          floatingCapRate: p.floatingCapRate ?? Math.max(p.floatingRate || 0, 13),
-          earlyRepaymentPenaltyPct: p.earlyRepaymentPenaltyPct ?? (p.scheme === 'tiered' ? 2.0 : 0),
-        }));
-      }
-    }
-  } catch (err) {
-    logger.error('Failed to load KPR presets from storage:', err);
-  }
+let memoryKprPresets: KprPreset[] = DEFAULT_KPR_PRESETS;
+let memoryKprCoaMapping: KprCoaMappingConfig = DEFAULT_KPR_COA_MAPPING;
+
+export function getStoredKprPresets(_username?: string): KprPreset[] {
+  return memoryKprPresets.map((p: KprPreset) => ({
+    ...p,
+    appraisalFee: p.appraisalFee ?? 500000,
+    floatingCapRate: p.floatingCapRate ?? Math.max(p.floatingRate || 0, 13),
+    earlyRepaymentPenaltyPct: p.earlyRepaymentPenaltyPct ?? (p.scheme === 'tiered' ? 2.0 : 0),
+  }));
+}
+
+export function saveStoredKprPresets(presets: KprPreset[], _username?: string): void {
+  memoryKprPresets = Array.isArray(presets) && presets.length > 0 ? presets : DEFAULT_KPR_PRESETS;
+}
+
+export function resetStoredKprPresets(_username?: string): KprPreset[] {
+  saveStoredKprPresets(DEFAULT_KPR_PRESETS);
   return DEFAULT_KPR_PRESETS;
 }
 
-export function saveStoredKprPresets(presets: KprPreset[], username?: string): void {
-  try {
-    const key = username ? `fin_${username}_kpr_presets` : 'fin_default_kpr_presets';
-    secureStorage.setItem(key, JSON.stringify(presets));
-  } catch (err) {
-    logger.error('Failed to save KPR presets to storage:', err);
-  }
+export function getStoredKprCoaMapping(_username?: string): KprCoaMappingConfig {
+  return {
+    ...DEFAULT_KPR_COA_MAPPING,
+    ...memoryKprCoaMapping,
+  };
 }
 
-export function resetStoredKprPresets(username?: string): KprPreset[] {
-  saveStoredKprPresets(DEFAULT_KPR_PRESETS, username);
-  return DEFAULT_KPR_PRESETS;
+export function saveStoredKprCoaMapping(mapping: KprCoaMappingConfig, _username?: string): void {
+  memoryKprCoaMapping = {
+    ...DEFAULT_KPR_COA_MAPPING,
+    ...(mapping || {}),
+  };
 }
 
-export function getStoredKprCoaMapping(username?: string): KprCoaMappingConfig {
-  try {
-    const key = username ? `fin_${username}_kpr_coa_mapping` : 'fin_default_kpr_coa_mapping';
-    const saved = secureStorage.getItem(key);
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      if (parsed && typeof parsed === 'object') {
-        return {
-          ...DEFAULT_KPR_COA_MAPPING,
-          ...parsed,
-        };
-      }
-    }
-  } catch (err) {
-    logger.error('Failed to load KPR COA mapping from storage:', err);
-  }
-  return DEFAULT_KPR_COA_MAPPING;
-}
-
-export function saveStoredKprCoaMapping(mapping: KprCoaMappingConfig, username?: string): void {
-  try {
-    const key = username ? `fin_${username}_kpr_coa_mapping` : 'fin_default_kpr_coa_mapping';
-    secureStorage.setItem(key, JSON.stringify(mapping));
-  } catch (err) {
-    logger.error('Failed to save KPR COA mapping to storage:', err);
-  }
-}
-
-export function resetStoredKprCoaMapping(username?: string): KprCoaMappingConfig {
-  saveStoredKprCoaMapping(DEFAULT_KPR_COA_MAPPING, username);
+export function resetStoredKprCoaMapping(_username?: string): KprCoaMappingConfig {
+  saveStoredKprCoaMapping(DEFAULT_KPR_COA_MAPPING);
   return DEFAULT_KPR_COA_MAPPING;
 }
 

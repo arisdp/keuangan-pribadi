@@ -1,5 +1,5 @@
 import React from 'react';
-import { Account, Debt, FixedAsset, FixedAssetAdjustment, InvestmentAsset, Transaction } from '../types';
+import { Account, Debt, FixedAsset, FixedAssetAdjustment, InvestmentAsset, InvestmentGoal, Transaction } from '../types';
 import { FormattedNumberInput } from './FormattedNumberInput';
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip, AreaChart, Area, LineChart, Line, XAxis, YAxis, CartesianGrid, Legend, BarChart, Bar } from 'recharts';
 import { TrendingUp, Wallet, ArrowUpRight, ArrowDownLeft, Info, Activity, Landmark, Edit2, Check, X, BarChart2, Layers, Plus, Calculator, RefreshCw, Coins, Sparkles, History, FileSpreadsheet, FileText, Download, DollarSign, Percent, Gift, Target, AlertTriangle } from 'lucide-react';
@@ -30,6 +30,8 @@ interface InvestmentTabProps {
   accounts?: Account[];
   fixedAssets?: FixedAsset[];
   debts?: Debt[];
+  investmentGoals?: InvestmentGoal[];
+  onUpdateInvestmentGoals?: (goals: InvestmentGoal[]) => void;
   onUpdateInvestment?: (id: string, updatedFields: Partial<InvestmentAsset>) => void;
   onAddFixedAsset?: (payload: FixedAssetCreatePayload) => boolean | void;
   onUpdateFixedAsset?: (id: string, updated: Partial<FixedAsset>) => void;
@@ -59,6 +61,8 @@ export const InvestmentTab: React.FC<InvestmentTabProps> = ({
   accounts = [],
   fixedAssets = [],
   debts = [],
+  investmentGoals,
+  onUpdateInvestmentGoals,
   onUpdateInvestment,
   onAddFixedAsset,
   onUpdateFixedAsset,
@@ -1759,7 +1763,11 @@ export const InvestmentTab: React.FC<InvestmentTabProps> = ({
 
       {/* TARGET & GOALS INVESTASI */}
       <div id="investment-goals-section">
-        <InvestmentGoalSection investments={investments} />
+        <InvestmentGoalSection
+          investments={investments}
+          investmentGoals={investmentGoals}
+          onUpdateInvestmentGoals={onUpdateInvestmentGoals}
+        />
       </div>
 
       {/* KALKULATOR INFLASI & DAYA BELI MASA DEPAN */}

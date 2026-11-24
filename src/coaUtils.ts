@@ -5,7 +5,6 @@ import {
   normalizeLedgerDateYYYYMMDD,
   OrphanTransactionIssue,
 } from './utils/accountingEngine';
-import { secureStorage } from './utils/secureStorage';
 import { logger } from './utils/logger';
 
 export interface AccountCOA {
@@ -107,33 +106,45 @@ export const getCoaReportScope = (category: AccountCOA['category']): CoaReportSc
   }
 };
 
-export const getStoredCoaList = (): AccountCOA[] => {
-  try {
-    const saved = secureStorage.getItem('app_coa_list');
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        const existingCodes = new Set(parsed.map((c: AccountCOA) => c.code));
-        const missingDefaults = DEFAULT_COA_LIST.filter((d) => !existingCodes.has(d.code));
-        if (missingDefaults.length > 0) {
-          const merged = [...parsed, ...missingDefaults].sort((a, b) => a.code.localeCompare(b.code));
-          return merged;
-        }
-        return parsed;
-      }
+let memoryCoaList: AccountCOA[] = [...DEFAULT_COA_LIST];
+const masterConfigListeners = new Set<() => void>();
+
+const notifyMasterConfigListeners = () => {
+  masterConfigListeners.forEach((cb) => {
+    try {
+      cb();
+    } catch (err) {
+      logger.error('Master config listener error:', err);
     }
-  } catch (err) {
-    logger.error('Failed to load COA list from localStorage:', err);
+  });
+};
+
+export const subscribeMasterConfigUpdates = (listener: () => void): (() => void) => {
+  masterConfigListeners.add(listener);
+  return () => {
+    masterConfigListeners.delete(listener);
+  };
+};
+
+const mergeMissingDefaultCoas = (list: AccountCOA[]): AccountCOA[] => {
+  const existingCodes = new Set(list.map((c) => c.code));
+  const missingDefaults = DEFAULT_COA_LIST.filter((d) => !existingCodes.has(d.code));
+  if (missingDefaults.length > 0) {
+    return [...list, ...missingDefaults].sort((a, b) => a.code.localeCompare(b.code));
+  }
+  return list;
+};
+
+export const getStoredCoaList = (): AccountCOA[] => {
+  if (Array.isArray(memoryCoaList) && memoryCoaList.length > 0) {
+    return mergeMissingDefaultCoas(memoryCoaList);
   }
   return DEFAULT_COA_LIST;
 };
 
 export const saveStoredCoaList = (list: AccountCOA[]): void => {
-  try {
-    secureStorage.setItem('app_coa_list', JSON.stringify(list));
-  } catch (err) {
-    logger.error('Failed to save COA list to localStorage:', err);
-  }
+  memoryCoaList = Array.isArray(list) && list.length > 0 ? mergeMissingDefaultCoas(list) : [...DEFAULT_COA_LIST];
+  notifyMasterConfigListeners();
 };
 
 /**
@@ -221,17 +232,25 @@ export interface MasterChangeLog {
   updatedBy: string;
 }
 
+let memoryMasterChangeLogs: MasterChangeLog[] = [];
+
 export const getMasterChangeLogs = (): MasterChangeLog[] => {
-  try {
-    const saved = secureStorage.getItem('app_master_change_log');
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      if (Array.isArray(parsed)) return parsed;
-    }
-  } catch (err) {
-    logger.error('Failed to load master change log:', err);
+  return Array.isArray(memoryMasterChangeLogs) ? memoryMasterChangeLogs : [];
+};
+
+export const hydrateMasterCoaAndLogs = (
+  coaList?: AccountCOA[] | null,
+  changeLogs?: MasterChangeLog[] | null,
+  notify = false
+): void => {
+  memoryCoaList =
+    Array.isArray(coaList) && coaList.length > 0
+      ? mergeMissingDefaultCoas(coaList)
+      : [...DEFAULT_COA_LIST];
+  memoryMasterChangeLogs = Array.isArray(changeLogs) ? changeLogs.slice(0, 100) : [];
+  if (notify) {
+    notifyMasterConfigListeners();
   }
-  return [];
 };
 
 export const addMasterChangeLog = (
@@ -252,16 +271,14 @@ export const addMasterChangeLog = (
     updatedBy,
   };
   const updatedLogs = [newLog, ...logs].slice(0, 100);
-  try {
-    secureStorage.setItem('app_master_change_log', JSON.stringify(updatedLogs));
-  } catch (err) {
-    logger.error('Failed to save master change log:', err);
-  }
+  memoryMasterChangeLogs = updatedLogs;
+  notifyMasterConfigListeners();
   return updatedLogs;
 };
 
 export const clearMasterChangeLogs = (): void => {
-  secureStorage.removeItem('app_master_change_log');
+  memoryMasterChangeLogs = [];
+  notifyMasterConfigListeners();
 };
 
 /* =========================================================================
@@ -716,8 +733,7 @@ export const factoryResetMasterData = (): {
   resetCoaList: AccountCOA[];
   resetAccounts: Account[];
 } => {
-  secureStorage.removeItem('app_coa_list');
-  const resetCoaList = DEFAULT_COA_LIST;
+  const resetCoaList = [...DEFAULT_COA_LIST];
   saveStoredCoaList(resetCoaList);
 
   const resetAccounts: Account[] = [

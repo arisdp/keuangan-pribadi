@@ -7,6 +7,7 @@
 ## Daftar Isi
 
 - [Fitur Utama](#-fitur-utama)
+- [Ringkasan Eksekutif AccountingEngine & Sinkronisasi Data](#-ringkasan-eksekutif-accountingengine--sinkronisasi-data)
 - [Teknologi yang Digunakan](#-teknologi-yang-digunakan)
 - [Struktur Navigasi Aplikasi](#-struktur-navigasi-aplikasi)
 - [Keamanan, Sinkronisasi & PWA](#-keamanan-sinkronisasi--pwa)
@@ -65,6 +66,39 @@
 
 ---
 
+## Ringkasan Eksekutif AccountingEngine & Sinkronisasi Data
+
+Untuk menjaga konsistensi laporan keuangan dan saldo buku besar lintas perangkat, Nusantara Wealth memisahkan orkestrasi akuntansi deterministik dan persistensi database cloud ke dalam dua lapisan terintegrasi:
+
+### 1. Alur Kerja `AccountingEngine` (`src/utils/accountingEngine.ts`)
+- **Normalisasi Tanggal Lokal Bebas UTC**: Seluruh perhitungan memakai zona waktu lokal (`toLocalYYYYMMDD`, `parseLocalDate`, `normalizeLedgerDateYYYYMMDD` dengan cache LRU `4096` entri) agar transaksi jam `00:00–07:00` WIB tidak pernah bergeser H-1 ke bulan sebelumnya.
+- **Klasifikasi 11 Sifat Akuntansi & Anti-Double-Counting**: Memisahkan arus **Operasional (`income`/`expense`)**, **Tabungan & Investasi**, **Transfer Internal**, **Belanja Non-Tunai Kartu Kredit/PayLater**, **Pelunasan Tagihan Kredit**, serta **Pemecahan Angsuran KPR (Pokok vs Bunga)** sehingga saldo tabungan bersih, kas tunai, ekuitas properti KPR, dan neraca selalu seimbang tanpa penghitungan ganda.
+- **Mesin GL & Audit Integritas**: Menghitung saldo buku besar per akun (`calculateAccountGLBalance`), mendeteksi transaksi yatim maupun entri duplikat (`auditLedgerIntegrity`), menyimulasikan dampak koreksi saldo (`previewSafeAnomalyCleanupImpact`), dan membukukan penyusutan aset tetap akhir tahun secara otomatis (`Dr 5960 / Cr 1690`).
+- **Visualisasi Sankey Berperforma Tinggi**: Modul `src/utils/cashFlowSankey.ts` membangun indeks periode berbasis `Map` (`O(1)` per periode `Semua`, `Bulanan`, `Kuartal`, `Tahunan`) yang dipadukan dengan `useTransition` dan paginasi `TransactionDrillDownTable` di `ReportsTab`.
+
+### 2. Mekanisme Sinkronisasi Data (`PostgreSQL Single Source of Truth` & `Google Sheets`)
+- **PostgreSQL sebagai Sumber Tunggal (*Single Source of Truth*)**: Seluruh data transaksi, rekening (termasuk `coaCode`), anggaran, utang & KPR, aset tetap, investasi & histori harga, dana darurat, transaksi berulang, target tabungan & investasi, hingga konfigurasi master (`coaList`, `masterCategories`, `kprPresets`, `kprCoaMapping`, `masterChangeLogs`) **dimuat langsung saat login dari `/api/db/sync` dan disimpan secara atomik di PostgreSQL**—tanpa menyimpan atau memulihkan data keuangan di `localStorage` browser maupun menimpa data pengguna dengan dataset sampel saat login di komputer berbeda.
+- **Debounced Cloud Sync & Isolasi User**: Perubahan pada aplikasi memicu pembaruan terdeduplikasi (*payload signature*) ke `POST /api/db/sync` (debounce `450ms`), diproses dalam transaksi database PostgreSQL yang terisolasi per `userId` (`withDbRetry` + urutan penghapusan aman *foreign-key*).
+- **Sinkronisasi Google Sheets Opsional**: Apabila pengguna mengaktifkan integrasi Google Sheets, sinkronisasi berjalan setelah hidrasi PostgreSQL selesai (`650ms` debounce dengan *chunking* `40.000` karakter per sel) dan membandingkan perbedaan paket melalui `SyncConflictModal` sebelum menulis ke PostgreSQL.
+
+```mermaid
+flowchart LR
+    PG[(Neon PostgreSQL<br/>Single Source of Truth)] -->|GET /api/db/sync<br/>Hidrasi Penuh Saat Login| State[App State &<br/>Master COA/Kategori/KPR]
+    State --> Engine[AccountingEngine<br/>Normalisasi Tanggal Lokal,<br/>11 Sifat Akuntansi & KPR]
+    Engine --> UI[ReportsTab Sankey,<br/>Laporan & Audit Integritas]
+    State -->|Debounce 450ms<br/>POST /api/db/sync| PG
+    State <-->|Opsional 650ms<br/>SyncConflictModal| Sheets[(Google Sheets API)]
+```
+
+### 3. Panduan Teknis Mendalam (`/docs`)
+Tim pengembang dan auditor dapat menelusuri dokumentasi teknis lengkap pada direktori `./docs`:
+- **[Protokol Validasi Integritas Ledger & Panduan Modal](./docs/LedgerIntegrity.md)** — Diagram alur Mermaid siklus validasi integritas, matriks perbaikan anomali COA/transaksi, serta panduan langkah demi langkah `AccountingIntegrityModal`.
+- **[Siklus Hidup AccountingEngine & Integritas Ledger](./docs/ACCOUNTING_ENGINE_LIFECYCLE_AND_INTEGRITY.md)** — Penjabaran lengkap 6 fase siklus hidup `AccountingEngine`, rumus klasifikasi KPR/kredit, dan algoritma audit GL.
+- **[Protokol Sinkronisasi Data (PostgreSQL & Sheets)](./docs/DATA_SYNCHRONIZATION_PROTOCOL.md)** — Arsitektur hidrasi, skema transaksi atomik `/api/db/sync`, resolusi konflik, dan chunking Google Sheets API v4.
+- **[Indeks Dokumentasi Teknis Lengkap](./docs/README.md)** — Peta seluruh dokumen arsitektur, API/database Drizzle, modul inti, dan katalog 53 komponen UI.
+
+---
+
 ## Teknologi yang Digunakan
 
 - **Frontend**: React 19, TypeScript, Vite, Tailwind CSS v4, Motion
@@ -90,10 +124,10 @@ Menu samping (*sidebar*) pada layar desktop terkunci setinggi viewport penuh den
 
 ## Keamanan, Sinkronisasi & PWA
 
-- **Sinkronisasi Cloud & Penanganan Konflik**: Data pengguna disinkronkan secara otomatis antara browser dan PostgreSQL (`/api/db/sync`). Jika terdapat perbedaan data antara perangkat lokal dan cloud, modal **Sync Conflict** memungkinkan pengguna memilih sumber data yang ingin dipertahankan.
-- **Penyimpanan Lokal Terenkripsi**: Penyimpanan cache `LocalStorage` menggunakan lapisan enkripsi (`secureStorage`) agar informasi keuangan pengguna tidak tersimpan sebagai teks polos.
-- **Proteksi Log Produksi**: Utilitas logger global menonaktifkan `console.log`/`info`/`debug`/`warn` di lingkungan produksi untuk mencegah kebocoran data finansial pada konsol browser.
-- **Backup & Restore**: Fitur cadangkan (*export*) dan pulihkan (*import*) seluruh data aplikasi ke dalam berkas JSON melalui tombol **Backup** di header global.
+- **PostgreSQL sebagai Sumber Tunggal (*Single Source of Truth*)**: Seluruh data finansial dan konfigurasi master (`Master COA`, kategori, KPR, `coaCode` rekening, dan log master) diambil dan disimpan langsung pada PostgreSQL (`/api/db/sync`) melalui query berparameter Drizzle ORM yang terisolasi per `userId`. Browser tidak lagi menyimpan salinan data keuangan di `LocalStorage`, sehingga membuka akun dari komputer yang berbeda selalu menampilkan data yang 100% identik.
+- **Sinkronisasi Google Sheets & Penanganan Konflik**: Bila integrasi Google Sheets diaktifkan, perbedaan antara dataset PostgreSQL dan Google Sheets dideteksi otomatis dan diselesaikan lewat **Sync Conflict Modal**.
+- **Penyimpanan Sesi Terenkripsi & Proteksi Log Produksi**: Sesi login pengguna (`fin_current_user`) dilindungi lapisan sandi (`secureStorage`), sedangkan utilitas logger global menonaktifkan `console.log`/`info`/`debug`/`warn` di lingkungan produksi untuk mencegah kebocoran data finansial pada konsol browser.
+- **Backup & Restore**: Fitur cadangkan (*export*) dan pulihkan (*import*) seluruh data aplikasi ke dalam berkas JSON terenkripsi AES-GCM-256 melalui tombol **Backup** di header global.
 - **Progressive Web App (PWA)**: Mendukung instalasi aplikasi ke perangkat serta pengingat transaksi berulang via Service Worker (`/sw.js`).
 
 ---

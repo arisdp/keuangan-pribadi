@@ -1,5 +1,3 @@
-import { secureStorage } from './utils/secureStorage';
-import { logger } from './utils/logger';
 import {
   AccountCOA,
   DEFAULT_COA_LIST,
@@ -987,30 +985,21 @@ export function mergeMissingDefaultCategories(storedNodes: CategoryNode[]): Cate
   return cloned;
 }
 
-// Local Storage Storage Helper
-export function getStoredCategories(username?: string): CategoryNode[] {
-  try {
-    const key = username ? `fin_${username}_master_categories` : 'fin_default_master_categories';
-    const saved = secureStorage.getItem(key);
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        return mergeMissingDefaultCategories(parsed);
-      }
-    }
-  } catch (err) {
-    logger.error('Failed to load categories from storage', err);
+let memoryCategories: CategoryNode[] = DEFAULT_CATEGORY_HIERARCHY;
+
+// In-memory category helper (authoritative persistence handled by PostgreSQL)
+export function getStoredCategories(_username?: string): CategoryNode[] {
+  if (Array.isArray(memoryCategories) && memoryCategories.length > 0) {
+    return mergeMissingDefaultCategories(memoryCategories);
   }
   return DEFAULT_CATEGORY_HIERARCHY;
 }
 
-export function saveStoredCategories(categories: CategoryNode[], username?: string) {
-  try {
-    const key = username ? `fin_${username}_master_categories` : 'fin_default_master_categories';
-    secureStorage.setItem(key, JSON.stringify(categories));
-  } catch (err) {
-    logger.error('Failed to save categories to storage', err);
-  }
+export function saveStoredCategories(categories: CategoryNode[], _username?: string) {
+  memoryCategories =
+    Array.isArray(categories) && categories.length > 0
+      ? mergeMissingDefaultCategories(categories)
+      : DEFAULT_CATEGORY_HIERARCHY;
 }
 
 // Helper to flatten categories into an array of options with path strings
