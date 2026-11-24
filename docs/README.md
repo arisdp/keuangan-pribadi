@@ -8,11 +8,13 @@ Dokumentasi komprehensif aplikasi **Nusantara Wealth** — sistem manajemen keua
 
 | Berkas | Cakupan Utama |
 | :--- | :--- |
-| **[ARCHITECTURE.md](./ARCHITECTURE.md)** | Arsitektur full-stack (React 19 + Vite + Express + Neon PostgreSQL), alur state di `src/App.tsx`, navigasi `NAV_GROUPS`, persistensi `secureStorage`, cadangan terenkripsi AES-GCM-256, sinkronisasi cloud & deteksi konflik, Google Sheets/Firebase Auth, dan PWA Service Worker (`public/sw.js`). |
-| **[ACCOUNTING_ENGINE.md](./ACCOUNTING_ENGINE.md)** | Aturan akuntansi pribadi, standar tanggal lokal bebas UTC, Chart of Accounts (`1xxx–5xxx`), 11 klasifikasi transaksi, Laba-Rugi Operasional, Arus Kas 3 pilar (tunai vs non-tunai kartu kredit), Neraca & properti KPR anti-double-counting, proyeksi Net Worth 6+3 bulan, CFP 4 rasio kesehatan, skema KPR & penyusutan aset tetap otomatis, kalkulasi Pajak UU HPP 2026 & Zakat, strategi utang Avalanche/Snowball rollover, serta log audit & perbaikan akuntansi Batch A. |
-| **[API_AND_DATABASE.md](./API_AND_DATABASE.md)** | Spesifikasi backend (`server.ts`, `src/server/api.ts`), skema Drizzle ORM 13 tabel Neon PostgreSQL (`src/db/schema.ts`), migrasi & perbaikan FK (`src/db/index.ts`), mekanisme isolasi user `X-User-Id` & prefix `${userId}_`, endpoint REST `/api/db/*`, endpoint kesehatan & konfigurasi (`/api/health`, `/api/firebase-config`), serta 12 endpoint AI (`gemini-2.5-flash` & `gemini-4-hydrogen`) beserta fallback *rules-based*. |
-| **[CORE_MODULES_AND_TYPES.md](./CORE_MODULES_AND_TYPES.md)** | Referensi super detail seluruh tipe data & interface (`src/types.ts`), seluruh fungsi di `src/utils/accountingEngine.ts`, sistem COA & integritas master (`src/coaUtils.ts`), hirarki kategori (`src/categoryHierarchy.ts`), preset & mapping KPR (`src/utils/kprPresets.ts`), klien HTTP PostgreSQL (`src/apiClient.ts`), utilitas ekspor CSV/PDF, enkripsi, formatter, logger, toast, dan data awal (`src/initialData.ts`). |
-| **[COMPONENTS_AND_EXTENSION_GUIDE.md](./COMPONENTS_AND_EXTENSION_GUIDE.md)** | Katalog lengkap seluruh **50 komponen React** di `src/components/` lengkap dengan jumlah baris, seluruh *exports*, tanda tangan `Props`, dan perilaku akuntansi internal, ditambah panduan langkah demi langkah untuk pengembangan fitur lanjutan. |
+| **[ACCOUNTING_ENGINE_LIFECYCLE_AND_INTEGRITY.md](./ACCOUNTING_ENGINE_LIFECYCLE_AND_INTEGRITY.md)** | **Panduan Teknis Mendalam (Bahasa Indonesia)**: Siklus hidup lengkap 6-fase `AccountingEngine` (normalisasi tanggal cache `4096`, 11 sifat akuntansi, pemisahan KPR, anti-double-counting, penyusutan akhir tahun `5960/1690`), serta **Protokol Penuh Validasi Integritas *Ledger*** lengkap dengan diagram alur kode dan matriks perbaikan anomali (`auditLedgerIntegrity`, `calculateAccountGLBalance`, `previewSafeAnomalyCleanupImpact`). |
+| **[DATA_SYNCHRONIZATION_PROTOCOL.md](./DATA_SYNCHRONIZATION_PROTOCOL.md)** | **Panduan Teknis Mendalam (Bahasa Indonesia)**: Mekanisme sinkronisasi data dua arah antara **Lokal Terenkripsi (`150ms`)**, **Neon PostgreSQL (`450ms`)**, dan **Google Sheets (`650ms`)**, mencakup hidrasi login, `SyncConflictModal` & `mergeSyncData`, deduplikasi signature, transaksi atomik server (`withDbRetry` + urutan DELETE aman FK), isolasi `${userId}_`, serta chunking `40.000` karakter Google Sheets API v4. |
+| **[ARCHITECTURE.md](./ARCHITECTURE.md)** | Arsitektur full-stack (React 19 + Vite + Express + Neon PostgreSQL), alur state di `src/App.tsx`, navigasi `NAV_GROUPS`, persistensi `secureStorage` ter-batch (`150ms`), cadangan terenkripsi AES-GCM-256, sinkronisasi cloud & deteksi konflik, Google Sheets/Firebase Auth, dan PWA Service Worker (`public/sw.js`). |
+| **[ACCOUNTING_ENGINE.md](./ACCOUNTING_ENGINE.md)** | Aturan akuntansi pribadi, standar tanggal lokal bebas UTC & cache `normalizeLedgerDateYYYYMMDD`, Chart of Accounts (`1xxx–5xxx`), 11 klasifikasi transaksi, Laba-Rugi Operasional, Arus Kas 3 pilar, Neraca & properti KPR anti-double-counting, proyeksi Net Worth 6+3 bulan, CFP 4 rasio kesehatan, skema KPR & penyusutan aset tetap otomatis, Pajak UU HPP 2026 & Zakat, strategi utang Avalanche/Snowball rollover, serta ringkasan alur kerja `AccountingEngine`. |
+| **[API_AND_DATABASE.md](./API_AND_DATABASE.md)** | Spesifikasi backend (`server.ts`, `src/server/api.ts`), skema Drizzle ORM 13 tabel Neon PostgreSQL (`src/db/schema.ts`), migrasi & perbaikan FK (`src/db/index.ts`), mekanisme isolasi user `X-User-Id` & prefix `${userId}_`, endpoint REST `/api/db/*`, 13 endpoint AI (`gemini-2.5-flash` & `gemini-4-hydrogen`), serta ringkasan kontrak sinkronisasi database. |
+| **[CORE_MODULES_AND_TYPES.md](./CORE_MODULES_AND_TYPES.md)** | Referensi super detail seluruh tipe data & interface (`src/types.ts`), seluruh fungsi di `src/utils/accountingEngine.ts`, pre-indexing `Map` periode `src/utils/cashFlowSankey.ts`, sistem COA & integritas master (`src/coaUtils.ts`), hirarki kategori (`src/categoryHierarchy.ts`), preset & mapping KPR (`src/utils/kprPresets.ts`), klien HTTP PostgreSQL (`src/apiClient.ts`), utilitas ekspor CSV/PDF, enkripsi, formatter, logger, toast, dan data awal (`src/initialData.ts`). |
+| **[COMPONENTS_AND_EXTENSION_GUIDE.md](./COMPONENTS_AND_EXTENSION_GUIDE.md)** | Katalog lengkap seluruh **53 komponen React** di `src/components/` lengkap dengan seluruh *exports*, tanda tangan `Props`, dan perilaku akuntansi/performa internal (termasuk `SankeyCashFlowSummary`, `TransactionDrillDownTable`, `LaporanLabaRugi`, `HierarchicalPivotReport`), ditambah panduan pengembangan lanjutan & pola optimasi dataset besar. |
 
 ---
 
@@ -20,10 +22,10 @@ Dokumentasi komprehensif aplikasi **Nusantara Wealth** — sistem manajemen keua
 
 1. **Jurnal & Multi-Akun**: Pencatatan transaksi `income`, `expense`, `transfer`, `saving`, `investment` lintas akun `cash`, `bank`, `e-wallet`, `credit_card`, dan `paylater`, termasuk deteksi transaksi rutin berulang (*recurring*) dan penyesuaian non-kas.
 2. **Double-Entry Personal Accounting**: Pemetaan otomatis kategori ke Chart of Accounts (`1xxx–5xxx`), pemisahan beban bunga & angsuran pokok KPR, koreksi basis ekuitas properti KPR agar tidak terjadi penghitungan ganda aset vs liabilitas, serta audit integritas *General Ledger* (`auditLedgerIntegrity`).
-3. **Dashboard & Pencapaian Tabungan**: Kartu *Ringkasan Pencapaian Tabungan* (`SavingsAchievementCard`) dengan grafik cincin konsentris ganda (anggaran tabungan vs target tabungan), proyeksi tanggal pencapaian target berbasis AI (`/api/savings-projection`), proyeksi kekayaan bersih 6+3 bulan, skor kesehatan CFP, dan prioritas mingguan.
-4. **Perencanaan & Simulasi**: Rencana Anggaran & *Budget Rebalancing*, Dana Darurat, Target Investasi (`InvestmentGoalSection`), Simulator *What-If*, Kalkulator Daya Beli Inflasi, serta Kalkulator Pajak PPh 21 / PPh OP (UU HPP 5 lapis + UMKM PP 55/2022 + Freelance NPPN 50%) & Zakat.
+3. **Dashboard, Sankey Cash Flow, & Pusat Laporan Tanpa Jank**: Kartu *Ringkasan Pencapaian Tabungan* (`SavingsAchievementCard`), visualisasi aliran kas **Sankey + Ringkasan Arus Kas (`SankeyCashFlowSummary`) + `TransactionDrillDownTable`**, serta perluasan indeks periode berbasis `Map` (`SankeyPeriodIndex`) dan React `useTransition` (dengan indikator status *"Memperbarui..."*) di seluruh tab periode `ReportsTab` (`Arus Kas`, `Sankey`, `LaporanLabaRugi`, `HierarchicalPivotReport`, serta analitik tren/YoY/heatmap).
+4. **Perencanaan, Simulasi, & DRIP Investasi**: Rencana Anggaran & *Budget Rebalancing*, Dana Darurat, Target Investasi (`InvestmentGoalSection`), Simulator *What-If*, Kalkulator Reinvestasi Dividen (`DividendReinvestmentModal` dengan ekstraksi ticker otomatis & grounding pasar Gemini AI), Kalkulator Daya Beli Inflasi, serta Kalkulator Pajak PPh 21 / PPh OP (UU HPP 5 lapis + UMKM PP 55/2022 + Freelance NPPN 50%) & Zakat.
 5. **Utang, KPR & Aset**: Manajemen utang konsumtif/produktif, penjadwal prioritas **Avalanche vs Snowball** dengan *monthly freed payment rollover*, kalkulator amortisasi KPR (`annuity`, `tiered`, `flat`), penyusutan tahunan otomatis aset tetap (`Dr 5960 / Cr 1690`), dan histori harga investasi.
-6. **Sinkronisasi, Backup & Ekspor**: Persistensi lokal terenkripsi (`NW_ENC_V1`), sinkronisasi otomatis Neon PostgreSQL (`450ms` debounce + deteksi konflik `SyncConflictModal`), dukungan cadangan Google Sheets, ekspor CSV/PDF laporan keuangan & portofolio, serta file cadangan JSON terenkripsi PBKDF2 + AES-GCM-256.
+6. **Sinkronisasi, Backup & Ekspor**: Persistensi lokal terenkripsi (`NW_ENC_V1`) berbasis batch dirty-check (`150ms`), sinkronisasi otomatis Neon PostgreSQL (`450ms` debounce + deduplikasi signature payload + `SyncConflictModal`), dukungan Google Sheets (`650ms` debounce + chunking `40.000` karakter per baris), ekspor CSV/PDF laporan keuangan & portofolio, serta cadangan JSON terenkripsi PBKDF2 + AES-GCM-256.
 
 ---
 
@@ -62,7 +64,7 @@ Dokumentasi komprehensif aplikasi **Nusantara Wealth** — sistem manajemen keua
     ├── coaUtils.ts              # Chart of Accounts (DEFAULT_COA_LIST), log master, sinkronisasi & scan duplikat
     ├── categoryHierarchy.ts     # Pohon kategori bertingkat & pemetaan kategori -> COA
     ├── apiClient.ts             # Klien fetch ke /api/db/* & parser koneksi PostgreSQL
-    ├── googleSheets.ts          # Integrasi Google Identity Services & Google Sheets sync
+    ├── googleSheets.ts          # Integrasi Firebase Google Auth & Google Sheets chunked sync
     ├── db/
     │   ├── drizzle.config.ts    # Konfigurasi Drizzle Kit (schema.ts -> PostgreSQL)
     │   ├── index.ts             # Pool PG Neon, ensureTablesExist, fixFkConstraints, dengan retry & SSL
@@ -70,7 +72,8 @@ Dokumentasi komprehensif aplikasi **Nusantara Wealth** — sistem manajemen keua
     ├── server/
     │   └── api.ts               # Router Express /api/db (auth, schema diagnostics, init-user, /sync)
     ├── utils/
-    │   ├── accountingEngine.ts  # Inti logika akuntansi, KPR, penyusutan, CFP ratios, audit GL, net worth
+    │   ├── accountingEngine.ts  # Inti logika akuntansi, cache tanggal, KPR, penyusutan, CFP ratios, audit GL
+    │   ├── cashFlowSankey.ts    # Pre-indexing periode O(1) (SankeyPeriodIndex) & agregator arus kas Sankey
     │   ├── cryptoBackup.ts      # Enkripsi & dekripsi cadangan JSON (PBKDF2 100k SHA-256 + AES-GCM-256)
     │   ├── dbLogger.ts          # Buffer log koneksi & operasi database (maks 20 entri)
     │   ├── exportFinancialReports.ts # Ekspor CSV & PDF Laba-Rugi, Neraca, Arus Kas, Anggaran, & Ringkasan Bulanan
@@ -81,7 +84,7 @@ Dokumentasi komprehensif aplikasi **Nusantara Wealth** — sistem manajemen keua
     │   ├── secureStorage.ts     # Wrapper localStorage tersandi ringan (NW_ENC_V1:)
     │   ├── syncConflictDetector.ts # Ringkasan paket data, deteksi konflik lokal vs cloud, & smart merge
     │   └── toast.ts             # Store pub-sub notifikasi toast global
-    └── components/              # 50 komponen React UI & modal analitik
+    └── components/              # 53 komponen React UI, visualisasi D3, & modal analitik
 ```
 
 ---

@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useRef } from 'react';
+import React, { useState, useMemo, useEffect, useRef, useTransition } from 'react';
 import { Transaction, Account, KprCoaMappingConfig } from '../types';
 import {
   CategoryNode,
@@ -14,6 +14,7 @@ import {
   MonthlyIncomeCategoryBreakdown,
   parseLocalDate,
 } from '../utils/accountingEngine';
+import { SankeyPeriodIndex } from '../utils/cashFlowSankey';
 import { formatterIDR } from '../utils/formatters';
 import {
   TrendingUp,
@@ -87,6 +88,7 @@ interface LaporanLabaRugiProps {
   accounts?: Account[];
   masterCategories?: CategoryNode[];
   kprCoaMapping?: KprCoaMappingConfig;
+  periodIndex?: SankeyPeriodIndex;
   onExportMonthCSV?: (monthPoint: MonthlyIncomeStatementPoint) => void;
   onExportMonthPDF?: (monthPoint: MonthlyIncomeStatementPoint) => void;
   onSelectedMonthChange?: (monthPoint: MonthlyIncomeStatementPoint) => void;
@@ -159,10 +161,12 @@ export const LaporanLabaRugi: React.FC<LaporanLabaRugiProps> = ({
   accounts = [],
   masterCategories = DEFAULT_CATEGORY_HIERARCHY,
   kprCoaMapping,
+  periodIndex,
   onExportMonthCSV,
   onExportMonthPDF,
   onSelectedMonthChange,
 }) => {
+  const [isPending, startTransition] = useTransition();
   const [periodRange, setPeriodRange] = useState<IncomeStatementPeriodRange>('6m');
   const [selectedMonthKey, setSelectedMonthKey] = useState<string>(() => {
     const now = new Date();
@@ -246,10 +250,15 @@ export const LaporanLabaRugi: React.FC<LaporanLabaRugiProps> = ({
     [periodRange]
   );
 
-  // Base full series from accounting engine
+  // Base full series from accounting engine (O(1) month lookup via periodIndex Map when provided)
   const series = useMemo(() => {
-    return calculateMonthlyIncomeStatementSeries(transactions, kprCoaMapping, monthsCount);
-  }, [transactions, kprCoaMapping, monthsCount]);
+    return calculateMonthlyIncomeStatementSeries(
+      transactions,
+      kprCoaMapping,
+      monthsCount,
+      periodIndex?.byMonth
+    );
+  }, [transactions, kprCoaMapping, monthsCount, periodIndex]);
 
   // Available operating categories (from period transactions + Master Categories) paired with COA metadata
   const filterCategoryGroups = useMemo(() => {
@@ -707,31 +716,35 @@ export const LaporanLabaRugi: React.FC<LaporanLabaRugiProps> = ({
   };
 
   const handleTableRowClick = (monthKey: string) => {
-    setSelectedMonthKey(monthKey);
-    setExpandedTableMonthKey((prev) => (prev === monthKey ? null : monthKey));
+    startTransition(() => {
+      setSelectedMonthKey(monthKey);
+      setExpandedTableMonthKey((prev) => (prev === monthKey ? null : monthKey));
+    });
   };
 
   const toggleFilterCategory = (categoryName: string) => {
-    setSelectedFilterCategories((prev) => {
-      const exists = prev.some(
-        (c) => c.toLowerCase().trim() === categoryName.toLowerCase().trim()
-      );
-      if (exists) {
-        return prev.filter(
-          (c) => c.toLowerCase().trim() !== categoryName.toLowerCase().trim()
+    startTransition(() => {
+      setSelectedFilterCategories((prev) => {
+        const exists = prev.some(
+          (c) => c.toLowerCase().trim() === categoryName.toLowerCase().trim()
         );
-      }
-      return [...prev, categoryName];
+        if (exists) {
+          return prev.filter(
+            (c) => c.toLowerCase().trim() !== categoryName.toLowerCase().trim()
+          );
+        }
+        return [...prev, categoryName];
+      });
     });
   };
 
   const selectAllByKind = (kind: 'income' | 'expense') => {
     const names = filterCategoryGroups[kind].map((opt) => opt.categoryName);
-    setSelectedFilterCategories(names);
+    startTransition(() => setSelectedFilterCategories(names));
   };
 
   const clearCategoryFilter = () => {
-    setSelectedFilterCategories([]);
+    startTransition(() => setSelectedFilterCategories([]));
     setCategorySearchQuery('');
   };
 
@@ -1073,7 +1086,7 @@ export const LaporanLabaRugi: React.FC<LaporanLabaRugiProps> = ({
       : null;
 
   return (
-    <div className="space-y-6 animate-fadeIn">
+    <div className={`space-y-6 animate-fadeIn transition-opacity duration-150 ${isPending ? 'opacity-75' : 'opacity-100'}`}>
       {/* Header, Period & Multi-Select Category Filter, 4-KPI Summary Strip */}
       <div className="bg-white p-6 rounded-2xl border border-slate-200 space-y-5">
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b border-slate-100 pb-4">
@@ -1090,6 +1103,16 @@ export const LaporanLabaRugi: React.FC<LaporanLabaRugiProps> = ({
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+            {isPending && (
+              <span
+                role="status"
+                aria-live="polite"
+                className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-500 whitespace-nowrap shrink-0"
+              >
+                <RefreshCw className="h-3.5 w-3.5 animate-spin text-blue-600" />
+                <span>Memperbarui...</span>
+              </span>
+            )}
             {/* Period Range Filter */}
             <div
               role="group"
@@ -1105,7 +1128,7 @@ export const LaporanLabaRugi: React.FC<LaporanLabaRugiProps> = ({
                   <button
                     key={opt.id}
                     type="button"
-                    onClick={() => setPeriodRange(opt.id)}
+                    onClick={() => startTransition(() => setPeriodRange(opt.id))}
                     aria-pressed={isActive}
                     className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
                       isActive

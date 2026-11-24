@@ -41,7 +41,7 @@ Berisi 3.729 baris logika akuntansi inti. Berikut seluruh kelompok simbol & fung
 ### 2.1 Utilitas Tanggal & Nominal
 - `toLocalYYYYMMDD(dateInput?)`: Format `YYYY-MM-DD` sesuai waktu lokal.
 - `parseLocalDate(dateStr)`: Parse aman ke `Date` lokal pukul `00:00:00`.
-- `normalizeLedgerDateYYYYMMDD(dateStr?)`: Normalisasi string tanggal transaksi.
+- `normalizeLedgerDateYYYYMMDD(dateStr?)`: Normalisasi string tanggal transaksi ke `YYYY-MM-DD` dengan bounded `Map` cache (`4.096` entri) dan fast-path `^\d{4}-\d{2}-\d{2}$`.
 - `normalizeAbsAmount(amount)`: Memastikan nilai nominal non-negatif berpresisi aman.
 
 ### 2.2 Klasifikasi & Rekening
@@ -103,6 +103,7 @@ Berisi 3.729 baris logika akuntansi inti. Berikut seluruh kelompok simbol & fung
 | :--- | :--- |
 | **`src/apiClient.ts`** (801 baris) | `DEFAULT_POSTGRES_PROVIDER`, `DEFAULT_POSTGRES_SSL_MODE`, `PostgresSslMode`, `PostgresConnectionConfig`, `parseSecurePostgresConfig`, `getSecureDatabaseConfig`, `PostgresUserCredentials`, `HealthCheckResult`, `ClientLogEntry`, `logClientInteraction`, `getClientInteractionLogs`, `clearClientInteractionLogs`, `fetchServerDbLogs`, `ColumnInfo`, `TableSchemaResult`, `checkTableSchema`, `UsersInspectionResult`, `fetchUsersInspection`, `fixUsersSchema`, `rebuildDatabaseSchema`, `checkPostgresHealth`, `loginUserPostgres`, `registerUserPostgres`, `requestForgotPasswordPostgres`, `syncToPostgres`, `syncFromPostgres`. |
 | **`src/googleSheets.ts`** (152 baris) | `loadGoogleIdentityServices`, `loginWithGoogleSheets`, `logoutGoogleSheets`, `isGoogleSheetsSyncActive`, `uploadFinancesToSheets`, `downloadFinancesFromSheets`. |
+| **`src/utils/cashFlowSankey.ts`** | Tipe: `SankeyPeriodMode`, `QuarterNum`, `SankeyLedgerEntry`, `IndexedSankeyTransaction`, `SankeyPeriodIndex`, `SankeySubCategoryShare`, `SankeyDrilldownSelection`, `PeriodCashFlowAggregation`. Konstanta: `QUARTER_LABELS`. Fungsi: `formatMonthLabelID`, `getQuarterFromMonth`, `getPeriodRangeLabel`, `buildSankeyPeriodIndex` (pre-indexing `Map` per bulan/kuartal/tahun + klasifikasi sekali jalan), `lookupSankeyPeriodEntries` (pencarian periode `O(1)`), `getAvailablePeriodOptions`, `filterTransactionsBySankeyPeriod`, `aggregatePeriodCashFlowIndexed`, `aggregatePeriodCashFlow`. |
 | **`src/utils/exportFinancialReports.ts`** (854 baris) | `exportIncomeStatementToCSV`, `exportBalanceSheetToCSV`, `exportCashFlowToCSV`, `exportBudgetRealizationToCSV`, `exportReportSectionToPDF`, `MonthlyBalanceAndIncomeSummary`, `buildMonthlyBalanceAndIncomeSummary`, `exportMonthlyBalanceAndIncomePDF`. |
 | **`src/utils/exportInvestment.ts`** (298 baris) | `exportInvestmentsToCSV`, `exportInvestmentsToPDF`. |
 | **`src/utils/cryptoBackup.ts`** (131 baris) | `EncryptedBackupPayload`, `encryptBackupData`, `decryptBackupData`. |

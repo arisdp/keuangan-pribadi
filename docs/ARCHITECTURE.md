@@ -14,8 +14,8 @@ Nusantara Wealth menggunakan arsitektur **Single-Origin Full-Stack** yang dilaya
 |  ├── src/main.tsx        -> initGlobalLogger + register('/sw.js')       |
 |  ├── src/ThemeContext.tsx -> Light mode enforcement                     |
 |  ├── src/App.tsx         -> Central Financial State + Handlers + Sync   |
-|  ├── src/utils/          -> accountingEngine, secureStorage, crypto     |
-|  └── src/components/     -> 50 UI & Analytics Components                |
+|  ├── src/utils/          -> accountingEngine, cashFlowSankey, secureStorage  |
+|  └── src/components/     -> 53 UI, D3 Sankey, & Analytics Components       |
 +------------------------------------+------------------------------------+
                                      | HTTP JSON / Bearer / X-User-Id
                                      v
@@ -85,8 +85,9 @@ Selain tab di atas, `App.tsx` mengelola modal global di tingkat root:
 
 ## 4. Persistensi Lokal & Keamanan Data
 
-### 4.1 Penyimpanan Terenkripsi Ringan (`src/utils/secureStorage.ts`)
+### 4.1 Penyimpanan Terenkripsi Ringan & Batching (`src/utils/secureStorage.ts` & `App.tsx`)
 - Seluruh kunci sensitif di `localStorage` disimpan menggunakan `secureStorage.setItem(key, value)` yang membungkus payload dengan awalan `NW_ENC_V1:` diikuti hasil enkripsi XOR ber-salt `window.location.origin` + secret aplikasi dalam format Base64 UTF-8 aman.
+- **Consolidated Dirty-Checked Batching (`150ms`)**: Di `src/App.tsx`, 10 slice state pengguna (`transactions`, `accounts`, `budgets`, `debts`, `investments`, `fixedAssets`, `recurringTransactions`, `savingsGoals`, `emergencyConfig`, `emergencyTransactions`) digabung dalam satu `useEffect` berjeda `150ms` yang membandingkan referensi slice (`lastPersistedSlicesRef`). Hanya slice yang benar-benar berubah (*dirty*) yang diserialisasi dan dienkripsi ke `secureStorage`, serta langsung di-*flush* secara sinkron pada event `beforeunload`.
 - Saat membaca (`secureStorage.getItem`), jika nilai belum memiliki awalan `NW_ENC_V1:` (data lama/migrasi), nilai plaintext tetap dibaca lalu otomatis dimigrasi menjadi terenkripsi pada penulisan berikutnya.
 - Kunci `localStorage` dipartisi berdasarkan ID pengguna (sehingga pergantian user pada satu browser tidak mencampur data antar profil).
 
@@ -102,10 +103,11 @@ Untuk kebutuhan ekspor cadangan yang aman dibawa lintas perangkat:
 
 ---
 
-## 5. Mekanisme Sinkronisasi Cloud & Resolusi Konflik
+## 5. Mekanisme Sinkronisasi Cloud, Resolusi Konflik, & Optimasi Pipeline
 
-1. **Auto-Sync Debounce (`450ms`)**:
-   - Setiap mutasi state utama di `App.tsx` menjadwalkan penulisan ke `secureStorage` dan (bila sesi terhubung ke PostgreSQL atau Google Sheets) menjadwalkan `syncToPostgres()` / `uploadFinancesToSheets()` dengan debounce `450ms` agar perubahan cepat (seperti edit beruntun atau sinkronisasi massal) tergabung dalam satu transaksi.
+1. **Auto-Sync Debounced + Payload Signature Deduplication**:
+   - **Neon PostgreSQL (`450ms` debounce)**: Mutasi state di `App.tsx` dijadwalkan untuk dikirim ke `syncToPostgres()`, dengan pemeriksaan tanda tangan payload (`lastPgSyncSignatureRef`) sehingga payload yang identik tidak memicu panggilan ulang `POST /api/db/sync`. Jika panggilan gagal, signature di-reset agar percobaan berikutnya tetap berjalan.
+   - **Google Sheets (`650ms` debounce)**: Unggahan `uploadFinancesToSheets()` dijadwalkan dengan debounce `650ms` dan deduplikasi `lastSheetsSyncSignatureRef`, mencegah panggilan Drive/Sheets API berlebih pada setiap perubahan cepat di UI.
 2. **Transaksi & Retry Eksponensial (`src/apiClient.ts` & `src/server/api.ts`)**:
    - Di sisi server (`POST /api/db/sync`), penyimpanan berjalan dalam transaksi tunggal `db.transaction` yang dibungkus `withDbRetry(..., 3)` untuk menangani *cold-start* atau *transient disconnect* Neon PostgreSQL.
    - Seluruh ID entitas di-scope dengan prefix `${userId}_` (`ensureUserScopedId`) dan dideduplikasi (`deduplicateById`) sebelum penulisan massal.
@@ -113,14 +115,19 @@ Untuk kebutuhan ekspor cadangan yang aman dibawa lintas perangkat:
    - `generateSyncSummary()` menghitung metrik `transactionCount`, `accountCount`, `budgetCount`, `debtCount`, `investmentCount`, `fixedAssetCount`, `savingsGoalCount`, serta `totalBalance` dan `totalDebt`.
    - `detectDataConflict(local, cloud)` mendeteksi ketidakcocokan bila kedua sisi memiliki data non-kosong namun jumlah atau nilai agregatnya berbeda.
    - Jika konflik terdeteksi, `SyncConflictModal` memberi pengguna 3 pilihan: **Gunakan Data Lokal**, **Gunakan Data Cloud**, atau **Gabungkan Cerdas (`mergeSyncData`)** yang menggabungkan himpunan ID unik dengan prioritas rekaman lokal/cloud sesuai tipe entitas.
+4. **Pipeline Laporan & Visualisasi Berdataset Besar (`ReportsTab` + `SankeyFlowChart` + `TransactionDrillDownTable`)**:
+   - `ReportsTab` membangun `SankeyPeriodIndex` (`Map` pre-indexed per bulan, kuartal, dan tahun) satu kali per perubahan `transactions`, lalu mengoper indeks + agregasi `PeriodCashFlowAggregation` secara langsung ke `SankeyCashFlowSummary` dan `SankeyFlowChart` (bebas *double-pass* & bebas `JSON.parse/stringify`).
+   - Transisi filter periode (`Semua`, `Bulanan`, `Kuartal`, `Tahunan`) dibungkus `React.startTransition`, pencarian tabel drill-down memakai `useDeferredValue`, dan perenderan baris dipaginasi bertahap (`PAGE_SIZE = 100`).
+   - `budgetVsRealization` memakai akumulasi tunggal `O(M + B)` alih-alih nested `.filter()`, dan `exportPreviewSummary` dievaluasi secara *lazy* hanya ketika modal ekspor PDF terbuka.
+   - Pengecekan penyusutan akhir tahun otomatis di `App.tsx` membaca `transactionsRef.current` sehingga pencatatan transaksi harian tidak memicu pemindaian ulang aset tetap.
 
 ---
 
 ## 6. Integrasi Google Sheets & Firebase (`src/googleSheets.ts` & `/api/firebase-config`)
 
 - **`src/googleSheets.ts`**:
-  - Mengelola sesi sinkronisasi berbasis Google Identity Services (`loadGoogleIdentityServices`, `loginWithGoogleSheets`, `logoutGoogleSheets`) dan token akses browser via `secureStorage`.
-  - `uploadFinancesToSheets(data)` dan `downloadFinancesFromSheets()` menyimpan/memuat serialisasi JSON `UserFinancialData` ke spreadsheet Google Drive pengguna secara sisi-klien (*client-side*).
+  - Mengelola sesi sinkronisasi berbasis Firebase Authentication `GoogleAuthProvider` (`signInWithPopup`) dengan scope `spreadsheets` dan `drive.file`, serta menyimpan token akses OAuth ke `secureStorage`.
+  - `uploadFinancesToSheets(data)` dan `downloadFinancesFromSheets()` mencari/membuat file spreadsheet `'Nusantara Wealth Data'` di Google Drive pengguna dan memecah JSON ter-serialisasi menjadi potongan `40.000` karakter per baris (`Sheet1!A:A`) agar tetap aman di bawah batas `50.000` karakter per sel Google Sheets.
 - **`GET /api/firebase-config` (`server.ts`)**:
   - Menyajikan variabel lingkungan `FIREBASE_*` secara dinamis ke frontend tanpa hardcode di kode sumber klien.
 

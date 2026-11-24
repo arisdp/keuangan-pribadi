@@ -1,16 +1,18 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState, useTransition } from 'react';
 import { Account, Debt, Transaction } from '../types';
 import { normalizeLedgerDateYYYYMMDD } from '../utils/accountingEngine';
 import {
-  aggregatePeriodCashFlow,
-  filterTransactionsBySankeyPeriod,
+  aggregatePeriodCashFlowIndexed,
+  buildSankeyPeriodIndex,
   formatMonthLabelID,
-  getAvailablePeriodOptions,
   getPeriodRangeLabel,
+  lookupSankeyPeriodEntries,
+  PeriodCashFlowAggregation,
   QUARTER_LABELS,
   QuarterNum,
   SankeyDrilldownSelection,
   SankeyLedgerEntry,
+  SankeyPeriodIndex,
   SankeyPeriodMode,
 } from '../utils/cashFlowSankey';
 import { formatterIDR } from '../utils/formatters';
@@ -31,6 +33,9 @@ interface SankeyFlowChartProps {
   transactions: Transaction[];
   accounts?: Account[];
   debts?: Debt[];
+  periodIndex?: SankeyPeriodIndex;
+  precomputedSummary?: PeriodCashFlowAggregation;
+  filteredCount?: number;
   periodMode?: SankeyPeriodMode;
   onPeriodModeChange?: (mode: SankeyPeriodMode) => void;
   selectedMonth?: string;
@@ -72,6 +77,9 @@ export const SankeyFlowChart: React.FC<SankeyFlowChartProps> = ({
   transactions,
   accounts = [],
   debts = [],
+  periodIndex: externalPeriodIndex,
+  precomputedSummary,
+  filteredCount,
   periodMode: controlledPeriodMode,
   onPeriodModeChange,
   selectedMonth: controlledMonth,
@@ -86,13 +94,21 @@ export const SankeyFlowChart: React.FC<SankeyFlowChartProps> = ({
   onDrilldownSelect,
   clearSelectionToken,
 }) => {
+  const [, startTransition] = useTransition();
+
+  const internalPeriodIndex = useMemo(
+    () => (externalPeriodIndex ? null : buildSankeyPeriodIndex(transactions)),
+    [externalPeriodIndex, transactions]
+  );
+  const effectiveIndex = externalPeriodIndex ?? internalPeriodIndex!;
+
   const {
     availableMonthKeys,
     availableYears,
     currentLocalMonth,
     currentLocalYear,
     currentLocalQuarter,
-  } = useMemo(() => getAvailablePeriodOptions(transactions), [transactions]);
+  } = effectiveIndex;
 
   const [hoveredNode, setHoveredNode] = useState<CustomSankeyNode | null>(null);
   const [hoveredLink, setHoveredLink] = useState<CustomSankeyLink | null>(null);
@@ -114,19 +130,19 @@ export const SankeyFlowChart: React.FC<SankeyFlowChartProps> = ({
 
   const setPeriodMode = (next: SankeyPeriodMode) => {
     if (onPeriodModeChange) onPeriodModeChange(next);
-    else setInternalPeriodMode(next);
+    else startTransition(() => setInternalPeriodMode(next));
   };
   const setSelectedMonth = (next: string) => {
     if (onSelectedMonthChange) onSelectedMonthChange(next);
-    else setInternalMonth(next);
+    else startTransition(() => setInternalMonth(next));
   };
   const setSelectedYear = (next: string) => {
     if (onSelectedYearChange) onSelectedYearChange(next);
-    else setInternalYear(next);
+    else startTransition(() => setInternalYear(next));
   };
   const setSelectedQuarter = (next: QuarterNum) => {
     if (onSelectedQuarterChange) onSelectedQuarterChange(next);
-    else setInternalQuarter(next);
+    else startTransition(() => setInternalQuarter(next));
   };
 
   const [selectedSubCategory, setSelectedSubCategory] = useState<string | null>(null);
@@ -156,17 +172,28 @@ export const SankeyFlowChart: React.FC<SankeyFlowChartProps> = ({
     [periodMode, selectedMonth, selectedQuarter, selectedYear]
   );
 
-  const filteredTransactions = useMemo(
-    () =>
-      filterTransactionsBySankeyPeriod(
-        transactions,
-        periodMode,
-        selectedMonth,
-        selectedQuarter,
-        selectedYear
-      ),
-    [transactions, periodMode, selectedMonth, selectedQuarter, selectedYear]
-  );
+  const filteredIndexedEntries = useMemo(() => {
+    if (precomputedSummary && filteredCount !== undefined) {
+      return [];
+    }
+    return lookupSankeyPeriodEntries(
+      effectiveIndex,
+      periodMode,
+      selectedMonth,
+      selectedQuarter,
+      selectedYear
+    );
+  }, [
+    precomputedSummary,
+    filteredCount,
+    effectiveIndex,
+    periodMode,
+    selectedMonth,
+    selectedQuarter,
+    selectedYear,
+  ]);
+
+  const effectiveTxCount = filteredCount ?? filteredIndexedEntries.length;
 
   const accountLookup = useMemo(() => {
     const map = new Map<string, Account>();
@@ -176,7 +203,8 @@ export const SankeyFlowChart: React.FC<SankeyFlowChartProps> = ({
 
   // 1. Construct Sankey graph data + exact transaction drill-down buckets
   const sankeyData = useMemo(() => {
-    const agg = aggregatePeriodCashFlow(filteredTransactions, debts);
+    const agg =
+      precomputedSummary ?? aggregatePeriodCashFlowIndexed(filteredIndexedEntries, debts);
     const {
       incomeCategoryMap,
       expenseCategoryMap,
@@ -345,9 +373,9 @@ export const SankeyFlowChart: React.FC<SankeyFlowChartProps> = ({
       netSurplus,
       netDeficit,
     };
-  }, [filteredTransactions, debts]);
+  }, [precomputedSummary, filteredIndexedEntries, debts]);
 
-  // 2. Run D3 Sankey layout algorithm
+  // 2. Run D3 Sankey layout algorithm (shallow clone instead of JSON.parse/stringify)
   const width = 880;
   const height = 430;
 
@@ -356,8 +384,8 @@ export const SankeyFlowChart: React.FC<SankeyFlowChartProps> = ({
       return null;
     }
 
-    const nodesCopy: CustomSankeyNodeExtra[] = JSON.parse(JSON.stringify(sankeyData.nodesExtra));
-    const linksCopy: CustomSankeyLinkExtra[] = JSON.parse(JSON.stringify(sankeyData.linksExtra));
+    const nodesCopy: CustomSankeyNodeExtra[] = sankeyData.nodesExtra.map((n) => ({ ...n }));
+    const linksCopy: CustomSankeyLinkExtra[] = sankeyData.linksExtra.map((l) => ({ ...l }));
 
     const sankeyLayout = d3Sankey<CustomSankeyNodeExtra, CustomSankeyLinkExtra>()
       .nodeWidth(18)
@@ -590,7 +618,7 @@ export const SankeyFlowChart: React.FC<SankeyFlowChartProps> = ({
               <span aria-hidden="true">·</span>
               <span className="font-semibold text-slate-700">{periodRangeLabel}</span>
               <span aria-hidden="true">·</span>
-              <span className="font-mono tabular-nums">{filteredTransactions.length} transaksi</span>
+              <span className="font-mono tabular-nums">{effectiveTxCount} transaksi</span>
             </div>
           </div>
         </div>
@@ -758,7 +786,7 @@ export const SankeyFlowChart: React.FC<SankeyFlowChartProps> = ({
                 {formatterIDR.format(inc)}
               </span>
               <span className="text-[11px] text-slate-500 font-mono tabular-nums block mt-0.5">
-                {filteredTransactions.length} transaksi · {periodRangeLabel}
+                {effectiveTxCount} transaksi · {periodRangeLabel}
               </span>
             </div>
 

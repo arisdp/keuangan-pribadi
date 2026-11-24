@@ -102,4 +102,70 @@ Tiga endpoint analitik tingkat lanjut menggunakan model **`gemini-4-hydrogen`** 
 | :--- | :--- | :--- |
 | `/api/income-statement-summary` | Periode laporan, pendapatan, beban, rasio tabungan, rincian kategori Laba-Rugi | Ringkasan eksekutif naratif Laba-Rugi, evaluasi efisiensi beban, & rekomendasi taktis. |
 | `/api/savings-projection` | Total target tabungan, akumulasi tabungan saat ini, rata-rata laju menabung 3 bulan terakhir, daftar `savingsGoals` & proyeksi matematis dasar | Tanggal estimasi pencapaian total target (`projectedCompletionDate`), status laju (`on_track` / `needs_boost` / `stagnant`), sorotan target terdekat (*nearest goal spotlight*), selisih bulanan yang disarankan, dan pesan strategi personal. |
-| `/api/estimate-asset-yield` | `assetName`, `category`, `currentBalance`, referensi `localYieldPct` & `localGrowthPct` | Menggunakan `googleSearch` grounding untuk mengembalikan `estimatedDividendYieldPct`, `estimatedPriceGrowthPct`, `suggestedPayoutFrequency`, `rationale`, dan daftar sitasi web `sources`. |
+| `/api/estimate-asset-yield` | `assetName`, `ticker?`, `shouldExtractTicker?`, `category`, `currentBalance`, referensi `localYieldPct` & `localGrowthPct` | Menggunakan `googleSearch` grounding untuk mengekstrak/menstandarkan simbol pasar (`extractedTicker`), mengembalikan `estimatedDividendYieldPct`, `estimatedPriceGrowthPct`, `suggestedPayoutFrequency`, `rationale`, dan daftar sitasi web `sources`. |
+
+---
+
+## 4. Alur Kerja Sinkronisasi Data: Neon PostgreSQL & Google Sheets (Panduan Pengembang)
+
+Nusantara Wealth mendukung **3 lapis persistensi** yang bekerja paralel tanpa memblokir antarmuka pengguna: (1) **Local Encrypted Storage (`secureStorage`)**, (2) **Neon PostgreSQL (`/api/db/sync`)**, dan (3) **Google Sheets Backup (`src/googleSheets.ts`)**.
+
+### 4.1 Diagram Alir Sinkronisasi End-to-End
+
+```text
+  [Mutasi State React di App.tsx] (transactions, accounts, budgets, debts, dll.)
+         │
+         ├──► [1] Local Batch Persistence (debounce 150ms + beforeunload flush)
+         │          └── Cek dirty reference per slice -> JSON.stringify -> XOR NW_ENC_V1 -> localStorage
+         │
+         ├──► [2] Neon PostgreSQL Sync (debounce 450ms + signature dedup)
+         │          └── signature = `${activeUserId}:${JSON.stringify(payload)}`
+         │                └── Berubah? -> syncToPostgres(payload, activeUserId) (`src/apiClient.ts`)
+         │                      └── POST /api/db/sync (Header: X-User-Id) (`src/server/api.ts`)
+         │                            └── withDbRetry(3x) -> db.transaction()
+         │                                  ├── Hapus baris lama milik userId (urutan FK-safe)
+         │                                  ├── ensureUserScopedId(`${userId}_${id}`)
+         │                                  ├── deduplicateById()
+         │                                  └── Bulk INSERT ke 13 tabel PostgreSQL
+         │
+         └──► [3] Google Sheets Cloud Sync (debounce 650ms + signature dedup)
+                    └── Hanya aktif jika `cloudSync === true` & `!loadingCloudData`
+                          └── signature = `${username}:${JSON.stringify(sheetsPayload)}`
+                                └── Berubah? -> uploadFinancesToSheets() (`src/googleSheets.ts`)
+                                      ├── Cek token akses Firebase GoogleAuthProvider
+                                      ├── Cari/buat spreadsheet "Nusantara Wealth Data" (Drive API)
+                                      └── Clear Sheet1!A:A -> Bagi JSON per 40.000 char -> PUT values
+```
+
+### 4.2 Siklus Login, Penarikan Awal (*Hydration*), & Resolusi Konflik (`SyncConflictModal`)
+
+1. **Saat Login ke Neon PostgreSQL (`App.tsx` -> `loadPgData`)**:
+   - `App.tsx` menandai `loadingPg = true` agar efek auto-upload tertunda selama proses *hydration* awal.
+   - Memanggil `syncFromPostgres(activeUserId)` (`GET /api/db/sync` dengan header `X-User-Id`).
+   - Secara paralel membaca snapshot backup lokal `nusantara_wealth_backup_${activeUserId}` dari `secureStorage`.
+   - Memanggil `detectDataConflict(localDataPkg, pgData)` (`src/utils/syncConflictDetector.ts`):
+     - **Jika konflik terdeteksi** (kedua sumber non-kosong namun jumlah item atau total saldo/utang berbeda): `SyncConflictModal` terbuka dan pengguna memilih **Gunakan Data Lokal**, **Gunakan Data Cloud**, atau **Gabungkan Cerdas (`mergeSyncData`)** yang menggabungkan himpunan ID unik secara aman.
+     - **Jika tidak ada konflik**: `applySyncPackage(pgData)` langsung menghidrasi state aplikasi.
+   - Setelah `finally { setLoadingPg(false) }`, perubahan state berikutnya otomatis dijadwalkan untuk sinkronisasi inkremental kembali ke Postgres.
+2. **Saat Login dengan Google Sheets (`App.tsx` -> `loadCloudData`)**:
+   - `App.tsx` menandai `loadingCloudData = true`, memanggil `downloadFinancesFromSheets()` (`GET` `Sheet1!A:A`, menggabungkan potongan 40.000 karakter kembali menjadi `UserFinancialData`), mengisi state lokal, lalu melepaskan `loadingCloudData = false`.
+
+### 4.3 Mekanisme Detail Google Sheets (`src/googleSheets.ts`)
+
+- **Autentikasi**: Memanfaatkan konfigurasi dari `GET /api/firebase-config` + Firebase `GoogleAuthProvider` (`signInWithPopup`) dengan dua scope minimal:
+  - `https://www.googleapis.com/auth/spreadsheets`
+  - `https://www.googleapis.com/auth/drive.file`
+- **Batasan Sel Google Sheets (50.000 karakter/sel)**:
+  - Karena seluruh JSON finansial dapat melampaui 50.000 karakter pada dataset besar, `uploadFinancesToSheets()` memecah string JSON menjadi *chunks* berukuran maksimal **`40.000` karakter** dan menuliskannya baris demi baris ke kolom `Sheet1!A:A`.
+  - Saat membaca kembali, `downloadFinancesFromSheets()` menggabungkan seluruh baris kolom A (`rows.map(r => r[0] || '').join('')`) sebelum melakukan `JSON.parse`.
+- **Optimasi Batching**: Pemanggilan di `App.tsx` kini didebounce **`650ms`** dan dicegah mengirim ulang payload identik melalui `lastSheetsSyncSignatureRef` (reset otomatis pada blok `.catch()` bila jaringan gagal atau token kedaluwarsa).
+
+### 4.4 Checklist Pemeliharaan Bagi Tim Pengembang
+
+- **Menambah Entitas/Koleksi Baru ke Sinkronisasi**:
+  1. Tambahkan tabel/kolom di `src/db/schema.ts` + DDL migrasi aman di `ensureTablesExist()` (`src/db/index.ts`).
+  2. Perbarui `GET /api/db/sync` dan `POST /api/db/sync` di `src/server/api.ts` (wajib memakai `ensureUserScopedId` & `deduplicateById` di dalam transaksi `withDbRetry`).
+  3. Tambahkan field baru ke payload `syncToPostgres`, `lastPersistedSlicesRef` (di `App.tsx`), `UserFinancialData` (`src/googleSheets.ts` bila perlu dicadangkan ke Sheets), dan `SyncDataPackage` (`src/utils/syncConflictDetector.ts`).
+- **Menjaga Performa Saat Menambah Efek Sinkronisasi**:
+  - Jangan pernah memanggil `secureStorage.setItem` secara sinkron di banyak `useEffect` terpisah untuk setiap slice state; daftarkan slice baru ke batch writer `150ms` di `App.tsx`.
+  - Jangan menghapus *signature guard* (`lastPgSyncSignatureRef` / `lastSheetsSyncSignatureRef`) karena mencegah siklus upload ganda setelah *hydration* atau saat state di-set ulang dengan nilai yang sama.

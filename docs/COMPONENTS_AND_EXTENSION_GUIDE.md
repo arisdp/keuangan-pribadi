@@ -1,6 +1,6 @@
-# Katalog 51 Komponen UI & Panduan Pengembangan Lanjutan
+# Katalog 53 Komponen UI & Panduan Pengembangan Lanjutan
 
-Dokumen ini mendata seluruh **51 komponen React** pada `src/components/` beserta ukuran berkas, simbol ekspor, interface `Props`, peran domainnya, serta panduan terstruktur untuk menambah fitur baru di masa mendatang.
+Dokumen ini mendata seluruh **53 komponen React** pada `src/components/` beserta simbol ekspor, interface `Props`, peran domainnya, serta panduan terstruktur untuk menambah fitur dan menjaga performa pada dataset besar di masa mendatang.
 
 ---
 
@@ -47,14 +47,16 @@ Dokumen ini mendata seluruh **51 komponen React** pada `src/components/` beserta
 
 ---
 
-## 4. Laporan Akuntansi, Master Kategori, COA, & Integritas (13 Komponen)
+## 4. Laporan Akuntansi, Master Kategori, COA, & Integritas (15 Komponen)
 
 | Berkas & Ukuran | Exports & `Props` | Peran Utama |
 | :--- | :--- | :--- |
-| `ReportsTab.tsx` (2118L) | `ReportsTab` (`transactions`, `accounts`, `budgets`, `debts`, `investments`, `emergencyTransactions`, `fixedAssets?`, `masterCategories?`, handler ekspor & penyesuaian) | Pusat laporan resmi (Laba-Rugi, Neraca, Arus Kas, Pivot COA, Zakat Profesi dinamis per bulan terpilih, Tax Calculator, Ekspor CSV/PDF). |
-| `LaporanLabaRugi.tsx` (2549L) | `LaporanLabaRugi`, `IncomeStatementPeriodRange` (`transactions`, `accounts?`, `masterCategories?`, `kprCoaMapping?`, `onExportMonthCSV?`, `onExportMonthPDF?`) | Laporan Laba-Rugi Operasional rinci per periode, pemisahan bunga KPR, serta ringkasan eksekutif AI (`/api/income-statement-summary`). |
-| `HierarchicalPivotReport.tsx` (479L) | `HierarchicalPivotReport` (`transactions`, `masterCategories`, `kprCoaMapping?`) | Tabel pivot bertingkat berbasis hirarki kategori dan kode COA. |
-| `SankeyFlowChart.tsx` (599L) | `SankeyFlowChart` (`transactions`, `accounts?`, `debts?`) | Diagram aliran dana Sankey (`d3-sankey`) dari sumber pemasukan ke pengeluaran, tabungan, investasi, dan cicilan utang/KPR dengan filter periode lokal & klik *drill-down* rincian transaksi. |
+| `ReportsTab.tsx` | `ReportsTab` (`transactions`, `accounts`, `budgets`, `debts`, `investments`, `emergencyTransactions`, `fixedAssets?`, `masterCategories?`, handler ekspor & penyesuaian) | Pusat laporan resmi (Laba-Rugi, Neraca, Arus Kas, Pivot COA, Zakat Profesi dinamis, Tax Calculator, Ekspor CSV/PDF). Mengorkestrasi `SankeyPeriodIndex` (`O(1)`), `useTransition`, `budgetVsRealization` `O(M+B)`, dan `exportPreviewSummary` *lazy*. |
+| `LaporanLabaRugi.tsx` | `LaporanLabaRugi`, `IncomeStatementPeriodRange` (`transactions`, `accounts?`, `masterCategories?`, `kprCoaMapping?`, `onExportMonthCSV?`, `onExportMonthPDF?`) | Laporan Laba-Rugi Operasional rinci per periode, pemisahan bunga KPR, serta ringkasan eksekutif AI (`/api/income-statement-summary`). |
+| `HierarchicalPivotReport.tsx` | `HierarchicalPivotReport` (`transactions`, `masterCategories`, `kprCoaMapping?`) | Tabel pivot bertingkat berbasis hirarki kategori dan kode COA. |
+| `SankeyCashFlowSummary.tsx` | `SankeyCashFlowSummary`, `SankeyCashFlowSummaryProps` (`summary`, `transactionCount`, `periodRangeLabel`, `periodMode`, picker periode & callback terkontrol) | Kartu ringkasan arus kas di atas Sankey: 3 KPI utama (*Total Pemasukan*, *Total Pengeluaran*, *Net Surplus/Defisit* bertanda minus saat defisit) + detail *Cicilan Pokok Utang* dan *Tabungan & Investasi*, sinkron dengan filter periode (`Semua`, `Bulanan`, `Kuartal`, `Tahunan`). |
+| `SankeyFlowChart.tsx` | `SankeyFlowChart` (`transactions`, `accounts?`, `debts?`, `periodIndex?`, `precomputedSummary?`, `filteredCount?`, kontrol periode opsional, `renderExternalDrilldown?`, `onDrilldownSelect?`, `clearSelectionToken?`) | Diagram aliran dana Sankey (`d3-sankey`) dari sumber pemasukan ke pengeluaran, tabungan, investasi, dan cicilan utang/KPR. Mendukung `SankeyPeriodIndex` `O(1)`, shallow clone layout D3, node penyeimbang `inc-deficit`, & audit kebocoran kas. |
+| `TransactionDrillDownTable.tsx` | `TransactionDrillDownTable`, `TransactionDrillDownTableProps` (`selection`, `accounts`, `onClearSelection`) | Tabel rincian transaksi interaktif di bawah diagram Sankey saat simpul/arus diklik. Menampilkan proporsi sub-kategori/rekening yang dapat diklik, pencarian teks tertunda (`useDeferredValue`), urut **Tanggal** & **Nominal**, **Subtotal Terfilter**, dan paginasi `100` baris per halaman. |
 | `AdjustingEntriesPanel.tsx` (733L) | `AdjustingEntriesPanel`, `AdjustingEntryDraft` (`transactions`, `investments`, `debts`, `kprCoaMapping?`, `coaList?`, `onApplyAdjustments`, `onReverseAdjustment`) | Panel pembuatan & pembalikan jurnal penyesuaian non-kas (penyusutan, akrual, revaluasi). |
 | `MasterCategoryManager.tsx` (2928L) | `MasterCategoryManager` (`categories`, `accounts?`, `transactions?`, `kprPresets?`, `kprCoaMapping?`, handler CRUD kategori, COA, & KPR) | Pengelola master pohon kategori, kode COA (`1xxx–5xxx`), konsolidasi AI, log perubahan, dan panel preset KPR. |
 | `CategoryTreeDiagram.tsx` (457L) | `CategoryTreeDiagram` (`categories`, `transactions?`) | Visualisasi pohon kategori statis/terstruktur. |
@@ -80,11 +82,11 @@ Dokumen ini mendata seluruh **51 komponen React** pada `src/components/` beserta
 | `InvestmentGoalSection.tsx` (958L) | `InvestmentGoalSection`, `getGoalDaysRemaining`, `calculateInvestmentDuration` (`investments?`) | Pelacak target investasi berjangka beserta kalkulasi logaritmik waktu pencapaian dengan bunga majemuk & top-up bulanan. |
 | `InvestmentRoiD3Chart.tsx` (592L) | `InvestmentRoiD3Chart` (`investments`, `transactions`) | Visualisasi D3 ROI per aset dan pertumbuhan portofolio terhadap modal pokok. |
 | `InvestmentSimulationCalculator.tsx` (434L) | `InvestmentSimulationCalculator` (`isOpen`, `onClose`, `investments`) | Modal kalkulator simulasi DCA & bunga majemuk portofolio investasi. |
-| `DividendReinvestmentModal.tsx` (631L) | `DividendReinvestmentModal`, `DividendReinvestmentModalProps` (`isOpen`, `onClose`, `investments`, `transactions?`, `initialAssetId?`) | Modal Kalkulator Reinvestasi Dividen (DRIP) dengan estimasi tren yield historis & pertumbuhan harga per aset, perbandingan skenario DRIP vs Dividen Tunai, pajak dividen, & DCA bulanan. |
+| `DividendReinvestmentModal.tsx` | `DividendReinvestmentModal`, `DividendReinvestmentModalProps` (`isOpen`, `onClose`, `investments`, `transactions?`, `initialAssetId?`) | Modal Kalkulator Reinvestasi Dividen (DRIP) dengan ekstraksi ticker otomatis & grounding yield pasar Gemini (`/api/estimate-asset-yield`), perbandingan DRIP vs Dividen Tunai, pajak dividen, & DCA bulanan. |
 | `PriceHistoryModal.tsx` (383L) | `PriceHistoryModal` (`isOpen`, `onClose`, `investments`, `onUpdateInvestment?`) | Modal pencatatan & grafik riwayat perubahan harga unit aset investasi. |
 | `AIDiversificationModal.tsx` (495L) | `AIDiversificationModal` (`isOpen`, `onClose`, `investments`) | Modal analisis diversifikasi aset & profil risiko melalui `/api/analyze-diversification`. |
 
-*(Catatan: Kelompok Portofolio/Utang mencakup 12 berkas di atas; bersama kelompok 1–4 dan kelompok 6 di bawah, total tepat **51 berkas** di `src/components/`).*
+*(Catatan: Kelompok Laporan mencakup 15 berkas dan Portofolio/Utang mencakup 12 berkas; bersama kelompok 1–3 dan kelompok 6 di bawah, total tepat **53 berkas** di `src/components/`).*
 
 ---
 
@@ -126,3 +128,10 @@ Dokumen ini mendata seluruh **51 komponen React** pada `src/components/` beserta
    - Untuk tugas ringan/cepat dengan fallback deterministik: gunakan `gemini-2.5-flash` + `responseMimeType: "application/json"` + fungsi fallback lokal bila `GEMINI_API_KEY` kosong.
    - Untuk penalaran finansial terstruktur ketat: gunakan `gemini-4-hydrogen` + `thinkingConfig: { thinkingLevel: ThinkingLevel.LOW }` + `responseSchema` lengkap, serta kembalikan status `503`/`502` secara eksplisit jika layanan AI tidak tersedia.
 3. Jaga agar `GEMINI_API_KEY` hanya dibaca di sisi server (`process.env.GEMINI_API_KEY`), tidak pernah dikirim ke bundle frontend.
+
+### 7.5 Panduan Optimasi Performa & Dataset Besar
+1. **Pre-Indexing Periode (`buildSankeyPeriodIndex`)**: Hindari memfilter dan mengklasifikasikan ulang seluruh array `transactions` di dalam setiap perubahan tab filter; bangun `Map` indeks periode satu kali per perubahan `transactions`, lalu lakukan lookup `O(1)`.
+2. **Transisi & Input Non-Blocking**: Bungkus pergantian periode berat dengan `React.startTransition` dan gunakan `useDeferredValue` untuk pencarian teks pada tabel bervolume besar.
+3. **Paginasi DOM**: Batasi baris tabel awal (mis. `PAGE_SIZE = 100` pada `TransactionDrillDownTable`) agar ratusan/ribuan node DOM tidak dirender sekaligus saat pengguna mengeklik simpul besar.
+4. **Hindari `JSON.parse(JSON.stringify(...))` di Loop/Render**: Gunakan *shallow object copy* (`{ ...item }`) saat menyiapkan salinan node/link untuk mutasi layout D3, serta kalkulasi *lazy* untuk pratinjau modal yang sedang tertutup.
+5. **Batching Persistensi & Sinkronisasi**: Gabungkan penulisan `secureStorage` lewat batch dirty-checked (`150ms`) dan debounced sync (`450ms` Postgres / `650ms` Sheets) dengan *payload signature deduplication*.

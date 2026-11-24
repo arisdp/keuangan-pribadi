@@ -174,3 +174,72 @@ Menghitung estimasi pajak tahunan berdasarkan histori pemasukan tahun terpilih u
    - Transaksi dengan kategori yang belum terdaftar pada `MasterCategoryManager` atau belum memiliki pemetaan COA.
    - Duplikasi kode COA dan COA yatim (`scanCoaDuplicatesAndUnused()`).
 3. **`previewSafeAnomalyCleanupImpact()` & `buildTransactionDeletionPlan()`**: Mempratinjau dampak saldo akun, sisa utang, dan nilai investasi sebelum menghapus/membersihkan entri anomali, termasuk pemulihan proporsional unit dan `initialCapital` investasi ketika transaksi `investment_buy`/`investment_sell` dibatalkan.
+
+---
+
+## 12. Alur Kerja `AccountingEngine` (Panduan Teknis Pengembang Bahasa Indonesia)
+
+Bagian ini menjadi peta pemeliharaan kode bagi tim pengembang untuk memahami urutan pemrosesan data dari jurnal transaksi mentah hingga menjadi laporan keuangan, visualisasi Sankey, dan audit integritas.
+
+### 12.1 Diagram Alir End-to-End `AccountingEngine`
+
+```text
+  [1] Raw Transaction[] / Account[] / Debt[] / FixedAsset[] / InvestmentAsset[]
+         │
+         ▼
+  [2] Normalisasi Tanggal & Validasi Nominal
+         ├── normalizeLedgerDateYYYYMMDD(tx.date)  <-- Bounded Map Cache (4096) + fast-path YYYY-MM-DD
+         └── normalizeAbsAmount(tx.amount)
+         │
+         ▼
+  [3] Klasifikasi Akuntansi (`classifyTransaction(tx, accounts)`) -> 11 Nature
+         ├── operating_income / operating_expense
+         ├── internal_transfer / equity_injection / non_cash_adjustment
+         ├── emergency_fund_transfer / investment_buy / investment_sell / fixed_asset_buy
+         └── debt_proceeds / debt_principal_pay
+                                    │
+                                    ▼ (khusus angsuran utang/KPR)
+                             resolveDebtInstallmentAccounting(tx, debt)
+                               ├── principalPayAmount -> mengurangi Liabilitas (22xx/2310)
+                               └── interestExpenseAmount -> masuk Beban Bunga (5810)
+         │
+         ├────────────────────────────────────────────────────────┐
+         ▼                                                        ▼
+  [4A] Pipeline Laporan Resmi                               [4B] Pipeline Sankey O(1) (`cashFlowSankey.ts`)
+         ├── calculateIncomeStatementSummary()                     ├── buildSankeyPeriodIndex(transactions)
+         ├── calculateCashFlowStatement() (3 Pilar Tunai)          │     ├── all[] (pre-classified nature)
+         ├── syncKprDebtsToFixedAssets() (Anti-Double-Count)       │     ├── byMonth Map<YYYY-MM, Entry[]>
+         ├── calculateBalanceSheet()                               │     ├── byQuarter Map<YYYY-QQ, Entry[]>
+         ├── calculateCFPFinancialHealthRatios()                   │     └── byYear Map<YYYY, Entry[]>
+         └── calculateNetWorthTrendWithProjection()                ├── lookupSankeyPeriodEntries() -> O(1)
+                                                                   └── aggregatePeriodCashFlowIndexed()
+                                                                         ├── SankeyCashFlowSummary (KPI)
+                                                                         ├── SankeyFlowChart (d3-sankey)
+                                                                         └── TransactionDrillDownTable
+         │
+         ▼
+  [5] Otomasi Akhir Tahun & Audit GL (`App.tsx` & `AccountingIntegrityModal`)
+         ├── computePendingYearEndFixedAssetDepreciations() (Dr 5960 / Cr 1690)
+         └── auditLedgerIntegrity() + calculateAccountGLBalance()
+```
+
+### 12.2 Tahapan Eksekusi & Tanggung Jawab Modul
+
+1. **Tahap Normalisasi (`normalizeLedgerDateYYYYMMDD`, `toLocalYYYYMMDD`, `parseLocalDate`)**:
+   - Seluruh tanggal wajib dinormalkan ke string lokal `YYYY-MM-DD`.
+   - Jangan pernah menggunakan `new Date().toISOString().split('T')[0]` karena memicu pergeseran tanggal ke kemarin pada pukul `00:00–06:59` WIB.
+   - Cache terikat (`MAX_LEDGER_DATE_CACHE_SIZE = 4096`) memastikan pengurutan maupun pemfilteran ribuan transaksi tidak mengulang regex atau alokasi objek `Date`.
+2. **Tahap Klasifikasi (`classifyTransaction`)**:
+   - Menentukan sifat akuntansi transaksi berdasarkan `tx.type`, `coaCode`, prefix/kata kunci kategori, serta tautan `linkedDebtId`, `linkedInvestmentId`, `linkedFixedAssetId`, dan flag `isAdjustment`.
+   - Aturan emas pemeliharaan: **transaksi mutasi aset/liabilitas (`transfer`, `debt_principal_pay`, `debt_proceeds`, `investment_buy`, `equity_injection`, `non_cash_adjustment`) tidak boleh masuk sebagai `operating_income` atau `operating_expense` di Laporan Laba-Rugi**.
+3. **Tahap Pemisahan Utang & KPR (`resolveDebtInstallmentAccounting` & `syncKprDebtsToFixedAssets`)**:
+   - Untuk angsuran utang ber-bunga/KPR, engine membaca `tx.linkedKprBreakdown` atau menghitung porsi bunga efektif dan pokok cicilan secara otomatis agar Laba-Rugi hanya menanggung beban bunga (`5810`), sementara Neraca dan Arus Kas Pendanaan mencatat pengurangan pokok (`2310`).
+   - Pada sisi Aset Tetap, `syncKprDebtsToFixedAssets` mengunci nilai basis properti KPR pada porsi ekuitas bersih (`NilaiPerolehan - SisaPokokKPR`) selama KPR aktif, sehingga ketika Neraca menghitung `Total Aset - Total Liabilitas`, tidak terjadi pengurangan dua kali.
+4. **Tahap Mutasi Saldo & Rekonstruksi GL (`getTransactionAccountDelta` & `calculateAccountGLBalance`)**:
+   - Setiap transaksi menghasilkan delta terarah untuk akun likuid (`cash`, `bank`, `e-wallet`) maupun akun kredit (`credit_card`, `paylater`, meningkatkan/mengurangi `usedLimit` dan `currentBalance`).
+   - Ketika menambah jenis transaksi baru, pengembang wajib memperbarui `getTransactionAccountDelta()` agar `auditLedgerIntegrity()` tetap konsisten 100% dengan saldo akun.
+5. **Tahap Pre-Indexing Sankey (`src/utils/cashFlowSankey.ts`)**:
+   - `buildSankeyPeriodIndex(transactions)` berjalan satu kali per perubahan referensi `transactions`, mengelompokkan transaksi ke `Map` `byMonth`, `byQuarter`, dan `byYear` sekaligus menyimpan hasil `classifyTransaction` per entri.
+   - Saat pengguna berpindah tab periode (`Semua`, `Bulanan`, `Kuartal`, `Tahunan`) di `SankeyCashFlowSummary` / `SankeyFlowChart`, `lookupSankeyPeriodEntries()` mengambil bucket secara `O(1)`, kemudian `aggregatePeriodCashFlowIndexed()` menyusun ringkasan kas dan struktur simpul/arus D3 dalam satu lintasan tanpa mengulang klasifikasi.
+6. **Tahap Otomasi Penyusutan & Audit (`computePendingYearEndFixedAssetDepreciations` & `App.tsx`)**:
+   - Di `App.tsx`, pengecekan penyusutan akhir tahun membaca `transactionsRef.current` dan hanya dipicu ketika `currentUser`, `loadingPg`, `fixedAssets`, atau `debts` berubah (bukan pada setiap transaksi harian) demi menjaga responsivitas jurnal.

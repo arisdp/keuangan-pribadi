@@ -1,7 +1,8 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useTransition } from 'react';
 import { KprCoaMappingConfig, Transaction } from '../types';
 import { CategoryNode } from '../categoryHierarchy';
 import { calculateIncomeStatementSummary, classifyTransaction, isInternalTransfer } from '../utils/accountingEngine';
+import { SankeyPeriodIndex } from '../utils/cashFlowSankey';
 import { DEFAULT_KPR_COA_MAPPING } from '../utils/kprPresets';
 import { formatterIDR } from '../utils/formatters';
 import {
@@ -13,12 +14,14 @@ import {
   Minimize2,
   Table,
   Filter,
+  RefreshCw,
 } from 'lucide-react';
 
 interface HierarchicalPivotReportProps {
   transactions: Transaction[];
   masterCategories: CategoryNode[];
   kprCoaMapping?: KprCoaMappingConfig;
+  periodIndex?: SankeyPeriodIndex;
 }
 
 interface MonthColumn {
@@ -31,9 +34,11 @@ export const HierarchicalPivotReport: React.FC<HierarchicalPivotReportProps> = (
   transactions,
   masterCategories,
   kprCoaMapping = DEFAULT_KPR_COA_MAPPING,
+  periodIndex,
 }) => {
-  // Filter Year State
+  // Filter Year State with non-blocking React transition
   const [selectedYear, setSelectedYear] = useState<string>('all');
+  const [isPending, startTransition] = useTransition();
   const [searchQuery, setSearchQuery] = useState<string>('');
 
   // Expand / Collapse state for tree rows
@@ -74,8 +79,9 @@ export const HierarchicalPivotReport: React.FC<HierarchicalPivotReportProps> = (
     setExpandedRows({});
   };
 
-  // Extract available years from transactions
+  // Extract available years from Map period index when available (fallback to linear scan)
   const availableYears = useMemo(() => {
+    if (periodIndex) return periodIndex.availableYears;
     const years = new Set<string>();
     const currentYear = new Date().getFullYear().toString();
     years.add(currentYear);
@@ -87,19 +93,31 @@ export const HierarchicalPivotReport: React.FC<HierarchicalPivotReportProps> = (
     });
 
     return Array.from(years).sort().reverse();
-  }, [transactions]);
+  }, [periodIndex, transactions]);
 
-  // Generate dynamic Month Columns from non-transfer transactions
+  // Generate dynamic Month Columns from non-transfer transactions using Map index when available
   const monthColumns = useMemo<MonthColumn[]>(() => {
     const monthKeys = new Set<string>();
 
-    transactions.forEach((tx) => {
-      if (!tx.date || isInternalTransfer(tx)) return;
-      const ym = tx.date.substring(0, 7); // "YYYY-MM"
-      if (selectedYear === 'all' || ym.startsWith(selectedYear)) {
-        monthKeys.add(ym);
+    if (periodIndex) {
+      const sourceEntries =
+        selectedYear === 'all'
+          ? periodIndex.all
+          : periodIndex.byYear.get(selectedYear) ?? [];
+      for (let i = 0; i < sourceEntries.length; i += 1) {
+        const entry = sourceEntries[i];
+        if (entry.nature === 'internal_transfer' || entry.normalizedDate.length < 7) continue;
+        monthKeys.add(entry.normalizedDate.slice(0, 7));
       }
-    });
+    } else {
+      transactions.forEach((tx) => {
+        if (!tx.date || isInternalTransfer(tx)) return;
+        const ym = tx.date.substring(0, 7); // "YYYY-MM"
+        if (selectedYear === 'all' || ym.startsWith(selectedYear)) {
+          monthKeys.add(ym);
+        }
+      });
+    }
 
     // If no transactions exist for filter, default to current 3 months
     if (monthKeys.size === 0) {
@@ -127,7 +145,7 @@ export const HierarchicalPivotReport: React.FC<HierarchicalPivotReportProps> = (
         fullLabel: `Bulan ${mNum} (${monthName} ${yStr})`,
       };
     });
-  }, [transactions, selectedYear]);
+  }, [periodIndex, transactions, selectedYear]);
 
   // Build Transaction Amount Map per category name/id and per month (excluding internal transfers)
   const categoryMonthAmountMap = useMemo(() => {
@@ -144,12 +162,12 @@ export const HierarchicalPivotReport: React.FC<HierarchicalPivotReportProps> = (
     };
     collectLeafNames(masterCategories);
 
-    transactions.forEach((tx) => {
-      if (!tx.date || !tx.amount || isInternalTransfer(tx)) return;
-      const ym = tx.date.substring(0, 7);
-      if (selectedYear !== 'all' && !ym.startsWith(selectedYear)) return;
-
-      const nature = classifyTransaction(tx);
+    const accumulateEntry = (
+      tx: Transaction,
+      ym: string,
+      nature: ReturnType<typeof classifyTransaction>
+    ) => {
+      if (!tx.amount || nature === 'internal_transfer') return;
       if (nature === 'debt_principal_pay' && tx.linkedKprBreakdown) {
         const interestPart = Math.max(0, Number(tx.linkedKprBreakdown.interestPart) || 0);
         if (interestPart > 0) {
@@ -177,10 +195,29 @@ export const HierarchicalPivotReport: React.FC<HierarchicalPivotReportProps> = (
       const catKey = tx.category.toLowerCase().trim();
       const compositeKey = `${catKey}_${ym}`;
       map[compositeKey] = (map[compositeKey] || 0) + tx.amount;
-    });
+    };
+
+    if (periodIndex) {
+      const sourceEntries =
+        selectedYear === 'all'
+          ? periodIndex.all
+          : periodIndex.byYear.get(selectedYear) ?? [];
+      for (let i = 0; i < sourceEntries.length; i += 1) {
+        const entry = sourceEntries[i];
+        if (entry.normalizedDate.length < 7) continue;
+        accumulateEntry(entry.tx, entry.normalizedDate.slice(0, 7), entry.nature);
+      }
+    } else {
+      transactions.forEach((tx) => {
+        if (!tx.date) return;
+        const ym = tx.date.substring(0, 7);
+        if (selectedYear !== 'all' && !ym.startsWith(selectedYear)) return;
+        accumulateEntry(tx, ym, classifyTransaction(tx));
+      });
+    }
 
     return map;
-  }, [transactions, selectedYear, masterCategories, kprCoaMapping]);
+  }, [periodIndex, transactions, selectedYear, masterCategories, kprCoaMapping]);
 
   // Calculate values for a category node (recursive aggregation)
   const getNodeValues = (node: CategoryNode): { monthValues: Record<string, number>; totalOverall: number } => {
@@ -291,16 +328,18 @@ export const HierarchicalPivotReport: React.FC<HierarchicalPivotReportProps> = (
     );
   };
 
-  // Operating Net Profit per Month (Laba Rugi Operasional murni) & Total Hierarchy Accumulation
+  // Operating Net Profit per Month (Laba Rugi Operasional murni) via Map O(1) lookup per column
   const operatingNetPerMonth = useMemo(() => {
     const monthTotals: Record<string, number> = {};
     monthColumns.forEach((m) => {
-      const monthTxs = transactions.filter((tx) => tx.date && tx.date.startsWith(m.key));
+      const monthTxs = periodIndex
+        ? (periodIndex.byMonth.get(m.key) ?? []).map((entry) => entry.tx)
+        : transactions.filter((tx) => tx.date && tx.date.startsWith(m.key));
       monthTotals[m.key] = calculateIncomeStatementSummary(monthTxs).netOperatingProfit;
     });
     const totalOverall = Object.values(monthTotals).reduce((sum, v) => sum + v, 0);
     return { monthTotals, totalOverall };
-  }, [transactions, monthColumns]);
+  }, [periodIndex, transactions, monthColumns]);
 
   // Grand Total Summary per Month across all Categories
   const grandTotalPerMonth = useMemo(() => {
@@ -345,13 +384,26 @@ export const HierarchicalPivotReport: React.FC<HierarchicalPivotReportProps> = (
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
+          {isPending && (
+            <span
+              role="status"
+              aria-live="polite"
+              className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-500 whitespace-nowrap shrink-0"
+            >
+              <RefreshCw className="h-3.5 w-3.5 animate-spin text-blue-600" />
+              <span>Memperbarui...</span>
+            </span>
+          )}
           {/* Year Filter */}
           <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 px-3 py-1.5 rounded-xl">
             <Filter className="h-3.5 w-3.5 text-slate-400" />
             <span className="text-xs font-bold text-slate-600">Tahun:</span>
             <select
               value={selectedYear}
-              onChange={(e) => setSelectedYear(e.target.value)}
+              onChange={(e) => {
+                const nextYear = e.target.value;
+                startTransition(() => setSelectedYear(nextYear));
+              }}
               className="bg-transparent text-xs font-black text-slate-800 focus:outline-none cursor-pointer"
             >
               <option value="all">Semua Tahun</option>
@@ -405,7 +457,7 @@ export const HierarchicalPivotReport: React.FC<HierarchicalPivotReportProps> = (
       </div>
 
       {/* Main Pivot Table */}
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-x-auto">
+      <div className={`bg-white rounded-2xl border border-slate-200 shadow-sm overflow-x-auto transition-opacity duration-150 ${isPending ? 'opacity-75' : 'opacity-100'}`}>
         <table className="w-full text-left border-collapse">
           {/* Table Header */}
           <thead>

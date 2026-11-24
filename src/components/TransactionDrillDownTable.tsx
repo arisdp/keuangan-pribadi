@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useDeferredValue, useEffect, useMemo, useState } from 'react';
 import { Account } from '../types';
 import { normalizeLedgerDateYYYYMMDD } from '../utils/accountingEngine';
 import { SankeyDrilldownSelection } from '../utils/cashFlowSankey';
@@ -7,6 +7,7 @@ import {
   ArrowDown,
   ArrowUp,
   ArrowUpDown,
+  ChevronDown,
   Info,
   RotateCcw,
   Search,
@@ -14,7 +15,7 @@ import {
   X,
 } from 'lucide-react';
 
-export interface SankeyDrilldownTableProps {
+export interface TransactionDrillDownTableProps {
   selection: SankeyDrilldownSelection;
   accounts: Account[];
   onClearSelection: () => void;
@@ -23,21 +24,31 @@ export interface SankeyDrilldownTableProps {
 type SortField = 'date' | 'amount';
 type SortDirection = 'asc' | 'desc';
 
-export const SankeyDrilldownTable: React.FC<SankeyDrilldownTableProps> = ({
+const PAGE_SIZE = 100;
+
+export const TransactionDrillDownTable: React.FC<TransactionDrillDownTableProps> = ({
   selection,
   accounts,
   onClearSelection,
 }) => {
   const [searchQuery, setSearchQuery] = useState<string>('');
+  const deferredSearchQuery = useDeferredValue(searchQuery);
   const [selectedSubCategory, setSelectedSubCategory] = useState<string | null>(null);
   const [sortField, setSortField] = useState<SortField>('date');
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
+  const [visibleCount, setVisibleCount] = useState<number>(PAGE_SIZE);
 
-  // Reset search & sub-category filter whenever user clicks a different Sankey node/flow
+  // Reset search, sub-category filter, and pagination whenever user clicks a different Sankey node/flow
   useEffect(() => {
     setSearchQuery('');
     setSelectedSubCategory(null);
+    setVisibleCount(PAGE_SIZE);
   }, [selection.key]);
+
+  // Reset pagination back to first page when filters or sorting criteria change
+  useEffect(() => {
+    setVisibleCount(PAGE_SIZE);
+  }, [deferredSearchQuery, selectedSubCategory, sortField, sortDirection]);
 
   const accountLookup = useMemo(() => {
     const map = new Map<string, Account>();
@@ -54,28 +65,35 @@ export const SankeyDrilldownTable: React.FC<SankeyDrilldownTableProps> = ({
     }
   };
 
-  const filteredAndSortedEntries = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
-
-    const filtered = selection.entries.filter(({ tx, attributionLabel }) => {
+  // Pre-normalize entry fields once per selection or account lookup change
+  const normalizedEntries = useMemo(() => {
+    return selection.entries.map((entry) => {
+      const { tx, attributionLabel } = entry;
       const accName = accountLookup.get(tx.accountId)?.name || tx.accountId || '';
+      const normDate = normalizeLedgerDateYYYYMMDD(tx.date) || tx.date || '';
       const groupLabel = selection.groupByAccount
         ? accName
         : attributionLabel === 'Porsi Bunga KPR/Utang'
         ? 'Beban Bunga KPR / Pinjaman'
         : tx.category || accName;
 
-      if (selectedSubCategory && groupLabel !== selectedSubCategory) return false;
-      if (!q) return true;
+      return {
+        ...entry,
+        accName,
+        normDate,
+        groupLabel,
+        searchBlob: `${tx.description || ''}\n${tx.category || ''}\n${accName}\n${normDate}\n${attributionLabel || ''}`.toLowerCase(),
+      };
+    });
+  }, [selection.entries, selection.groupByAccount, accountLookup]);
 
-      const normDate = normalizeLedgerDateYYYYMMDD(tx.date);
-      return (
-        (tx.description || '').toLowerCase().includes(q) ||
-        (tx.category || '').toLowerCase().includes(q) ||
-        accName.toLowerCase().includes(q) ||
-        normDate.toLowerCase().includes(q) ||
-        (attributionLabel || '').toLowerCase().includes(q)
-      );
+  const filteredAndSortedEntries = useMemo(() => {
+    const q = deferredSearchQuery.trim().toLowerCase();
+
+    const filtered = normalizedEntries.filter((item) => {
+      if (selectedSubCategory && item.groupLabel !== selectedSubCategory) return false;
+      if (!q) return true;
+      return item.searchBlob.includes(q);
     });
 
     return filtered.slice().sort((a, b) => {
@@ -83,20 +101,21 @@ export const SankeyDrilldownTable: React.FC<SankeyDrilldownTableProps> = ({
         const diff = a.effectiveAmount - b.effectiveAmount;
         return sortDirection === 'asc' ? diff : -diff;
       }
-      const dateA = normalizeLedgerDateYYYYMMDD(a.tx.date) || a.tx.date || '';
-      const dateB = normalizeLedgerDateYYYYMMDD(b.tx.date) || b.tx.date || '';
-      const cmp = dateA.localeCompare(dateB);
+      const cmp = a.normDate.localeCompare(b.normDate);
       return sortDirection === 'asc' ? cmp : -cmp;
     });
   }, [
-    selection.entries,
-    selection.groupByAccount,
-    searchQuery,
+    normalizedEntries,
+    deferredSearchQuery,
     selectedSubCategory,
     sortField,
     sortDirection,
-    accountLookup,
   ]);
+
+  const visibleEntries = useMemo(
+    () => filteredAndSortedEntries.slice(0, visibleCount),
+    [filteredAndSortedEntries, visibleCount]
+  );
 
   const filteredSubtotal = useMemo(
     () => filteredAndSortedEntries.reduce((sum, item) => sum + item.effectiveAmount, 0),
@@ -104,6 +123,7 @@ export const SankeyDrilldownTable: React.FC<SankeyDrilldownTableProps> = ({
   );
 
   const hasActiveFilter = Boolean(searchQuery.trim() || selectedSubCategory);
+  const remainingCount = Math.max(0, filteredAndSortedEntries.length - visibleEntries.length);
   const incomeSharePct =
     selection.totalIncome > 0
       ? ((selection.volume / selection.totalIncome) * 100).toFixed(1)
@@ -361,7 +381,7 @@ export const SankeyDrilldownTable: React.FC<SankeyDrilldownTableProps> = ({
             </div>
           ) : (
             <div className="border border-slate-200 rounded-xl overflow-hidden">
-              <div className="overflow-x-auto max-h-80">
+              <div className="overflow-x-auto max-h-96">
                 <table className="w-full text-left text-xs border-collapse">
                   <thead className="bg-slate-50 text-slate-600 border-b border-slate-200 sticky top-0 z-10">
                     <tr>
@@ -391,44 +411,70 @@ export const SankeyDrilldownTable: React.FC<SankeyDrilldownTableProps> = ({
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 bg-white">
-                    {filteredAndSortedEntries.map(
-                      ({ tx, effectiveAmount, attributionLabel }, idx) => {
-                        const acc = accountLookup.get(tx.accountId);
-                        return (
-                          <tr key={`${tx.id}-${idx}`} className="hover:bg-slate-50/80 transition-colors">
-                            <td className="py-2.5 px-3.5 font-mono tabular-nums text-slate-600 whitespace-nowrap">
-                              {normalizeLedgerDateYYYYMMDD(tx.date)}
-                            </td>
-                            <td className="py-2.5 px-3.5 text-slate-900 font-medium">
-                              <div>{tx.description || '-'}</div>
-                              {attributionLabel && (
-                                <span className="text-[11px] text-slate-500">
-                                  Atribusi: {attributionLabel}
-                                </span>
-                              )}
-                            </td>
-                            <td className="py-2.5 px-3.5 text-slate-600 whitespace-nowrap">
-                              {tx.category}
-                            </td>
-                            <td className="py-2.5 px-3.5 text-slate-600 whitespace-nowrap">
-                              {acc?.name || tx.accountId}
-                            </td>
-                            <td className="py-2.5 px-3.5 text-right font-mono tabular-nums font-bold text-slate-900 whitespace-nowrap">
-                              {formatterIDR.format(effectiveAmount)}
-                            </td>
-                          </tr>
-                        );
-                      }
+                    {visibleEntries.map(
+                      ({ tx, effectiveAmount, attributionLabel, accName, normDate }, idx) => (
+                        <tr key={`${tx.id}-${idx}`} className="hover:bg-slate-50/80 transition-colors">
+                          <td className="py-2.5 px-3.5 font-mono tabular-nums text-slate-600 whitespace-nowrap">
+                            {normDate}
+                          </td>
+                          <td className="py-2.5 px-3.5 text-slate-900 font-medium">
+                            <div>{tx.description || '-'}</div>
+                            {attributionLabel && (
+                              <span className="text-[11px] text-slate-500">
+                                Atribusi: {attributionLabel}
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-2.5 px-3.5 text-slate-600 whitespace-nowrap">
+                            {tx.category}
+                          </td>
+                          <td className="py-2.5 px-3.5 text-slate-600 whitespace-nowrap">
+                            {accName}
+                          </td>
+                          <td className="py-2.5 px-3.5 text-right font-mono tabular-nums font-bold text-slate-900 whitespace-nowrap">
+                            {formatterIDR.format(effectiveAmount)}
+                          </td>
+                        </tr>
+                      )
                     )}
                   </tbody>
                 </table>
               </div>
 
+              {/* Pagination Load More Bar for Large Datasets */}
+              {remainingCount > 0 && (
+                <div className="px-4 py-2.5 bg-white border-t border-slate-200 flex flex-wrap items-center justify-between gap-2 text-xs">
+                  <span className="text-slate-500 font-mono tabular-nums">
+                    Masih ada <strong>{remainingCount}</strong> transaksi lainnya yang belum dirender
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setVisibleCount((prev) => prev + PAGE_SIZE)}
+                      className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white font-semibold rounded-lg transition inline-flex items-center gap-1 cursor-pointer whitespace-nowrap"
+                    >
+                      <ChevronDown className="h-3.5 w-3.5" />
+                      Tampilkan {Math.min(PAGE_SIZE, remainingCount)} Berikutnya
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setVisibleCount(filteredAndSortedEntries.length)}
+                      className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-lg transition cursor-pointer whitespace-nowrap"
+                    >
+                      Tampilkan Semua ({filteredAndSortedEntries.length})
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {/* Footer Filtered Subtotal Summary */}
               <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
                 <div className="text-slate-600 font-mono tabular-nums">
-                  Menampilkan <strong>{filteredAndSortedEntries.length}</strong> dari{' '}
-                  <strong>{selection.entries.length}</strong> transaksi
+                  Menampilkan <strong>{visibleEntries.length}</strong> dari{' '}
+                  <strong>{filteredAndSortedEntries.length}</strong> transaksi cocok
+                  {filteredAndSortedEntries.length !== selection.entries.length
+                    ? ` (${selection.entries.length} total penyusun)`
+                    : ''}
                   {selectedSubCategory ? ` · Filter: ${selectedSubCategory}` : ''}
                 </div>
                 <div className="font-mono tabular-nums text-slate-700">

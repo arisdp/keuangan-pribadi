@@ -1490,14 +1490,56 @@ function formatValidDateParts(year: number, month: number, day: number): string 
   return `${year}-${pad2(month)}-${pad2(day)}`;
 }
 
+const MAX_LEDGER_DATE_CACHE_SIZE = 4096;
+const normalizedLedgerDateCache = new Map<string, string>();
+const STRICT_YYYY_MM_DD_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+function storeLedgerDateCache(key: string, value: string): string {
+  if (normalizedLedgerDateCache.size >= MAX_LEDGER_DATE_CACHE_SIZE) {
+    const oldestKey = normalizedLedgerDateCache.keys().next().value;
+    if (oldestKey !== undefined) {
+      normalizedLedgerDateCache.delete(oldestKey);
+    }
+  }
+  normalizedLedgerDateCache.set(key, value);
+  return value;
+}
+
 /**
  * Menormalkan berbagai format tanggal transaksi (ISO timestamp, YYYY-MM-DD,
  * YYYY/MM/DD, DD/MM/YYYY, dan DD-MM-YYYY) menjadi format kanonis YYYY-MM-DD.
+ * Menggunakan bounded Map cache & fast-path YYYY-MM-DD untuk menjaga performa dataset besar.
  */
 export function normalizeLedgerDateYYYYMMDD(rawDate: unknown): string {
   if (typeof rawDate !== 'string') return '';
   const trimmed = rawDate.trim();
   if (!trimmed) return '';
+
+  const cached = normalizedLedgerDateCache.get(trimmed);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  // 0. Fast-path tanpa alokasi regex kompleks & Date untuk tanggal kanonis YYYY-MM-DD
+  if (
+    trimmed.length === 10 &&
+    trimmed.charCodeAt(4) === 45 &&
+    trimmed.charCodeAt(7) === 45 &&
+    STRICT_YYYY_MM_DD_RE.test(trimmed)
+  ) {
+    const year = Number(trimmed.slice(0, 4));
+    const month = Number(trimmed.slice(5, 7));
+    const day = Number(trimmed.slice(8, 10));
+    if (year >= 1900 && year <= 2100 && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      if (day <= 28) {
+        return storeLedgerDateCache(trimmed, trimmed);
+      }
+      const verified = formatValidDateParts(year, month, day);
+      if (verified) {
+        return storeLedgerDateCache(trimmed, verified);
+      }
+    }
+  }
 
   // 1. YYYY-MM-DD atau ISO 8601 (2026-11-18T10:30:00Z)
   const isoMatch = trimmed.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:$|T|\s)/);
@@ -1507,7 +1549,7 @@ export function normalizeLedgerDateYYYYMMDD(rawDate: unknown): string {
       Number(isoMatch[2]),
       Number(isoMatch[3])
     );
-    if (formatted) return formatted;
+    if (formatted) return storeLedgerDateCache(trimmed, formatted);
   }
 
   // 2. YYYY/MM/DD atau YYYY/M/D (termasuk opsional waktu)
@@ -1518,7 +1560,7 @@ export function normalizeLedgerDateYYYYMMDD(rawDate: unknown): string {
       Number(slashYearFirstMatch[2]),
       Number(slashYearFirstMatch[3])
     );
-    if (formatted) return formatted;
+    if (formatted) return storeLedgerDateCache(trimmed, formatted);
   }
 
   // 3. DD/MM/YYYY atau DD-MM-YYYY (termasuk D/M/YYYY, D-M-YYYY, dan opsional waktu)
@@ -1529,7 +1571,7 @@ export function normalizeLedgerDateYYYYMMDD(rawDate: unknown): string {
       Number(dayFirstMatch[2]),
       Number(dayFirstMatch[1])
     );
-    if (formatted) return formatted;
+    if (formatted) return storeLedgerDateCache(trimmed, formatted);
   }
 
   // 4. Fallback parser standar Date jika format teks lain valid
@@ -1537,10 +1579,10 @@ export function normalizeLedgerDateYYYYMMDD(rawDate: unknown): string {
   if (!Number.isNaN(parsedMs)) {
     const dt = new Date(parsedMs);
     const formatted = formatValidDateParts(dt.getFullYear(), dt.getMonth() + 1, dt.getDate());
-    if (formatted) return formatted;
+    if (formatted) return storeLedgerDateCache(trimmed, formatted);
   }
 
-  return trimmed;
+  return storeLedgerDateCache(trimmed, trimmed);
 }
 
 export interface OrphanTransactionIssue {
@@ -3561,7 +3603,8 @@ const FULL_MONTHS_ID = [
 export function calculateMonthlyIncomeStatementSeries(
   transactions: Transaction[],
   kprCoaMapping?: KprCoaMappingConfig,
-  monthsBack: number = 6
+  monthsBack: number = 6,
+  preIndexedByMonth?: Map<string, ReadonlyArray<{ tx: Transaction }>>
 ): MonthlyIncomeStatementSeriesResult {
   const safeTxs = Array.isArray(transactions) ? transactions : [];
   const count = Math.max(1, Math.min(24, Math.round(monthsBack)));
@@ -3590,17 +3633,27 @@ export function calculateMonthlyIncomeStatementSeries(
       monthLabel: `${SHORT_MONTHS_ID[mIdx]} '${String(y).slice(-2)}`,
       fullMonthLabel: `${FULL_MONTHS_ID[mIdx]} ${y}`,
     });
-    bucketMap.set(monthKey, []);
+    if (preIndexedByMonth) {
+      const preEntries = preIndexedByMonth.get(monthKey);
+      bucketMap.set(
+        monthKey,
+        preEntries ? preEntries.map((entry) => entry.tx) : []
+      );
+    } else {
+      bucketMap.set(monthKey, []);
+    }
   }
 
-  for (const tx of safeTxs) {
-    if (!tx || !tx.date) continue;
-    const norm = normalizeLedgerDateYYYYMMDD(tx.date);
-    if (!norm) continue;
-    const mKey = norm.slice(0, 7);
-    const bucket = bucketMap.get(mKey);
-    if (bucket) {
-      bucket.push(tx);
+  if (!preIndexedByMonth) {
+    for (const tx of safeTxs) {
+      if (!tx || !tx.date) continue;
+      const norm = normalizeLedgerDateYYYYMMDD(tx.date);
+      if (!norm) continue;
+      const mKey = norm.slice(0, 7);
+      const bucket = bucketMap.get(mKey);
+      if (bucket) {
+        bucket.push(tx);
+      }
     }
   }
 

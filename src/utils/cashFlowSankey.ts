@@ -4,15 +4,37 @@ import {
   normalizeLedgerDateYYYYMMDD,
   resolveDebtInstallmentAccounting,
   toLocalYYYYMMDD,
+  TransactionAccountingNature,
 } from './accountingEngine';
 
 export type SankeyPeriodMode = 'all' | 'monthly' | 'quarterly' | 'yearly';
+export type ReportsPeriodFilter = 'this-month' | 'last-3-months' | 'this-year' | 'all';
 export type QuarterNum = 1 | 2 | 3 | 4;
 
 export interface SankeyLedgerEntry {
   tx: Transaction;
   effectiveAmount: number;
   attributionLabel?: string;
+}
+
+export interface IndexedSankeyTransaction {
+  tx: Transaction;
+  normalizedDate: string;
+  nature: TransactionAccountingNature;
+}
+
+export interface SankeyPeriodIndex {
+  all: IndexedSankeyTransaction[];
+  allTransactions: Transaction[];
+  byMonth: Map<string, IndexedSankeyTransaction[]>;
+  byQuarter: Map<string, IndexedSankeyTransaction[]>;
+  byYear: Map<string, IndexedSankeyTransaction[]>;
+  availableMonthKeys: string[];
+  availableYears: string[];
+  currentLocalDate: string;
+  currentLocalMonth: string;
+  currentLocalYear: string;
+  currentLocalQuarter: QuarterNum;
 }
 
 export interface SankeySubCategoryShare {
@@ -69,6 +91,8 @@ export const QUARTER_LABELS: Record<QuarterNum, string> = {
   4: 'Q4 (Okt–Des)',
 };
 
+const EMPTY_INDEXED_ENTRIES: IndexedSankeyTransaction[] = [];
+
 export function formatMonthLabelID(monthKey: string): string {
   const [yStr, mStr] = monthKey.split('-');
   const y = Number(yStr);
@@ -97,6 +121,143 @@ export function getPeriodRangeLabel(
     return `${QUARTER_LABELS[selectedQuarter]} ${selectedYear}`;
   }
   return `Tahun ${selectedYear}`;
+}
+
+export function buildSankeyPeriodIndex(transactions: Transaction[]): SankeyPeriodIndex {
+  const todayLocal = toLocalYYYYMMDD();
+  const currentLocalMonth = todayLocal.slice(0, 7);
+  const currentLocalYear = todayLocal.slice(0, 4);
+  const currentLocalQuarter = getQuarterFromMonth(Number(todayLocal.slice(5, 7)) || 1);
+
+  const all: IndexedSankeyTransaction[] = new Array(transactions.length);
+  const byMonth = new Map<string, IndexedSankeyTransaction[]>();
+  const byQuarter = new Map<string, IndexedSankeyTransaction[]>();
+  const byYear = new Map<string, IndexedSankeyTransaction[]>();
+  const yearSet = new Set<string>([currentLocalYear]);
+
+  for (let i = 0; i < transactions.length; i += 1) {
+    const tx = transactions[i];
+    const normalizedDate = normalizeLedgerDateYYYYMMDD(tx.date);
+    const nature = classifyTransaction(tx);
+    const indexed: IndexedSankeyTransaction = { tx, normalizedDate, nature };
+    all[i] = indexed;
+
+    if (normalizedDate.length >= 7) {
+      const year = normalizedDate.slice(0, 4);
+      const monthKey = normalizedDate.slice(0, 7);
+      const monthNum = Number(normalizedDate.slice(5, 7)) || 1;
+      const quarterKey = `${year}-Q${getQuarterFromMonth(monthNum)}`;
+
+      yearSet.add(year);
+
+      let monthBucket = byMonth.get(monthKey);
+      if (!monthBucket) {
+        monthBucket = [];
+        byMonth.set(monthKey, monthBucket);
+      }
+      monthBucket.push(indexed);
+
+      let quarterBucket = byQuarter.get(quarterKey);
+      if (!quarterBucket) {
+        quarterBucket = [];
+        byQuarter.set(quarterKey, quarterBucket);
+      }
+      quarterBucket.push(indexed);
+
+      let yearBucket = byYear.get(year);
+      if (!yearBucket) {
+        yearBucket = [];
+        byYear.set(year, yearBucket);
+      }
+      yearBucket.push(indexed);
+    }
+  }
+
+  const availableMonthKeys = Array.from(byMonth.keys()).sort((a, b) => b.localeCompare(a));
+  const availableYears = Array.from(yearSet).sort((a, b) => b.localeCompare(a));
+
+  return {
+    all,
+    allTransactions: transactions,
+    byMonth,
+    byQuarter,
+    byYear,
+    availableMonthKeys,
+    availableYears,
+    currentLocalDate: todayLocal,
+    currentLocalMonth,
+    currentLocalYear,
+    currentLocalQuarter,
+  };
+}
+
+export function lookupSankeyPeriodEntries(
+  index: SankeyPeriodIndex,
+  periodMode: SankeyPeriodMode,
+  selectedMonth: string,
+  selectedQuarter: QuarterNum,
+  selectedYear: string
+): IndexedSankeyTransaction[] {
+  if (periodMode === 'all') return index.all;
+  if (periodMode === 'monthly') return index.byMonth.get(selectedMonth) ?? EMPTY_INDEXED_ENTRIES;
+  if (periodMode === 'quarterly') {
+    return index.byQuarter.get(`${selectedYear}-Q${selectedQuarter}`) ?? EMPTY_INDEXED_ENTRIES;
+  }
+  if (periodMode === 'yearly') return index.byYear.get(selectedYear) ?? EMPTY_INDEXED_ENTRIES;
+  return index.all;
+}
+
+/**
+ * Lookup O(1) berbasis Map periode untuk filter umum ReportsTab:
+ * - 'all'           -> seluruh dataset terindeks
+ * - 'this-month'    -> bucket bulan berjalan (byMonth)
+ * - 'this-year'     -> bucket tahun berjalan (byYear)
+ * - 'last-3-months' -> gabungan 4 bucket bulan kalender terakhir lalu dipangkas batas tanggal lokal
+ */
+export function lookupReportsPeriodEntries(
+  index: SankeyPeriodIndex,
+  periodFilter: ReportsPeriodFilter
+): IndexedSankeyTransaction[] {
+  if (periodFilter === 'all') return index.all;
+  if (periodFilter === 'this-month') {
+    return index.byMonth.get(index.currentLocalMonth) ?? EMPTY_INDEXED_ENTRIES;
+  }
+  if (periodFilter === 'this-year') {
+    return index.byYear.get(index.currentLocalYear) ?? EMPTY_INDEXED_ENTRIES;
+  }
+
+  const now = new Date();
+  const startDateObj = new Date(now.getFullYear(), now.getMonth() - 3, now.getDate());
+  const startStr = toLocalYYYYMMDD(startDateObj);
+  const endStr = index.currentLocalDate;
+
+  const result: IndexedSankeyTransaction[] = [];
+  for (let offset = 3; offset >= 0; offset -= 1) {
+    const dt = new Date(now.getFullYear(), now.getMonth() - offset, 1);
+    const mk = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}`;
+    const bucket = index.byMonth.get(mk);
+    if (!bucket) continue;
+    for (let i = 0; i < bucket.length; i += 1) {
+      const entry = bucket[i];
+      if (entry.normalizedDate >= startStr && entry.normalizedDate <= endStr) {
+        result.push(entry);
+      }
+    }
+  }
+  return result;
+}
+
+export function lookupReportsPeriodTransactions(
+  index: SankeyPeriodIndex,
+  periodFilter: ReportsPeriodFilter
+): Transaction[] {
+  if (periodFilter === 'all') return index.allTransactions;
+  const entries = lookupReportsPeriodEntries(index, periodFilter);
+  const txs = new Array<Transaction>(entries.length);
+  for (let i = 0; i < entries.length; i += 1) {
+    txs[i] = entries[i].tx;
+  }
+  return txs;
 }
 
 export function getAvailablePeriodOptions(transactions: Transaction[]) {
@@ -150,12 +311,14 @@ export function filterTransactionsBySankeyPeriod(
   });
 }
 
-export function aggregatePeriodCashFlow(
-  filteredTransactions: Transaction[],
-  debts: Debt[] = []
+function accumulateCashFlowFromClassified(
+  items: ReadonlyArray<{ tx: Transaction; nature: TransactionAccountingNature }>,
+  debts: Debt[]
 ): PeriodCashFlowAggregation {
   const debtLookup = new Map<string, Debt>();
-  debts.forEach((d) => debtLookup.set(d.id, d));
+  for (let i = 0; i < debts.length; i += 1) {
+    debtLookup.set(debts[i].id, debts[i]);
+  }
 
   const incomeCategoryMap: Record<string, { total: number; entries: SankeyLedgerEntry[] }> = {};
   const expenseCategoryMap: Record<string, { total: number; entries: SankeyLedgerEntry[] }> = {};
@@ -165,31 +328,43 @@ export function aggregatePeriodCashFlow(
   const allIncomeEntries: SankeyLedgerEntry[] = [];
   const allExpenseEntries: SankeyLedgerEntry[] = [];
 
+  let totalIncome = 0;
+  let totalExpense = 0;
   let totalSaving = 0;
   let totalInvestment = 0;
   let totalDebtPayment = 0;
 
-  filteredTransactions.forEach((tx) => {
+  for (let i = 0; i < items.length; i += 1) {
+    const { tx, nature } = items[i];
     const amt = Math.abs(tx.amount || 0);
-    if (amt <= 0) return;
+    if (amt <= 0) continue;
 
-    const nature = classifyTransaction(tx);
     switch (nature) {
       case 'operating_income': {
         const cat = tx.category || 'Pendapatan Lain-lain';
-        if (!incomeCategoryMap[cat]) incomeCategoryMap[cat] = { total: 0, entries: [] };
-        incomeCategoryMap[cat].total += amt;
+        let bucket = incomeCategoryMap[cat];
+        if (!bucket) {
+          bucket = { total: 0, entries: [] };
+          incomeCategoryMap[cat] = bucket;
+        }
+        bucket.total += amt;
+        totalIncome += amt;
         const entry: SankeyLedgerEntry = { tx, effectiveAmount: amt };
-        incomeCategoryMap[cat].entries.push(entry);
+        bucket.entries.push(entry);
         allIncomeEntries.push(entry);
         break;
       }
       case 'operating_expense': {
         const cat = tx.category || 'Beban Lainnya';
-        if (!expenseCategoryMap[cat]) expenseCategoryMap[cat] = { total: 0, entries: [] };
-        expenseCategoryMap[cat].total += amt;
+        let bucket = expenseCategoryMap[cat];
+        if (!bucket) {
+          bucket = { total: 0, entries: [] };
+          expenseCategoryMap[cat] = bucket;
+        }
+        bucket.total += amt;
+        totalExpense += amt;
         const entry: SankeyLedgerEntry = { tx, effectiveAmount: amt };
-        expenseCategoryMap[cat].entries.push(entry);
+        bucket.entries.push(entry);
         allExpenseEntries.push(entry);
         break;
       }
@@ -243,16 +418,19 @@ export function aggregatePeriodCashFlow(
             });
           }
           if (interestAmt > 0) {
-            if (!expenseCategoryMap[interestCat]) {
-              expenseCategoryMap[interestCat] = { total: 0, entries: [] };
+            let interestBucket = expenseCategoryMap[interestCat];
+            if (!interestBucket) {
+              interestBucket = { total: 0, entries: [] };
+              expenseCategoryMap[interestCat] = interestBucket;
             }
-            expenseCategoryMap[interestCat].total += interestAmt;
+            interestBucket.total += interestAmt;
+            totalExpense += interestAmt;
             const interestEntry: SankeyLedgerEntry = {
               tx,
               effectiveAmount: interestAmt,
               attributionLabel: 'Porsi Bunga KPR/Utang',
             };
-            expenseCategoryMap[interestCat].entries.push(interestEntry);
+            interestBucket.entries.push(interestEntry);
             allExpenseEntries.push(interestEntry);
           }
         }
@@ -261,10 +439,8 @@ export function aggregatePeriodCashFlow(
       default:
         break;
     }
-  });
+  }
 
-  const totalIncome = Object.values(incomeCategoryMap).reduce((s, item) => s + item.total, 0);
-  const totalExpense = Object.values(expenseCategoryMap).reduce((s, item) => s + item.total, 0);
   const totalAllocatedOutflow =
     totalExpense + totalDebtPayment + totalSaving + totalInvestment;
   const rawNetBalance = totalIncome - totalAllocatedOutflow;
@@ -289,4 +465,27 @@ export function aggregatePeriodCashFlow(
     netSurplus,
     netDeficit,
   };
+}
+
+export function aggregatePeriodCashFlowIndexed(
+  indexedEntries: ReadonlyArray<IndexedSankeyTransaction>,
+  debts: Debt[] = []
+): PeriodCashFlowAggregation {
+  return accumulateCashFlowFromClassified(indexedEntries, debts);
+}
+
+export function aggregatePeriodCashFlow(
+  filteredTransactions: Transaction[],
+  debts: Debt[] = []
+): PeriodCashFlowAggregation {
+  const classified: IndexedSankeyTransaction[] = new Array(filteredTransactions.length);
+  for (let i = 0; i < filteredTransactions.length; i += 1) {
+    const tx = filteredTransactions[i];
+    classified[i] = {
+      tx,
+      normalizedDate: normalizeLedgerDateYYYYMMDD(tx.date),
+      nature: classifyTransaction(tx),
+    };
+  }
+  return accumulateCashFlowFromClassified(classified, debts);
 }

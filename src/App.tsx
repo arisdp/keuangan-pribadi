@@ -274,13 +274,6 @@ export default function App() {
     return [];
   });
 
-  // Sync recurring transactions to localStorage
-  useEffect(() => {
-    if (currentUser) {
-      secureStorage.setItem(`fin_${currentUser.username}_recurring_transactions`, JSON.stringify(recurringTransactions));
-    }
-  }, [recurringTransactions, currentUser]);
-
   // Sync recurring transactions to Service Worker (sw.js) for local push notifications (due <= 3 days)
   useEffect(() => {
     if ('serviceWorker' in navigator && recurringTransactions && recurringTransactions.length > 0) {
@@ -316,13 +309,6 @@ export default function App() {
     }
     return [];
   });
-
-  // Sync savings goals to localStorage
-  useEffect(() => {
-    if (currentUser) {
-      secureStorage.setItem(`fin_${currentUser.username}_savings_goals`, JSON.stringify(savingsGoals));
-    }
-  }, [savingsGoals, currentUser]);
 
   const handleAddSavingsGoal = (newGoal: Omit<SavingsGoal, 'id'>) => {
     const goal: SavingsGoal = {
@@ -649,12 +635,31 @@ export default function App() {
     }
   }, [currentUser]);
 
-  // Debounced upload to Postgres on state change (prevents duplicate startup syncs & UI jank)
+  const lastPgSyncSignatureRef = useRef<string>('');
+  const lastSheetsSyncSignatureRef = useRef<string>('');
+  const transactionsRef = useRef<Transaction[]>(transactions);
+  transactionsRef.current = transactions;
+
+  const lastPersistedSlicesRef = useRef<{
+    username?: string;
+    transactions?: Transaction[];
+    accounts?: Account[];
+    budgets?: CategoryBudget[];
+    debts?: Debt[];
+    investments?: InvestmentAsset[];
+    fixedAssets?: FixedAsset[];
+    recurringTransactions?: RecurringTransaction[];
+    savingsGoals?: SavingsGoal[];
+    emergencyConfig?: EmergencyFundConfig;
+    emergencyTransactions?: EmergencyFundTransaction[];
+  }>({});
+
+  // Debounced upload to Postgres on state change + signature deduplication
   useEffect(() => {
     if (!currentUser || loadingPg) return;
     const activeUserId = currentUser.uid || (currentUser as any).id || `user-${currentUser.username}`;
     const timer = setTimeout(() => {
-      syncToPostgres({
+      const payload = {
         transactions,
         accounts,
         budgets,
@@ -667,7 +672,14 @@ export default function App() {
         emergencyTransactions,
         userFullName: currentUser.fullName,
         username: currentUser.username
-      }, activeUserId).catch(() => {});
+      };
+      const signature = `${activeUserId}:${JSON.stringify(payload)}`;
+      if (signature === lastPgSyncSignatureRef.current) return;
+      lastPgSyncSignatureRef.current = signature;
+
+      syncToPostgres(payload, activeUserId).catch(() => {
+        lastPgSyncSignatureRef.current = '';
+      });
     }, 450);
 
     return () => clearTimeout(timer);
@@ -686,7 +698,7 @@ export default function App() {
     loadingPg
   ]);
 
-// Download from Cloud on login
+  // Download from Cloud on login
   useEffect(() => {
     if (currentUser && cloudSync) {
       const loadCloudData = async () => {
@@ -713,10 +725,11 @@ export default function App() {
     }
   }, [currentUser, cloudSync]);
 
-  // Upload to Cloud on state change
+  // Debounced upload to Google Sheets (650ms) + payload signature deduplication
   useEffect(() => {
-    if (currentUser && cloudSync && !loadingCloudData) {
-      uploadFinancesToSheets({
+    if (!currentUser || !cloudSync || loadingCloudData) return;
+    const timer = setTimeout(() => {
+      const sheetsPayload = {
         transactions,
         accounts,
         budgets,
@@ -725,8 +738,17 @@ export default function App() {
         fixedAssets,
         emergencyFund: emergencyConfig,
         emergencyTransactions
-      }).catch(() => {});
-    }
+      };
+      const signature = `${currentUser.username}:${JSON.stringify(sheetsPayload)}`;
+      if (signature === lastSheetsSyncSignatureRef.current) return;
+      lastSheetsSyncSignatureRef.current = signature;
+
+      uploadFinancesToSheets(sheetsPayload).catch(() => {
+        lastSheetsSyncSignatureRef.current = '';
+      });
+    }, 650);
+
+    return () => clearTimeout(timer);
   }, [
     transactions,
     accounts,
@@ -741,42 +763,84 @@ export default function App() {
     loadingCloudData
   ]);
 
-  // Sync to localStorage as offline cache fallback
+  // Consolidated dirty-checked debounced (150ms) persistence to encrypted localStorage
   useEffect(() => {
-    if (currentUser) {
-      secureStorage.setItem(`fin_${currentUser.username}_transactions`, JSON.stringify(transactions));
-    }
-  }, [transactions, currentUser]);
+    if (!currentUser) return;
+    const uname = currentUser.username;
 
-  useEffect(() => {
-    if (currentUser) {
-      secureStorage.setItem(`fin_${currentUser.username}_accounts`, JSON.stringify(accounts));
-    }
-  }, [accounts, currentUser]);
+    const flushDirtySlices = () => {
+      const prev = lastPersistedSlicesRef.current;
+      const isNewUser = prev.username !== uname;
+      const nextCache = isNewUser ? { username: uname } : { ...prev, username: uname };
 
-  useEffect(() => {
-    if (currentUser) {
-      secureStorage.setItem(`fin_${currentUser.username}_budgets`, JSON.stringify(budgets));
-    }
-  }, [budgets, currentUser]);
+      if (isNewUser || prev.transactions !== transactions) {
+        secureStorage.setItem(`fin_${uname}_transactions`, JSON.stringify(transactions));
+        nextCache.transactions = transactions;
+      }
+      if (isNewUser || prev.accounts !== accounts) {
+        secureStorage.setItem(`fin_${uname}_accounts`, JSON.stringify(accounts));
+        nextCache.accounts = accounts;
+      }
+      if (isNewUser || prev.budgets !== budgets) {
+        secureStorage.setItem(`fin_${uname}_budgets`, JSON.stringify(budgets));
+        nextCache.budgets = budgets;
+      }
+      if (isNewUser || prev.debts !== debts) {
+        secureStorage.setItem(`fin_${uname}_debts`, JSON.stringify(debts));
+        nextCache.debts = debts;
+      }
+      if (isNewUser || prev.investments !== investments) {
+        secureStorage.setItem(`fin_${uname}_investments`, JSON.stringify(investments));
+        nextCache.investments = investments;
+      }
+      if (isNewUser || prev.fixedAssets !== fixedAssets) {
+        secureStorage.setItem(`fin_${uname}_fixed_assets`, JSON.stringify(fixedAssets));
+        nextCache.fixedAssets = fixedAssets;
+      }
+      if (isNewUser || prev.recurringTransactions !== recurringTransactions) {
+        secureStorage.setItem(`fin_${uname}_recurring_transactions`, JSON.stringify(recurringTransactions));
+        nextCache.recurringTransactions = recurringTransactions;
+      }
+      if (isNewUser || prev.savingsGoals !== savingsGoals) {
+        secureStorage.setItem(`fin_${uname}_savings_goals`, JSON.stringify(savingsGoals));
+        nextCache.savingsGoals = savingsGoals;
+      }
+      if (isNewUser || prev.emergencyConfig !== emergencyConfig) {
+        secureStorage.setItem(`fin_${uname}_emergency_config`, JSON.stringify(emergencyConfig));
+        nextCache.emergencyConfig = emergencyConfig;
+      }
+      if (isNewUser || prev.emergencyTransactions !== emergencyTransactions) {
+        secureStorage.setItem(`fin_${uname}_emergency_transactions`, JSON.stringify(emergencyTransactions));
+        nextCache.emergencyTransactions = emergencyTransactions;
+      }
 
-  useEffect(() => {
-    if (currentUser) {
-      secureStorage.setItem(`fin_${currentUser.username}_debts`, JSON.stringify(debts));
-    }
-  }, [debts, currentUser]);
+      lastPersistedSlicesRef.current = nextCache;
+    };
 
-  useEffect(() => {
-    if (currentUser) {
-      secureStorage.setItem(`fin_${currentUser.username}_investments`, JSON.stringify(investments));
-    }
-  }, [investments, currentUser]);
+    const timer = setTimeout(flushDirtySlices, 150);
+    const handleBeforeUnload = () => {
+      clearTimeout(timer);
+      flushDirtySlices();
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
 
-  useEffect(() => {
-    if (currentUser) {
-      secureStorage.setItem(`fin_${currentUser.username}_fixed_assets`, JSON.stringify(fixedAssets));
-    }
-  }, [fixedAssets, currentUser]);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
+  }, [
+    currentUser,
+    transactions,
+    accounts,
+    budgets,
+    debts,
+    investments,
+    fixedAssets,
+    recurringTransactions,
+    savingsGoals,
+    emergencyConfig,
+    emergencyTransactions,
+  ]);
 
   // Sinkronisasi otomatis fasilitas KPR di modul Utang ke daftar Aset Tetap
   useEffect(() => {
@@ -795,7 +859,7 @@ export default function App() {
     const result = computePendingYearEndFixedAssetDepreciations(
       fixedAssets,
       debts,
-      transactions,
+      transactionsRef.current,
       todayStr
     );
 
@@ -813,19 +877,7 @@ export default function App() {
         duration: 5000,
       });
     }
-  }, [currentUser, loadingPg, fixedAssets, debts, transactions]);
-
-  useEffect(() => {
-    if (currentUser) {
-      secureStorage.setItem(`fin_${currentUser.username}_emergency_config`, JSON.stringify(emergencyConfig));
-    }
-  }, [emergencyConfig, currentUser]);
-
-  useEffect(() => {
-    if (currentUser) {
-      secureStorage.setItem(`fin_${currentUser.username}_emergency_transactions`, JSON.stringify(emergencyTransactions));
-    }
-  }, [emergencyTransactions, currentUser]);
+  }, [currentUser, loadingPg, fixedAssets, debts]);
 
   // --- 2. CORE ACTION HANDLERS ---
 

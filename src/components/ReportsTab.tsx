@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef, useEffect } from 'react';
+import React, { useState, useMemo, useRef, useEffect, useTransition, useCallback } from 'react';
 import { Transaction, Account, CategoryBudget, Debt, FixedAsset, InvestmentAsset, EmergencyFundTransaction, KprCoaMappingConfig } from '../types';
 import { CategoryNode, DEFAULT_CATEGORY_HIERARCHY } from '../categoryHierarchy';
 import { CoaScanResult } from '../coaUtils';
@@ -8,13 +8,16 @@ import { CategoryTreeDiagram } from './CategoryTreeDiagram';
 import { TaxCalculatorCard } from './TaxCalculatorCard';
 import { SankeyFlowChart } from './SankeyFlowChart';
 import { SankeyCashFlowSummary } from './SankeyCashFlowSummary';
-import { SankeyDrilldownTable } from './SankeyDrilldownTable';
+import { TransactionDrillDownTable } from './TransactionDrillDownTable';
 import {
-  aggregatePeriodCashFlow,
-  filterTransactionsBySankeyPeriod,
-  getAvailablePeriodOptions,
+  aggregatePeriodCashFlowIndexed,
+  buildSankeyPeriodIndex,
   getPeriodRangeLabel,
+  lookupReportsPeriodEntries,
+  lookupReportsPeriodTransactions,
+  lookupSankeyPeriodEntries,
   QuarterNum,
+  ReportsPeriodFilter,
   SankeyDrilldownSelection,
   SankeyPeriodMode,
 } from '../utils/cashFlowSankey';
@@ -133,7 +136,8 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
   coaScanResult,
   onRescanCoa,
 }) => {
-  // Sub-tab selection
+  // Sub-tab selection with non-blocking React transition
+  const [isReportPending, startReportTransition] = useTransition();
   const [activeReport, setActiveReport] = useState<'pivot-tree' | 'income-statement' | 'category-tree' | 'master-categories' | 'cashflow' | 'balance-sheet' | 'adjusting-entries' | 'budget-realization' | 'tax-calculator' | 'advanced-analytics' | 'sankey-flow' | 'financial-ratios' | 'ai-reconciliation' | 'integrity-report'>('pivot-tree');
   const [selectedCategoryFilter, setSelectedCategoryFilter] = useState<'all' | 'financial' | 'analytics' | 'planning'>('all');
   const [selectedIncomeMonthPoint, setSelectedIncomeMonthPoint] = useState<{
@@ -153,20 +157,21 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
   const [exportMonth, setExportMonth] = useState<number>(() => new Date().getMonth() + 1);
   const [exportYear, setExportYear] = useState<number>(() => new Date().getFullYear());
 
-  // Synced Period State for SankeyCashFlowSummary & SankeyFlowChart
-  const sankeyPeriodOptions = useMemo(
-    () => getAvailablePeriodOptions(transactions),
+  // Synced Period State & O(1) Pre-Index Map shared across all ReportsTab period modules
+  const [isSankeyPending, startSankeyTransition] = useTransition();
+  const sankeyPeriodIndex = useMemo(
+    () => buildSankeyPeriodIndex(transactions),
     [transactions]
   );
   const [sankeyPeriodMode, setSankeyPeriodMode] = useState<SankeyPeriodMode>('all');
   const [sankeySelectedMonth, setSankeySelectedMonth] = useState<string>(
-    () => sankeyPeriodOptions.availableMonthKeys[0] || sankeyPeriodOptions.currentLocalMonth
+    () => sankeyPeriodIndex.availableMonthKeys[0] || sankeyPeriodIndex.currentLocalMonth
   );
   const [sankeySelectedYear, setSankeySelectedYear] = useState<string>(
-    () => sankeyPeriodOptions.availableYears[0] || sankeyPeriodOptions.currentLocalYear
+    () => sankeyPeriodIndex.availableYears[0] || sankeyPeriodIndex.currentLocalYear
   );
   const [sankeySelectedQuarter, setSankeySelectedQuarter] = useState<QuarterNum>(
-    sankeyPeriodOptions.currentLocalQuarter
+    sankeyPeriodIndex.currentLocalQuarter
   );
   const [sankeyDrilldownSelection, setSankeyDrilldownSelection] =
     useState<SankeyDrilldownSelection | null>(null);
@@ -174,33 +179,54 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
 
   useEffect(() => {
     if (
-      sankeyPeriodOptions.availableMonthKeys.length > 0 &&
-      !sankeyPeriodOptions.availableMonthKeys.includes(sankeySelectedMonth)
+      sankeyPeriodIndex.availableMonthKeys.length > 0 &&
+      !sankeyPeriodIndex.availableMonthKeys.includes(sankeySelectedMonth)
     ) {
-      setSankeySelectedMonth(sankeyPeriodOptions.availableMonthKeys[0]);
+      setSankeySelectedMonth(sankeyPeriodIndex.availableMonthKeys[0]);
     }
-  }, [sankeyPeriodOptions.availableMonthKeys, sankeySelectedMonth]);
+  }, [sankeyPeriodIndex.availableMonthKeys, sankeySelectedMonth]);
 
   useEffect(() => {
     if (
-      sankeyPeriodOptions.availableYears.length > 0 &&
-      !sankeyPeriodOptions.availableYears.includes(sankeySelectedYear)
+      sankeyPeriodIndex.availableYears.length > 0 &&
+      !sankeyPeriodIndex.availableYears.includes(sankeySelectedYear)
     ) {
-      setSankeySelectedYear(sankeyPeriodOptions.availableYears[0]);
+      setSankeySelectedYear(sankeyPeriodIndex.availableYears[0]);
     }
-  }, [sankeyPeriodOptions.availableYears, sankeySelectedYear]);
+  }, [sankeyPeriodIndex.availableYears, sankeySelectedYear]);
 
-  const sankeyFilteredTransactions = useMemo(
+  const handleSankeyPeriodModeChange = useCallback((mode: SankeyPeriodMode) => {
+    startSankeyTransition(() => setSankeyPeriodMode(mode));
+  }, []);
+
+  const handleSankeyMonthChange = useCallback((monthKey: string) => {
+    startSankeyTransition(() => setSankeySelectedMonth(monthKey));
+  }, []);
+
+  const handleSankeyQuarterChange = useCallback((quarter: QuarterNum) => {
+    startSankeyTransition(() => setSankeySelectedQuarter(quarter));
+  }, []);
+
+  const handleSankeyYearChange = useCallback((year: string) => {
+    startSankeyTransition(() => setSankeySelectedYear(year));
+  }, []);
+
+  const handleClearSankeyDrilldown = useCallback(() => {
+    setSankeyClearToken((prev) => prev + 1);
+    setSankeyDrilldownSelection(null);
+  }, []);
+
+  const sankeyIndexedEntries = useMemo(
     () =>
-      filterTransactionsBySankeyPeriod(
-        transactions,
+      lookupSankeyPeriodEntries(
+        sankeyPeriodIndex,
         sankeyPeriodMode,
         sankeySelectedMonth,
         sankeySelectedQuarter,
         sankeySelectedYear
       ),
     [
-      transactions,
+      sankeyPeriodIndex,
       sankeyPeriodMode,
       sankeySelectedMonth,
       sankeySelectedQuarter,
@@ -209,8 +235,8 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
   );
 
   const sankeyPeriodSummary = useMemo(
-    () => aggregatePeriodCashFlow(sankeyFilteredTransactions, debts),
-    [sankeyFilteredTransactions, debts]
+    () => aggregatePeriodCashFlowIndexed(sankeyIndexedEntries, debts),
+    [sankeyIndexedEntries, debts]
   );
 
   const sankeyPeriodRangeLabel = useMemo(
@@ -225,20 +251,20 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
   );
 
   const availableExportYears = useMemo(() => {
-    const currentYear = new Date().getFullYear();
+    const currentYear = Number(sankeyPeriodIndex.currentLocalYear) || new Date().getFullYear();
     const yearSet = new Set<number>([currentYear, currentYear - 1]);
-    transactions.forEach((tx) => {
-      if (tx?.date && tx.date.length >= 4) {
-        const y = parseInt(tx.date.slice(0, 4), 10);
-        if (!Number.isNaN(y) && y >= 2000 && y <= currentYear + 5) {
-          yearSet.add(y);
-        }
+    sankeyPeriodIndex.availableYears.forEach((yrStr) => {
+      const y = parseInt(yrStr, 10);
+      if (!Number.isNaN(y) && y >= 2000 && y <= currentYear + 5) {
+        yearSet.add(y);
       }
     });
     return Array.from(yearSet).sort((a, b) => b - a);
-  }, [transactions]);
+  }, [sankeyPeriodIndex]);
 
+  // Lazy computation: only build monthly summary when the Export Modal is actually open
   const exportPreviewSummary = useMemo(() => {
+    if (!showExportModal) return null;
     return buildMonthlyBalanceAndIncomeSummary({
       month: exportMonth,
       year: exportYear,
@@ -251,6 +277,7 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
       kprCoaMapping,
     });
   }, [
+    showExportModal,
     exportMonth,
     exportYear,
     transactions,
@@ -265,6 +292,19 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
   const handleExportStructuredPDF = () => {
     setIsExporting(true);
     try {
+      const summaryForToast =
+        exportPreviewSummary ??
+        buildMonthlyBalanceAndIncomeSummary({
+          month: exportMonth,
+          year: exportYear,
+          transactions,
+          accounts,
+          debts,
+          investments,
+          emergencyTransactions,
+          fixedAssets,
+          kprCoaMapping,
+        });
       const filename = exportMonthlyBalanceAndIncomePDF({
         month: exportMonth,
         year: exportYear,
@@ -279,7 +319,7 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
       showToast({
         type: 'success',
         title: 'Laporan PDF Diunduh',
-        message: `Ringkasan Neraca & Laba-Rugi ${exportPreviewSummary.periodLabel} (${filename}) berhasil dibuat.`,
+        message: `Ringkasan Neraca & Laba-Rugi ${summaryForToast.periodLabel} (${filename}) berhasil dibuat.`,
       });
       setShowExportModal(false);
     } catch (error) {
@@ -339,7 +379,7 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
       case 'income-statement': {
         const monthPrefix = selectedIncomeMonthPoint.monthKey;
         const monthTxs = monthPrefix
-          ? transactions.filter((tx) => tx?.date && tx.date.startsWith(monthPrefix))
+          ? (sankeyPeriodIndex.byMonth.get(monthPrefix) ?? []).map((entry) => entry.tx)
           : filteredTxs;
         exportIncomeStatementToCSV(
           monthTxs,
@@ -355,37 +395,17 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
     }
   };
 
-  // Filter Period State
-  const [periodFilter, setPeriodFilter] = useState<'this-month' | 'last-3-months' | 'this-year' | 'all'>('this-month');
+  // Filter Period State with non-blocking React transition & Map pre-index lookup
+  const [periodFilter, setPeriodFilter] = useState<ReportsPeriodFilter>('this-month');
 
   // Search query for Budget vs Realization
   const [searchQuery, setSearchQuery] = useState<string>('');
 
-  // Calculate filtered transactions based on period filter
-  const filteredTxs = useMemo(() => {
-    const now = new Date();
-    const currentYear = now.getFullYear();
-    const currentMonth = now.getMonth() + 1;
-    const currentYM = `${currentYear}-${String(currentMonth).padStart(2, '0')}`;
-
-    return transactions.filter((tx) => {
-      if (!tx.date) return false;
-      if (periodFilter === 'all') return true;
-      if (periodFilter === 'this-month') {
-        return tx.date.startsWith(currentYM);
-      }
-      if (periodFilter === 'this-year') {
-        return tx.date.startsWith(`${currentYear}`);
-      }
-      if (periodFilter === 'last-3-months') {
-        const threeMonthsAgo = new Date(currentYear, currentMonth - 4, now.getDate(), 0, 0, 0, 0);
-        const nowEnd = new Date(currentYear, currentMonth - 1, now.getDate(), 23, 59, 59, 999);
-        const txDate = parseLocalDate(tx.date);
-        return txDate !== null && txDate >= threeMonthsAgo && txDate <= nowEnd;
-      }
-      return true;
-    });
-  }, [transactions, periodFilter]);
+  // O(1) Map lookup for filtered period transactions
+  const filteredTxs = useMemo(
+    () => lookupReportsPeriodTransactions(sankeyPeriodIndex, periodFilter),
+    [sankeyPeriodIndex, periodFilter]
+  );
 
   // --- 1. CASHFLOW STATEMENT CALCULATIONS (Standardized 3-Activity Engine) ---
   const cashflowData = useMemo(() => {
@@ -401,22 +421,35 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
     return calculateBalanceSheet(accounts, emergencyTransactions, investments, debts, syncedFixedAssets);
   }, [accounts, emergencyTransactions, investments, debts, syncedFixedAssets]);
 
-  // --- 3. BUDGET VS REALIZATION CALCULATIONS ---
-  const budgetVsRealization = useMemo(() => {
-    const now = new Date();
-    const currentYM = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-    const monthlyTxs = transactions.filter((tx) => tx.date && tx.date.startsWith(currentYM));
+  // --- 3. BUDGET VS REALIZATION CALCULATIONS (O(M_currentMonth + B) via Map Bucket) ---
+  const baseBudgetVsRealization = useMemo(() => {
+    const currentMonthEntries =
+      sankeyPeriodIndex.byMonth.get(sankeyPeriodIndex.currentLocalMonth) ?? [];
+    const expenseByCatLower = new Map<string, number>();
+    const otherByTypeAndCat = new Map<string, number>();
+    const expenseByRawCategory: Record<string, number> = {};
 
+    for (let i = 0; i < currentMonthEntries.length; i += 1) {
+      const { tx, nature } = currentMonthEntries[i];
+      if (nature === 'internal_transfer' || nature === 'debt_proceeds') continue;
+
+      const catKey = (tx.category || '').toLowerCase();
+      if (nature === 'operating_expense') {
+        expenseByCatLower.set(catKey, (expenseByCatLower.get(catKey) || 0) + tx.amount);
+        expenseByRawCategory[tx.category] = (expenseByRawCategory[tx.category] || 0) + tx.amount;
+      }
+      const typeCatKey = `${tx.type}:${catKey}`;
+      otherByTypeAndCat.set(typeCatKey, (otherByTypeAndCat.get(typeCatKey) || 0) + tx.amount);
+    }
+
+    const budgetedCatKeys = new Set<string>();
     const result = budgets.map((b) => {
-      const actual = monthlyTxs
-        .filter((tx) => {
-          if (isInternalTransfer(tx) || classifyTransaction(tx) === 'debt_proceeds') return false;
-          if (b.type === 'expense') {
-            return isOperatingExpense(tx) && tx.category.toLowerCase() === b.category.toLowerCase();
-          }
-          return tx.type === b.type && tx.category.toLowerCase() === b.category.toLowerCase();
-        })
-        .reduce((sum, tx) => sum + tx.amount, 0);
+      const catKey = (b.category || '').toLowerCase();
+      budgetedCatKeys.add(catKey);
+      const actual =
+        b.type === 'expense'
+          ? expenseByCatLower.get(catKey) || 0
+          : otherByTypeAndCat.get(`${b.type}:${catKey}`) || 0;
 
       const limit = (b as any).monthlyLimit || b.limit || 0;
       const isGoalBudget = b.type === 'saving' || b.type === 'investment';
@@ -462,15 +495,10 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
       };
     });
 
-    // Add unbudgeted operating expense categories if any
-    const expenseSpendingMap: Record<string, number> = {};
-    monthlyTxs.filter(isOperatingExpense).forEach((tx) => {
-      expenseSpendingMap[tx.category] = (expenseSpendingMap[tx.category] || 0) + tx.amount;
-    });
-
-    Object.keys(expenseSpendingMap).forEach((cat) => {
-      if (!budgets.some((b) => b.category.toLowerCase() === cat.toLowerCase())) {
-        const actual = expenseSpendingMap[cat];
+    // Add unbudgeted operating expense categories in O(1) per category
+    Object.keys(expenseByRawCategory).forEach((cat) => {
+      if (!budgetedCatKeys.has(cat.toLowerCase())) {
+        const actual = expenseByRawCategory[cat];
         result.push({
           id: `unbudgeted-${cat}`,
           category: cat,
@@ -484,10 +512,14 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
       }
     });
 
-    return result.filter((item) =>
-      item.category.toLowerCase().includes(searchQuery.toLowerCase())
-    );
-  }, [budgets, transactions, searchQuery]);
+    return result;
+  }, [budgets, sankeyPeriodIndex]);
+
+  const budgetVsRealization = useMemo(() => {
+    const q = searchQuery.toLowerCase();
+    if (!q) return baseBudgetVsRealization;
+    return baseBudgetVsRealization.filter((item) => item.category.toLowerCase().includes(q));
+  }, [baseBudgetVsRealization, searchQuery]);
 
   // Overall Budget Savings & Efficiency Summary (consistent with search filter)
   const overallBudgetSummary = useMemo(() => {
@@ -513,36 +545,28 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
     }));
   }, [budgetVsRealization]);
 
-  // --- 4. ADVANCED ANALYTICS CALCULATIONS ---
+  // --- 4. ADVANCED ANALYTICS CALCULATIONS (O(1) Month Map Bucket Lookups) ---
   // A. 3-Month Cash Balance Projection
   const projectionData = useMemo(() => {
-    // 1. Get average net operating cash flow of the last 3 months
     const now = new Date();
-    const nowEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
-    const threeMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 3, 1, 0, 0, 0, 0);
-    const last3MonthsTxs = transactions.filter(tx => {
-      const d = parseLocalDate(tx.date);
-      return d !== null && d >= threeMonthsAgo && d <= nowEnd;
-    });
+    const last3Entries = lookupReportsPeriodEntries(sankeyPeriodIndex, 'last-3-months');
+    let totalIncome = 0;
+    let totalExpense = 0;
+    for (let i = 0; i < last3Entries.length; i += 1) {
+      const { tx, nature } = last3Entries[i];
+      if (nature === 'operating_income') totalIncome += tx.amount;
+      else if (nature === 'operating_expense') totalExpense += tx.amount;
+    }
 
-    const totalIncome = last3MonthsTxs.filter(isOperatingIncome).reduce((sum, tx) => sum + tx.amount, 0);
-    const totalExpense = last3MonthsTxs.filter(isOperatingExpense).reduce((sum, tx) => sum + tx.amount, 0);
-    
-    // Average net flow per month over the last 3 months
     const avgNetFlow = (totalIncome - totalExpense) / 3;
-
-    // Current Liquid Assets
     const liquidAssets = calculateTotalLiquidCash(accounts);
 
     const data = [];
-    
-    // Current Month
     data.push({
       month: now.toLocaleDateString('id-ID', { month: 'short', year: '2-digit' }),
       Saldo: liquidAssets
     });
 
-    // Next 3 Months Projection
     let projectedBalance = liquidAssets;
     for (let i = 1; i <= 3; i++) {
       projectedBalance += avgNetFlow;
@@ -554,30 +578,33 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
     }
 
     return data;
-  }, [transactions, accounts]);
+  }, [sankeyPeriodIndex, accounts]);
 
-  // B. YoY Comparison (Current Month vs Same Month Last Year)
+  // B. YoY Comparison (Current Month vs Same Month Last Year via Map O(1) lookup)
   const yoyComparisonData = useMemo(() => {
     const now = new Date();
-    const currentYM = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    const currentYM = sankeyPeriodIndex.currentLocalMonth;
     const lastYearYM = `${now.getFullYear() - 1}-${String(now.getMonth() + 1).padStart(2, '0')}`;
 
-    const currentMonthExpenses = transactions.filter(tx => isOperatingExpense(tx) && tx.date.startsWith(currentYM));
-    const lastYearMonthExpenses = transactions.filter(tx => isOperatingExpense(tx) && tx.date.startsWith(lastYearYM));
+    const currentMonthEntries = sankeyPeriodIndex.byMonth.get(currentYM) ?? [];
+    const lastYearEntries = sankeyPeriodIndex.byMonth.get(lastYearYM) ?? [];
 
-    const categoryMap: Record<string, { current: number, lastYear: number }> = {};
+    const categoryMap: Record<string, { current: number; lastYear: number }> = {};
 
-    currentMonthExpenses.forEach(tx => {
+    for (let i = 0; i < currentMonthEntries.length; i += 1) {
+      const { tx, nature } = currentMonthEntries[i];
+      if (nature !== 'operating_expense') continue;
       if (!categoryMap[tx.category]) categoryMap[tx.category] = { current: 0, lastYear: 0 };
       categoryMap[tx.category].current += tx.amount;
-    });
+    }
 
-    lastYearMonthExpenses.forEach(tx => {
+    for (let i = 0; i < lastYearEntries.length; i += 1) {
+      const { tx, nature } = lastYearEntries[i];
+      if (nature !== 'operating_expense') continue;
       if (!categoryMap[tx.category]) categoryMap[tx.category] = { current: 0, lastYear: 0 };
       categoryMap[tx.category].lastYear += tx.amount;
-    });
+    }
 
-    // Get top 5 categories by total spending across both periods to keep chart clean
     return Object.entries(categoryMap)
       .map(([name, vals]) => ({
         name,
@@ -587,29 +614,37 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
       }))
       .sort((a, b) => b.total - a.total)
       .slice(0, 5);
-  }, [transactions]);
+  }, [sankeyPeriodIndex]);
 
-  // C. Daily Expense Heatmap (Last 30 Days)
+  // C. Daily Expense Heatmap (Last 30 Days — inspect only current & previous month buckets)
   const heatmapData = useMemo(() => {
     const data = [];
     const now = new Date();
+    const currYM = sankeyPeriodIndex.currentLocalMonth;
+    const prevDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const prevYM = `${prevDate.getFullYear()}-${String(prevDate.getMonth() + 1).padStart(2, '0')}`;
     const map: Record<string, number> = {};
 
-    // Sum operating expenses by date
-    transactions.forEach(tx => {
-      if (isOperatingExpense(tx)) {
-        map[tx.date] = (map[tx.date] || 0) + tx.amount;
+    const collectBucket = (bucket: ReturnType<typeof sankeyPeriodIndex.byMonth.get>) => {
+      if (!bucket) return;
+      for (let i = 0; i < bucket.length; i += 1) {
+        const entry = bucket[i];
+        if (entry.nature === 'operating_expense' && entry.normalizedDate) {
+          map[entry.normalizedDate] = (map[entry.normalizedDate] || 0) + entry.tx.amount;
+        }
       }
-    });
+    };
 
-    // Generate last 30 days
+    collectBucket(sankeyPeriodIndex.byMonth.get(currYM));
+    if (prevYM !== currYM) collectBucket(sankeyPeriodIndex.byMonth.get(prevYM));
+
     let maxExpense = 0;
     for (let i = 29; i >= 0; i--) {
       const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i);
       const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
       const amount = map[dateStr] || 0;
       if (amount > maxExpense) maxExpense = amount;
-      
+
       data.push({
         date: dateStr,
         label: d.toLocaleDateString('id-ID', { day: 'numeric', month: 'short' }),
@@ -618,13 +653,13 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
     }
 
     return { data, maxExpense };
-  }, [transactions]);
+  }, [sankeyPeriodIndex]);
 
   // --- 4. VISUALIZATION DATA FOR RECHARTS ---
-  // Monthly spending trend (last 6 months) for Bar Chart
+  // Monthly spending trend (last 6 months via Map O(1) lookup per month)
   const monthlySpendingTrend = useMemo(() => {
-    const monthsMap: { [key: string]: { monthLabel: string; Pengeluaran: number; Pemasukan: number } } = {};
     const now = new Date();
+    const rows: Array<{ monthLabel: string; Pengeluaran: number; Pemasukan: number }> = [];
 
     for (let i = 5; i >= 0; i--) {
       const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
@@ -632,23 +667,23 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
       const m = String(d.getMonth() + 1).padStart(2, '0');
       const key = `${y}-${m}`;
       const monthLabel = d.toLocaleDateString('id-ID', { month: 'short', year: '2-digit' });
-      monthsMap[key] = { monthLabel, Pengeluaran: 0, Pemasukan: 0 };
-    }
+      let pengeluaran = 0;
+      let pemasukan = 0;
 
-    transactions.forEach((tx) => {
-      if (!tx.date) return;
-      const key = tx.date.substring(0, 7);
-      if (monthsMap[key]) {
-        if (isOperatingExpense(tx)) {
-          monthsMap[key].Pengeluaran += tx.amount;
-        } else if (isOperatingIncome(tx)) {
-          monthsMap[key].Pemasukan += tx.amount;
+      const bucket = sankeyPeriodIndex.byMonth.get(key);
+      if (bucket) {
+        for (let j = 0; j < bucket.length; j += 1) {
+          const { tx, nature } = bucket[j];
+          if (nature === 'operating_expense') pengeluaran += tx.amount;
+          else if (nature === 'operating_income') pemasukan += tx.amount;
         }
       }
-    });
 
-    return Object.values(monthsMap);
-  }, [transactions]);
+      rows.push({ monthLabel, Pengeluaran: pengeluaran, Pemasukan: pemasukan });
+    }
+
+    return rows;
+  }, [sankeyPeriodIndex]);
 
   // Expense category composition for Pie Chart
   const categoryColors = [
@@ -827,78 +862,80 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
               </div>
 
               {/* Pratinjau Ringkas Dokumen */}
-              <div className="rounded-xl border border-slate-200 bg-slate-50/60 divide-y divide-slate-200 text-xs">
-                <div className="px-4 py-3 space-y-2">
-                  <div className="flex items-center justify-between text-[11px] font-bold text-slate-600">
-                    <span>Bagian I · Ringkasan Neraca Posisi Terkini</span>
-                    <span
-                      className={
-                        exportPreviewSummary.balanceSheet.isBalanced
-                          ? 'text-emerald-700'
-                          : 'text-rose-700'
-                      }
-                    >
-                      {exportPreviewSummary.balanceSheet.isBalanced ? 'Seimbang' : 'Cek Balance'}
-                    </span>
-                  </div>
-                  <div className="grid grid-cols-3 gap-2 pt-1">
-                    <div>
-                      <span className="text-[10px] text-slate-500 block">Total Aset</span>
-                      <span className="font-mono tabular-nums font-bold text-slate-900">
-                        {formatterIDR.format(exportPreviewSummary.balanceSheet.totalAssets)}
-                      </span>
-                    </div>
-                    <div>
-                      <span className="text-[10px] text-slate-500 block">Total Kewajiban</span>
-                      <span className="font-mono tabular-nums font-bold text-rose-700">
-                        {formatterIDR.format(exportPreviewSummary.balanceSheet.totalLiabilities)}
-                      </span>
-                    </div>
-                    <div>
-                      <span className="text-[10px] text-slate-500 block">Ekuitas Bersih</span>
-                      <span className="font-mono tabular-nums font-bold text-emerald-700">
-                        {formatterIDR.format(exportPreviewSummary.balanceSheet.equity)}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="px-4 py-3 space-y-2">
-                  <div className="flex items-center justify-between text-[11px] font-bold text-slate-600">
-                    <span>Bagian II · Laba-Rugi {exportPreviewSummary.periodLabel}</span>
-                    <span className="font-mono tabular-nums text-slate-500 font-medium">
-                      {exportPreviewSummary.monthTxCount} transaksi
-                    </span>
-                  </div>
-                  <div className="grid grid-cols-3 gap-2 pt-1">
-                    <div>
-                      <span className="text-[10px] text-slate-500 block">Pendapatan</span>
-                      <span className="font-mono tabular-nums font-bold text-emerald-700">
-                        {formatterIDR.format(exportPreviewSummary.totalIncome)}
-                      </span>
-                    </div>
-                    <div>
-                      <span className="text-[10px] text-slate-500 block">Beban</span>
-                      <span className="font-mono tabular-nums font-bold text-rose-700">
-                        -{formatterIDR.format(exportPreviewSummary.totalExpense)}
-                      </span>
-                    </div>
-                    <div>
-                      <span className="text-[10px] text-slate-500 block">Surplus Bersih</span>
+              {exportPreviewSummary && (
+                <div className="rounded-xl border border-slate-200 bg-slate-50/60 divide-y divide-slate-200 text-xs">
+                  <div className="px-4 py-3 space-y-2">
+                    <div className="flex items-center justify-between text-[11px] font-bold text-slate-600">
+                      <span>Bagian I · Ringkasan Neraca Posisi Terkini</span>
                       <span
-                        className={`font-mono tabular-nums font-bold ${
-                          exportPreviewSummary.netSurplus >= 0
+                        className={
+                          exportPreviewSummary.balanceSheet.isBalanced
                             ? 'text-emerald-700'
                             : 'text-rose-700'
-                        }`}
+                        }
                       >
-                        {exportPreviewSummary.netSurplus >= 0 ? '+' : ''}
-                        {formatterIDR.format(exportPreviewSummary.netSurplus)}
+                        {exportPreviewSummary.balanceSheet.isBalanced ? 'Seimbang' : 'Cek Balance'}
                       </span>
+                    </div>
+                    <div className="grid grid-cols-3 gap-2 pt-1">
+                      <div>
+                        <span className="text-[10px] text-slate-500 block">Total Aset</span>
+                        <span className="font-mono tabular-nums font-bold text-slate-900">
+                          {formatterIDR.format(exportPreviewSummary.balanceSheet.totalAssets)}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-[10px] text-slate-500 block">Total Kewajiban</span>
+                        <span className="font-mono tabular-nums font-bold text-rose-700">
+                          {formatterIDR.format(exportPreviewSummary.balanceSheet.totalLiabilities)}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-[10px] text-slate-500 block">Ekuitas Bersih</span>
+                        <span className="font-mono tabular-nums font-bold text-emerald-700">
+                          {formatterIDR.format(exportPreviewSummary.balanceSheet.equity)}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="px-4 py-3 space-y-2">
+                    <div className="flex items-center justify-between text-[11px] font-bold text-slate-600">
+                      <span>Bagian II · Laba-Rugi {exportPreviewSummary.periodLabel}</span>
+                      <span className="font-mono tabular-nums text-slate-500 font-medium">
+                        {exportPreviewSummary.monthTxCount} transaksi
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-3 gap-2 pt-1">
+                      <div>
+                        <span className="text-[10px] text-slate-500 block">Pendapatan</span>
+                        <span className="font-mono tabular-nums font-bold text-emerald-700">
+                          {formatterIDR.format(exportPreviewSummary.totalIncome)}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-[10px] text-slate-500 block">Beban</span>
+                        <span className="font-mono tabular-nums font-bold text-rose-700">
+                          -{formatterIDR.format(exportPreviewSummary.totalExpense)}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-[10px] text-slate-500 block">Surplus Bersih</span>
+                        <span
+                          className={`font-mono tabular-nums font-bold ${
+                            exportPreviewSummary.netSurplus >= 0
+                              ? 'text-emerald-700'
+                              : 'text-rose-700'
+                          }`}
+                        >
+                          {exportPreviewSummary.netSurplus >= 0 ? '+' : ''}
+                          {formatterIDR.format(exportPreviewSummary.netSurplus)}
+                        </span>
+                      </div>
                     </div>
                   </div>
                 </div>
-              </div>
+              )}
             </div>
 
             {/* Modal Footer */}
@@ -933,13 +970,23 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
 
       {/* REPORT SUB-TAB NAVIGATOR (CATEGORIZED GRID UI) */}
       <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm space-y-3">
-        {/* Category Filter Pills & Indicator */}
+        {/* Category Filter Pills & Transition Indicator */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-3">
           <div className="flex items-center gap-2">
             <Layers className="h-4 w-4 text-blue-600" />
             <span className="text-xs font-black text-slate-800 uppercase tracking-wider">
               Modul Laporan & Analitik Keuangan
             </span>
+            {isReportPending && (
+              <span
+                role="status"
+                aria-live="polite"
+                className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-500 whitespace-nowrap shrink-0 ml-1"
+              >
+                <RefreshCw className="h-3.5 w-3.5 animate-spin text-blue-600" />
+                <span>Memperbarui...</span>
+              </span>
+            )}
           </div>
 
           <div className="flex items-center gap-1.5 overflow-x-auto pb-1 sm:pb-0">
@@ -951,7 +998,7 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
             ].map((cat) => (
               <button
                 key={cat.id}
-                onClick={() => setSelectedCategoryFilter(cat.id as any)}
+                onClick={() => startReportTransition(() => setSelectedCategoryFilter(cat.id as any))}
                 className={`px-3 py-1.5 rounded-xl text-xs font-bold transition cursor-pointer whitespace-nowrap ${
                   selectedCategoryFilter === cat.id
                     ? 'bg-slate-900 text-white shadow-xs'
@@ -1078,8 +1125,10 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
                 <button
                   key={item.id}
                   onClick={() => {
-                    setActiveReport(item.id as any);
-                    setSearchQuery('');
+                    startReportTransition(() => {
+                      setActiveReport(item.id as any);
+                      setSearchQuery('');
+                    });
                   }}
                   className={`p-3 rounded-2xl text-left transition-all cursor-pointer flex flex-col justify-between border ${
                     isActive
@@ -1111,37 +1160,43 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
 
       {/* VIEW 0A: LAPORAN PIVOT KEUANGAN BERTINGKAT */}
       {activeReport === 'pivot-tree' && (
-        <HierarchicalPivotReport
-          transactions={transactions}
-          masterCategories={masterCategories}
-          kprCoaMapping={kprCoaMapping}
-        />
+        <div className={`transition-opacity duration-150 ${isReportPending ? 'opacity-75' : 'opacity-100'}`}>
+          <HierarchicalPivotReport
+            transactions={transactions}
+            masterCategories={masterCategories}
+            kprCoaMapping={kprCoaMapping}
+            periodIndex={sankeyPeriodIndex}
+          />
+        </div>
       )}
 
       {/* VIEW 0A-NEW: LAPORAN LABA-RUGI BULANAN (MODULAR COMPONENT) */}
       {activeReport === 'income-statement' && (
-        <LaporanLabaRugi
-          transactions={transactions}
-          accounts={accounts}
-          masterCategories={masterCategories}
-          kprCoaMapping={kprCoaMapping}
-          onSelectedMonthChange={(pt: MonthlyIncomeStatementPoint) => {
-            setSelectedIncomeMonthPoint((prev) =>
-              prev.monthKey === pt.monthKey && prev.fullMonthLabel === pt.fullMonthLabel
-                ? prev
-                : { monthKey: pt.monthKey, fullMonthLabel: pt.fullMonthLabel }
-            );
-          }}
-          onExportMonthCSV={(pt: MonthlyIncomeStatementPoint) => {
-            const monthTxs = transactions.filter((tx) => tx?.date && tx.date.startsWith(pt.monthKey));
-            exportIncomeStatementToCSV(monthTxs, pt.fullMonthLabel, kprCoaMapping);
-          }}
-          onExportMonthPDF={(pt: MonthlyIncomeStatementPoint) => {
-            setExportMonth(pt.month);
-            setExportYear(pt.year);
-            setShowExportModal(true);
-          }}
-        />
+        <div className={`transition-opacity duration-150 ${isReportPending ? 'opacity-75' : 'opacity-100'}`}>
+          <LaporanLabaRugi
+            transactions={transactions}
+            accounts={accounts}
+            masterCategories={masterCategories}
+            kprCoaMapping={kprCoaMapping}
+            periodIndex={sankeyPeriodIndex}
+            onSelectedMonthChange={(pt: MonthlyIncomeStatementPoint) => {
+              setSelectedIncomeMonthPoint((prev) =>
+                prev.monthKey === pt.monthKey && prev.fullMonthLabel === pt.fullMonthLabel
+                  ? prev
+                  : { monthKey: pt.monthKey, fullMonthLabel: pt.fullMonthLabel }
+              );
+            }}
+            onExportMonthCSV={(pt: MonthlyIncomeStatementPoint) => {
+              const monthTxs = (sankeyPeriodIndex.byMonth.get(pt.monthKey) ?? []).map((entry) => entry.tx);
+              exportIncomeStatementToCSV(monthTxs, pt.fullMonthLabel, kprCoaMapping);
+            }}
+            onExportMonthPDF={(pt: MonthlyIncomeStatementPoint) => {
+              setExportMonth(pt.month);
+              setExportYear(pt.year);
+              setShowExportModal(true);
+            }}
+          />
+        </div>
       )}
 
       {/* VIEW 0A2: MODUL ADJUSTING ENTRIES (JURNAL PENYESUAIAN OTOMATIS) */}
@@ -1169,46 +1224,49 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
         <div className="space-y-6 animate-fadeIn">
           <SankeyCashFlowSummary
             summary={sankeyPeriodSummary}
-            transactionCount={sankeyFilteredTransactions.length}
+            transactionCount={sankeyIndexedEntries.length}
             periodRangeLabel={sankeyPeriodRangeLabel}
             periodMode={sankeyPeriodMode}
-            onPeriodModeChange={setSankeyPeriodMode}
+            onPeriodModeChange={handleSankeyPeriodModeChange}
             selectedMonth={sankeySelectedMonth}
-            onSelectedMonthChange={setSankeySelectedMonth}
+            onSelectedMonthChange={handleSankeyMonthChange}
             selectedQuarter={sankeySelectedQuarter}
-            onSelectedQuarterChange={setSankeySelectedQuarter}
+            onSelectedQuarterChange={handleSankeyQuarterChange}
             selectedYear={sankeySelectedYear}
-            onSelectedYearChange={setSankeySelectedYear}
-            availableMonthKeys={sankeyPeriodOptions.availableMonthKeys}
-            availableYears={sankeyPeriodOptions.availableYears}
-            currentLocalMonth={sankeyPeriodOptions.currentLocalMonth}
+            onSelectedYearChange={handleSankeyYearChange}
+            availableMonthKeys={sankeyPeriodIndex.availableMonthKeys}
+            availableYears={sankeyPeriodIndex.availableYears}
+            currentLocalMonth={sankeyPeriodIndex.currentLocalMonth}
+            isPending={isSankeyPending}
           />
-          <SankeyFlowChart
-            transactions={transactions}
-            accounts={accounts}
-            debts={debts}
-            periodMode={sankeyPeriodMode}
-            onPeriodModeChange={setSankeyPeriodMode}
-            selectedMonth={sankeySelectedMonth}
-            onSelectedMonthChange={setSankeySelectedMonth}
-            selectedQuarter={sankeySelectedQuarter}
-            onSelectedQuarterChange={setSankeySelectedQuarter}
-            selectedYear={sankeySelectedYear}
-            onSelectedYearChange={setSankeySelectedYear}
-            hidePeriodControls
-            hideInlineSummaryStrip
-            renderExternalDrilldown
-            onDrilldownSelect={setSankeyDrilldownSelection}
-            clearSelectionToken={sankeyClearToken}
-          />
+          <div className={`transition-opacity duration-150 ${isSankeyPending ? 'opacity-75' : 'opacity-100'}`}>
+            <SankeyFlowChart
+              transactions={transactions}
+              accounts={accounts}
+              debts={debts}
+              periodIndex={sankeyPeriodIndex}
+              precomputedSummary={sankeyPeriodSummary}
+              filteredCount={sankeyIndexedEntries.length}
+              periodMode={sankeyPeriodMode}
+              onPeriodModeChange={handleSankeyPeriodModeChange}
+              selectedMonth={sankeySelectedMonth}
+              onSelectedMonthChange={handleSankeyMonthChange}
+              selectedQuarter={sankeySelectedQuarter}
+              onSelectedQuarterChange={handleSankeyQuarterChange}
+              selectedYear={sankeySelectedYear}
+              onSelectedYearChange={handleSankeyYearChange}
+              hidePeriodControls
+              hideInlineSummaryStrip
+              renderExternalDrilldown
+              onDrilldownSelect={setSankeyDrilldownSelection}
+              clearSelectionToken={sankeyClearToken}
+            />
+          </div>
           {sankeyDrilldownSelection && (
-            <SankeyDrilldownTable
+            <TransactionDrillDownTable
               selection={sankeyDrilldownSelection}
               accounts={accounts}
-              onClearSelection={() => {
-                setSankeyClearToken((prev) => prev + 1);
-                setSankeyDrilldownSelection(null);
-              }}
+              onClearSelection={handleClearSankeyDrilldown}
             />
           )}
         </div>
@@ -1320,30 +1378,43 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
 
       {/* VIEW 1: REPORT - ARUS KAS (CASH FLOW STATEMENT) */}
       {activeReport === 'cashflow' && (
-        <div className="space-y-6 animate-fadeIn">
+        <div className={`space-y-6 animate-fadeIn transition-opacity duration-150 ${isReportPending ? 'opacity-75' : 'opacity-100'}`}>
           {/* Period Filter Bar */}
           <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <span className="text-xs font-bold text-slate-600 uppercase tracking-wider flex items-center gap-1.5">
               <Calendar className="h-4 w-4 text-blue-600" />
               Periode Laporan Arus Kas:
             </span>
-            <div className="flex items-center gap-1.5 bg-slate-100 p-1 rounded-lg">
-              {[
-                { id: 'this-month', label: 'Bulan Ini' },
-                { id: 'last-3-months', label: '3 Bulan Terakhir' },
-                { id: 'this-year', label: 'Tahun Ini' },
-                { id: 'all', label: 'Semua Periode' },
-              ].map((p) => (
-                <button
-                  key={p.id}
-                  onClick={() => setPeriodFilter(p.id as any)}
-                  className={`px-3 py-1.5 text-xs font-bold rounded-md transition cursor-pointer ${
-                    periodFilter === p.id ? 'bg-white text-blue-600 shadow-xs' : 'text-slate-500 hover:text-slate-800'
-                  }`}
+            <div className="flex flex-wrap items-center gap-2">
+              {isReportPending && (
+                <span
+                  role="status"
+                  aria-live="polite"
+                  className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-500 whitespace-nowrap shrink-0"
                 >
-                  {p.label}
-                </button>
-              ))}
+                  <RefreshCw className="h-3.5 w-3.5 animate-spin text-blue-600" />
+                  <span>Memperbarui...</span>
+                </span>
+              )}
+              <div className="flex items-center gap-1.5 bg-slate-100 p-1 rounded-lg">
+                {[
+                  { id: 'this-month', label: 'Bulan Ini' },
+                  { id: 'last-3-months', label: '3 Bulan Terakhir' },
+                  { id: 'this-year', label: 'Tahun Ini' },
+                  { id: 'all', label: 'Semua Periode' },
+                ].map((p) => (
+                  <button
+                    key={p.id}
+                    type="button"
+                    onClick={() => startReportTransition(() => setPeriodFilter(p.id as ReportsPeriodFilter))}
+                    className={`px-3 py-1.5 text-xs font-bold rounded-md transition cursor-pointer whitespace-nowrap shrink-0 ${
+                      periodFilter === p.id ? 'bg-white text-blue-600 shadow-xs' : 'text-slate-500 hover:text-slate-800'
+                    }`}
+                  >
+                    {p.label}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
 
