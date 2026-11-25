@@ -26,7 +26,9 @@ import {
   updateAccountMetadataAndStartingBalance,
 } from './utils/accountingEngine';
 import { secureStorage } from './utils/secureStorage';
-import { useState, useEffect, useRef } from 'react';
+import { detectCategorySpendingAnomalies } from './utils/anomalyDetection';
+import { AnomalyTopSummaryTooltip } from './components/AnomalyTopSummaryTooltip';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { 
   Transaction, 
   Account, 
@@ -2424,6 +2426,49 @@ export default function App() {
     });
   };
 
+  // Shared >30% category spending anomaly alert state for Dashboard & AI navigation indicator
+  const anomalyDetectionResult = useMemo(
+    () =>
+      detectCategorySpendingAnomalies({
+        transactions,
+        budgets,
+        accounts,
+        masterCategories,
+      }),
+    [transactions, budgets, accounts, masterCategories]
+  );
+
+  const [dismissedAnomalyKeys, setDismissedAnomalyKeys] = useState<Set<string>>(() => new Set());
+
+  const undismissedAnomalies = useMemo(
+    () =>
+      anomalyDetectionResult.anomalies.filter(
+        (anom) => !dismissedAnomalyKeys.has(anom.anomalyKey)
+      ),
+    [anomalyDetectionResult.anomalies, dismissedAnomalyKeys]
+  );
+
+  const handleDismissAnomalies = () => {
+    setDismissedAnomalyKeys((prev) => {
+      const next = new Set(prev);
+      anomalyDetectionResult.anomalies.forEach((anom) => {
+        next.add(anom.anomalyKey);
+      });
+      return next;
+    });
+  };
+
+  const handleOpenAiSmartCleanup = () => {
+    setActiveTab('ai-analysis');
+    setMobileMenuOpen(false);
+    window.setTimeout(() => {
+      const targetEl = document.getElementById('anomaly-smart-cleanup-section');
+      if (targetEl) {
+        targetEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    }, 260);
+  };
+
   // Targeted Smart Cleanup handler: moves only selected trigger transactions into a target budgeted category
   const handleReassignTransactionCategories = (
     transactionIds: string[],
@@ -2450,6 +2495,54 @@ export default function App() {
       duration: 4500,
     });
   };
+
+  // Atomic cross-category batch Smart Cleanup handler
+  const handleBatchReassignTransactionCategories = (
+    assignments: Array<{ transactionIds: string[]; targetCategory: string }>
+  ) => {
+    if (!Array.isArray(assignments) || assignments.length === 0) return;
+
+    const txIdToTarget = new Map<string, string>();
+    const targetCategorySet = new Set<string>();
+
+    assignments.forEach((item) => {
+      const cleanTarget = String(item.targetCategory || '').trim();
+      if (!cleanTarget || !Array.isArray(item.transactionIds)) return;
+      item.transactionIds.forEach((id) => {
+        txIdToTarget.set(id, cleanTarget);
+      });
+    });
+
+    if (txIdToTarget.size === 0) return;
+
+    let movedCount = 0;
+    transactions.forEach((t) => {
+      const nextTarget = txIdToTarget.get(t.id);
+      if (nextTarget && String(t.category || '').trim() !== nextTarget) {
+        movedCount += 1;
+        targetCategorySet.add(nextTarget);
+      }
+    });
+
+    if (movedCount === 0) return;
+
+    setTransactions((prev) =>
+      prev.map((t) => {
+        const nextTarget = txIdToTarget.get(t.id);
+        return nextTarget ? { ...t, category: nextTarget } : t;
+      })
+    );
+
+    showToast({
+      type: 'success',
+      title: 'Smart Cleanup Massal Diterapkan',
+      message: `${movedCount} transaksi pemicu dipindahkan ke ${targetCategorySet.size} kategori budget tujuan.`,
+      duration: 4500,
+    });
+  };
+
+  const [aiNavTooltipPos, setAiNavTooltipPos] = useState<{ top: number; left: number } | null>(null);
+  const [showMobileAiTooltip, setShowMobileAiTooltip] = useState(false);
 
   const getDefaultCleanStarterData = () => {
     const cleanAccounts: Account[] = [
@@ -2763,7 +2856,36 @@ export default function App() {
                           key={tab.id}
                           onClick={() => {
                             setActiveTab(tab.id);
+                            setAiNavTooltipPos(null);
                             scrollWorkspaceToTop();
+                          }}
+                          onMouseEnter={(e) => {
+                            if (tab.id === 'ai-analysis' && anomalyDetectionResult.anomalies.length > 0) {
+                              const rect = e.currentTarget.getBoundingClientRect();
+                              setAiNavTooltipPos({
+                                top: Math.min(rect.top, window.innerHeight - 260),
+                                left: rect.right + 10,
+                              });
+                            }
+                          }}
+                          onMouseLeave={() => {
+                            if (tab.id === 'ai-analysis') {
+                              setAiNavTooltipPos(null);
+                            }
+                          }}
+                          onFocus={(e) => {
+                            if (tab.id === 'ai-analysis' && anomalyDetectionResult.anomalies.length > 0) {
+                              const rect = e.currentTarget.getBoundingClientRect();
+                              setAiNavTooltipPos({
+                                top: Math.min(rect.top, window.innerHeight - 260),
+                                left: rect.right + 10,
+                              });
+                            }
+                          }}
+                          onBlur={() => {
+                            if (tab.id === 'ai-analysis') {
+                              setAiNavTooltipPos(null);
+                            }
                           }}
                           className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-lg text-xs font-medium transition-all duration-150 cursor-pointer text-left ${
                             isActive
@@ -2777,22 +2899,34 @@ export default function App() {
                                 isActive
                                   ? 'text-white'
                                   : tab.isAi
-                                  ? 'text-blue-400 animate-pulse'
+                                  ? 'text-blue-400'
                                   : 'text-slate-400'
                               }`}
                             />
                             <span className="truncate">{tab.label}</span>
                           </div>
-                          {tab.badge && (
+                          {tab.id === 'ai-analysis' && anomalyDetectionResult.anomalies.length > 0 ? (
                             <span
-                              className={`px-1.5 py-0.5 text-[9px] font-black rounded ${
+                              className={`px-1.5 py-0.5 text-[9px] font-black rounded whitespace-nowrap shrink-0 ${
                                 isActive
-                                  ? 'bg-blue-700 text-white'
-                                  : 'bg-blue-500/20 text-blue-300 border border-blue-500/30'
+                                  ? 'bg-amber-400 text-slate-950'
+                                  : 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
                               }`}
                             >
-                              {tab.badge}
+                              {anomalyDetectionResult.anomalies.length} Anomali
                             </span>
+                          ) : (
+                            tab.badge && (
+                              <span
+                                className={`px-1.5 py-0.5 text-[9px] font-black rounded ${
+                                  isActive
+                                    ? 'bg-blue-700 text-white'
+                                    : 'bg-blue-500/20 text-blue-300 border border-blue-500/30'
+                                }`}
+                              >
+                                {tab.badge}
+                              </span>
+                            )
                           )}
                         </button>
                       );
@@ -2803,6 +2937,15 @@ export default function App() {
             );
           })}
         </nav>
+
+        {aiNavTooltipPos && anomalyDetectionResult.anomalies.length > 0 && (
+          <div
+            className="fixed z-50"
+            style={{ top: aiNavTooltipPos.top, left: aiNavTooltipPos.left }}
+          >
+            <AnomalyTopSummaryTooltip detectionResult={anomalyDetectionResult} />
+          </div>
+        )}
 
         {/* Help Onboarding Trigger */}
         <div className="px-4 mb-3">
@@ -2947,28 +3090,64 @@ export default function App() {
                   const Icon = tab.icon;
                   const isActive = activeTab === tab.id;
                   return (
-                    <button
-                      key={tab.id}
-                      onClick={() => {
-                        setActiveTab(tab.id);
-                        setMobileMenuOpen(false);
-                      }}
-                      className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-lg text-xs font-bold transition ${
-                        isActive
-                          ? 'bg-blue-600 text-white shadow-sm'
-                          : 'text-slate-300 hover:bg-slate-800 hover:text-white'
-                      }`}
-                    >
-                      <div className="flex items-center gap-2.5 min-w-0">
-                        <Icon className={`h-4 w-4 shrink-0 ${isActive ? 'text-white' : tab.isAi ? 'text-blue-400' : 'text-slate-400'}`} />
-                        <span className="truncate">{tab.label}</span>
-                      </div>
-                      {tab.badge && (
-                        <span className={`px-1.5 py-0.5 text-[9px] font-black rounded ${isActive ? 'bg-blue-700 text-white' : 'bg-blue-500/20 text-blue-300'}`}>
-                          {tab.badge}
-                        </span>
-                      )}
-                    </button>
+                    <div key={tab.id} className="relative">
+                      <button
+                        onClick={() => {
+                          setActiveTab(tab.id);
+                          setShowMobileAiTooltip(false);
+                          setMobileMenuOpen(false);
+                        }}
+                        onMouseEnter={() => {
+                          if (tab.id === 'ai-analysis' && anomalyDetectionResult.anomalies.length > 0) {
+                            setShowMobileAiTooltip(true);
+                          }
+                        }}
+                        onMouseLeave={() => {
+                          if (tab.id === 'ai-analysis') setShowMobileAiTooltip(false);
+                        }}
+                        onFocus={() => {
+                          if (tab.id === 'ai-analysis' && anomalyDetectionResult.anomalies.length > 0) {
+                            setShowMobileAiTooltip(true);
+                          }
+                        }}
+                        onBlur={() => {
+                          if (tab.id === 'ai-analysis') setShowMobileAiTooltip(false);
+                        }}
+                        className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-lg text-xs font-bold transition ${
+                          isActive
+                            ? 'bg-blue-600 text-white shadow-sm'
+                            : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <Icon className={`h-4 w-4 shrink-0 ${isActive ? 'text-white' : tab.isAi ? 'text-blue-400' : 'text-slate-400'}`} />
+                          <span className="truncate">{tab.label}</span>
+                        </div>
+                        {tab.id === 'ai-analysis' && anomalyDetectionResult.anomalies.length > 0 ? (
+                          <span
+                            className={`px-1.5 py-0.5 text-[9px] font-black rounded whitespace-nowrap shrink-0 ${
+                              isActive ? 'bg-amber-400 text-slate-950' : 'bg-amber-500/20 text-amber-300'
+                            }`}
+                          >
+                            {anomalyDetectionResult.anomalies.length} Anomali
+                          </span>
+                        ) : (
+                          tab.badge && (
+                            <span className={`px-1.5 py-0.5 text-[9px] font-black rounded ${isActive ? 'bg-blue-700 text-white' : 'bg-blue-500/20 text-blue-300'}`}>
+                              {tab.badge}
+                            </span>
+                          )
+                        )}
+                      </button>
+
+                      {tab.id === 'ai-analysis' &&
+                        showMobileAiTooltip &&
+                        anomalyDetectionResult.anomalies.length > 0 && (
+                          <div className="mt-1.5 z-40">
+                            <AnomalyTopSummaryTooltip detectionResult={anomalyDetectionResult} />
+                          </div>
+                        )}
+                    </div>
                   );
                 })}
               </div>
@@ -3027,6 +3206,10 @@ export default function App() {
                     onDepositSavingsGoal={handleDepositSavingsGoal}
                     onSyncFixedAssetDepreciation={handleSyncFixedAssetDepreciation}
                     onSyncAllFixedAssetDepreciations={handleSyncAllFixedAssetDepreciations}
+                    anomalyDetection={anomalyDetectionResult}
+                    hasUndismissedAnomalies={undismissedAnomalies.length > 0}
+                    onDismissAnomalies={handleDismissAnomalies}
+                    onOpenSmartCleanup={handleOpenAiSmartCleanup}
                     onQuickAction={(tab) => {
                       setActiveTab(tab);
                       scrollWorkspaceToTop();
@@ -3212,6 +3395,7 @@ export default function App() {
                     onApplyBudgetSuggestion={handleApplyBudgetSuggestion}
                     onConsolidateCategories={handleConsolidateCategories}
                     onReassignTransactionCategories={handleReassignTransactionCategories}
+                    onBatchReassignTransactionCategories={handleBatchReassignTransactionCategories}
                   />
                 )}
               </motion.div>

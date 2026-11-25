@@ -5,7 +5,9 @@ import { FormattedNumberInput } from './FormattedNumberInput';
 import { TaxCalculatorCard } from './TaxCalculatorCard';
 import { DashboardFinancialHealthPanel } from './DashboardFinancialHealthPanel';
 import { DashboardHealthScannerCard } from './DashboardHealthScannerCard';
+import { DashboardAnomalyAlertBanner } from './DashboardAnomalyAlertBanner';
 import { SavingsAchievementCard } from './SavingsAchievementCard';
+import { CategoryAnomalyDetectionResult } from '../utils/anomalyDetection';
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell, ReferenceLine } from 'recharts';
 import { TrendingUp, TrendingDown, Wallet, ShieldAlert, CreditCard, PiggyBank, ArrowRight, CheckCircle2, AlertTriangle, Calendar, ChevronLeft, ChevronRight, ChevronDown, ArrowUpRight, ArrowDownRight, Info, Eye, EyeOff, Percent, ArrowDown, Sparkles, Lightbulb, Target, Plus, Trash2, Edit2, Clock, Bell, DollarSign, X, RefreshCw, Activity, BarChart3, Table, GitCommit, Scale, FileCheck, ShieldCheck, Building2 } from 'lucide-react';
 import {
@@ -1633,6 +1635,10 @@ interface DashboardTabProps {
   onSyncFixedAssetDepreciation?: (assetId: string) => void;
   onSyncAllFixedAssetDepreciations?: () => void;
   onQuickAction: (tab: string) => void;
+  anomalyDetection?: CategoryAnomalyDetectionResult;
+  hasUndismissedAnomalies?: boolean;
+  onDismissAnomalies?: () => void;
+  onOpenSmartCleanup?: () => void;
 }
 
 export const DashboardTab: React.FC<DashboardTabProps> = ({
@@ -1652,6 +1658,10 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
   onSyncFixedAssetDepreciation,
   onSyncAllFixedAssetDepreciations,
   onQuickAction,
+  anomalyDetection,
+  hasUndismissedAnomalies = false,
+  onDismissAnomalies,
+  onOpenSmartCleanup,
 }) => {
   // Dynamically calculate actual date from system
   const actualDate = React.useMemo(() => new Date(), []);
@@ -2976,6 +2986,24 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
           </button>
         </div>
       </motion.div>
+
+      {/* BANNER PERINGATAN ANOMALI PENGELUARAN (>30% DI ATAS RATA-RATA 3 BULAN) */}
+      {hasUndismissedAnomalies && anomalyDetection && anomalyDetection.anomalies.length > 0 && (
+        <motion.div variants={cardVariants}>
+          <DashboardAnomalyAlertBanner
+            detectionResult={anomalyDetection}
+            isFocusMode={isFocusMode}
+            onOpenSmartCleanup={() => {
+              if (onOpenSmartCleanup) {
+                onOpenSmartCleanup();
+              } else {
+                onQuickAction('ai-analysis');
+              }
+            }}
+            onDismiss={() => onDismissAnomalies?.()}
+          />
+        </motion.div>
+      )}
 
       {/* PANEL RINGKASAN UTAMA: NERACA KEKAYAAN BERSIH REAL-TIME */}
       <NeracaKekayaanBersih

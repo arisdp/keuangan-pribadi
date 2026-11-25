@@ -25,6 +25,9 @@ interface AiAnalysisTabProps {
   onApplyBudgetSuggestion: (category: string, recommendedLimit: number) => void;
   onConsolidateCategories?: (sourceCategories: string[], targetCategory: string) => void;
   onReassignTransactionCategories?: (transactionIds: string[], targetCategory: string) => void;
+  onBatchReassignTransactionCategories?: (
+    assignments: Array<{ transactionIds: string[]; targetCategory: string }>
+  ) => void;
 }
 
 export interface DebtPayoffItem {
@@ -193,6 +196,7 @@ export const AiAnalysisTab: React.FC<AiAnalysisTabProps> = ({
   onApplyBudgetSuggestion,
   onConsolidateCategories,
   onReassignTransactionCategories,
+  onBatchReassignTransactionCategories,
 }) => {
   const formatterIDR = new Intl.NumberFormat('id-ID', {
     style: 'currency',
@@ -847,13 +851,14 @@ export const AiAnalysisTab: React.FC<AiAnalysisTabProps> = ({
         debts={debts}
       />
 
-      {/* DETEKTOR ANOMALI PENGELUARAN (>= +30%) & SMART CLEANUP */}
+      {/* DETEKTOR ANOMALI PENGELUARAN (> +30%) & SMART CLEANUP */}
       <AnomalySmartCleanupCard
         transactions={transactions}
         budgets={budgets}
         accounts={accounts}
         masterCategories={masterCategories}
         onReassignTransactionCategories={onReassignTransactionCategories}
+        onBatchReassignTransactionCategories={onBatchReassignTransactionCategories}
       />
 
       {/* PEMINDAI EFISIENSI & REKOMENDASI PENGGABUNGAN KATEGORI MASTER */}
