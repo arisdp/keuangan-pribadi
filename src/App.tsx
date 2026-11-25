@@ -2424,6 +2424,33 @@ export default function App() {
     });
   };
 
+  // Targeted Smart Cleanup handler: moves only selected trigger transactions into a target budgeted category
+  const handleReassignTransactionCategories = (
+    transactionIds: string[],
+    targetCategory: string
+  ) => {
+    const cleanTarget = targetCategory.trim();
+    if (!cleanTarget || !Array.isArray(transactionIds) || transactionIds.length === 0) return;
+
+    const idSet = new Set(transactionIds);
+    const matchedCount = transactions.filter(
+      (t) => idSet.has(t.id) && String(t.category || '').trim() !== cleanTarget
+    ).length;
+
+    if (matchedCount === 0) return;
+
+    setTransactions((prev) =>
+      prev.map((t) => (idSet.has(t.id) ? { ...t, category: cleanTarget } : t))
+    );
+
+    showToast({
+      type: 'success',
+      title: 'Smart Cleanup Diterapkan',
+      message: `${matchedCount} transaksi pemicu berhasil dipindahkan ke kategori "${cleanTarget}".`,
+      duration: 4500,
+    });
+  };
+
   const getDefaultCleanStarterData = () => {
     const cleanAccounts: Account[] = [
       { id: 'acc-1', name: 'Dompet Tunai', type: 'cash', startingBalance: 0, currentBalance: 0, coaCode: '1100' },
@@ -2989,6 +3016,7 @@ export default function App() {
                     accounts={accounts}
                     budgets={budgets}
                     debts={debts}
+                    emergencyConfig={emergencyConfig}
                     emergencyTransactions={emergencyTransactions}
                     investments={investments}
                     fixedAssets={fixedAssets}
@@ -3175,6 +3203,7 @@ export default function App() {
                     transactions={transactions}
                     budgets={budgets}
                     accounts={accounts}
+                    recurringTransactions={recurringTransactions}
                     debts={combinedDebtsForAi}
                     emergencyConfig={emergencyConfig}
                     emergencyBalance={totalEmergencyBalance}
@@ -3182,6 +3211,7 @@ export default function App() {
                     masterCategories={masterCategories}
                     onApplyBudgetSuggestion={handleApplyBudgetSuggestion}
                     onConsolidateCategories={handleConsolidateCategories}
+                    onReassignTransactionCategories={handleReassignTransactionCategories}
                   />
                 )}
               </motion.div>

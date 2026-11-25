@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Transaction, CategoryBudget, Debt, EmergencyFundConfig, AIAnalysisResult, AIMonthlyComparisonResult, AICategoryConsolidationResult, CategoryConsolidationGroup, InvestmentAsset, Account } from '../types';
+import { Transaction, CategoryBudget, Debt, EmergencyFundConfig, AIAnalysisResult, AIMonthlyComparisonResult, AICategoryConsolidationResult, CategoryConsolidationGroup, InvestmentAsset, Account, RecurringTransaction } from '../types';
 import { Sparkles, Loader2, ArrowRightLeft, ShieldCheck, AlertTriangle, ArrowUpRight, ArrowDownRight, CheckCircle2, ChevronRight, HelpCircle, TrendingUp, TrendingDown, Coins, Percent, PiggyBank, Wallet, Calendar, Scale, Flame, Snowflake, Zap, Award, ListOrdered, Layers, ArrowRight, GitMerge } from 'lucide-react';
 import { CategoryNode, DEFAULT_CATEGORY_HIERARCHY, flattenCategoryHierarchy } from '../categoryHierarchy';
 import { getAccountCreditBill, getCreditAccounts, isOperatingExpense, isOperatingIncome, parseLocalDate } from '../utils/accountingEngine';
@@ -8,11 +8,15 @@ import { FormattedNumberInput } from './FormattedNumberInput';
 import { WhatIfSavingsSimulator } from './WhatIfSavingsSimulator';
 import { DebtPriorityScheduler } from './DebtPriorityScheduler';
 import { OverlimitTrendChart } from './CreditOverlimitTrendAnalyzer';
+import { AiCategoryExpenseTrendChart } from './AiCategoryExpenseTrendChart';
+import { CashFlowProjectionCard } from './CashFlowProjectionCard';
+import { AnomalySmartCleanupCard } from './AnomalySmartCleanupCard';
 
 interface AiAnalysisTabProps {
   transactions: Transaction[];
   budgets: CategoryBudget[];
   accounts?: Account[];
+  recurringTransactions?: RecurringTransaction[];
   debts: Debt[];
   emergencyConfig: EmergencyFundConfig;
   emergencyBalance: number;
@@ -20,6 +24,7 @@ interface AiAnalysisTabProps {
   masterCategories?: CategoryNode[];
   onApplyBudgetSuggestion: (category: string, recommendedLimit: number) => void;
   onConsolidateCategories?: (sourceCategories: string[], targetCategory: string) => void;
+  onReassignTransactionCategories?: (transactionIds: string[], targetCategory: string) => void;
 }
 
 export interface DebtPayoffItem {
@@ -179,6 +184,7 @@ export const AiAnalysisTab: React.FC<AiAnalysisTabProps> = ({
   transactions,
   budgets,
   accounts = [],
+  recurringTransactions = [],
   debts,
   emergencyConfig,
   emergencyBalance,
@@ -186,6 +192,7 @@ export const AiAnalysisTab: React.FC<AiAnalysisTabProps> = ({
   masterCategories = [],
   onApplyBudgetSuggestion,
   onConsolidateCategories,
+  onReassignTransactionCategories,
 }) => {
   const formatterIDR = new Intl.NumberFormat('id-ID', {
     style: 'currency',
@@ -820,6 +827,34 @@ export const AiAnalysisTab: React.FC<AiAnalysisTabProps> = ({
           </div>
         </div>
       </div>
+
+      {/* GRAFIK TREN PENGELUARAN BULANAN PER KATEGORI & TARGET HEMAT AI */}
+      <AiCategoryExpenseTrendChart
+        transactions={transactions}
+        budgets={budgets}
+        accounts={accounts}
+        masterCategories={masterCategories}
+        aiAnalysisResult={result}
+        trendAnalysisResult={trendResult}
+        compareResult={compareResult}
+      />
+
+      {/* PROYEKSI ARUS KAS 3 BULAN KE DEPAN */}
+      <CashFlowProjectionCard
+        accounts={accounts}
+        transactions={transactions}
+        recurringTransactions={recurringTransactions}
+        debts={debts}
+      />
+
+      {/* DETEKTOR ANOMALI PENGELUARAN (>= +30%) & SMART CLEANUP */}
+      <AnomalySmartCleanupCard
+        transactions={transactions}
+        budgets={budgets}
+        accounts={accounts}
+        masterCategories={masterCategories}
+        onReassignTransactionCategories={onReassignTransactionCategories}
+      />
 
       {/* PEMINDAI EFISIENSI & REKOMENDASI PENGGABUNGAN KATEGORI MASTER */}
       <div

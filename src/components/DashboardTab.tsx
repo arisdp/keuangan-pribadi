@@ -1,9 +1,10 @@
 import React from 'react';
 import { motion } from 'motion/react';
-import { Transaction, Account, CategoryBudget, Debt, EmergencyFundTransaction, FixedAsset, InvestmentAsset, SavingsGoal } from '../types';
+import { Transaction, Account, CategoryBudget, Debt, EmergencyFundConfig, EmergencyFundTransaction, FixedAsset, InvestmentAsset, SavingsGoal } from '../types';
 import { FormattedNumberInput } from './FormattedNumberInput';
 import { TaxCalculatorCard } from './TaxCalculatorCard';
 import { DashboardFinancialHealthPanel } from './DashboardFinancialHealthPanel';
+import { DashboardHealthScannerCard } from './DashboardHealthScannerCard';
 import { SavingsAchievementCard } from './SavingsAchievementCard';
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell, ReferenceLine } from 'recharts';
 import { TrendingUp, TrendingDown, Wallet, ShieldAlert, CreditCard, PiggyBank, ArrowRight, CheckCircle2, AlertTriangle, Calendar, ChevronLeft, ChevronRight, ChevronDown, ArrowUpRight, ArrowDownRight, Info, Eye, EyeOff, Percent, ArrowDown, Sparkles, Lightbulb, Target, Plus, Trash2, Edit2, Clock, Bell, DollarSign, X, RefreshCw, Activity, BarChart3, Table, GitCommit, Scale, FileCheck, ShieldCheck, Building2 } from 'lucide-react';
@@ -1620,6 +1621,7 @@ interface DashboardTabProps {
   accounts: Account[];
   budgets: CategoryBudget[];
   debts: Debt[];
+  emergencyConfig?: EmergencyFundConfig;
   emergencyTransactions: EmergencyFundTransaction[];
   investments: InvestmentAsset[];
   fixedAssets?: FixedAsset[];
@@ -1638,6 +1640,7 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
   accounts,
   budgets,
   debts,
+  emergencyConfig = { jobStability: 'medium', dependents: 0, monthlyExpense: 0 },
   emergencyTransactions,
   investments = [],
   fixedAssets = [],
@@ -3216,6 +3219,18 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
           isFocusMode={isFocusMode}
           onOpenReports={() => onQuickAction('reports')}
           onAddTransaction={() => onQuickAction('transactions')}
+        />
+      </motion.div>
+
+      {/* PEMERIKSAAN KESEHATAN KEUANGAN OTOMATIS (SCANNER KATEGORI, AKUN NONAKTIF & DANA DARURAT) */}
+      <motion.div variants={cardVariants}>
+        <DashboardHealthScannerCard
+          transactions={transactions}
+          accounts={accounts}
+          emergencyConfig={emergencyConfig}
+          emergencyTransactions={emergencyTransactions}
+          isFocusMode={isFocusMode}
+          onQuickAction={onQuickAction}
         />
       </motion.div>
 
