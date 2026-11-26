@@ -1,3 +1,5 @@
+import type { JournalEntry, JournalLine } from '../types';
+
 export interface SyncSummary {
   transactionCount: number;
   accountCount: number;
@@ -19,6 +21,8 @@ export interface SyncDataPackage {
   savingsGoals?: any[];
   emergencyConfig?: any;
   emergencyTransactions?: any[];
+  journalEntries?: JournalEntry[];
+  journalLines?: JournalLine[];
   _lastUpdated?: string;
 }
 

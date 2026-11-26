@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useRef, useEffect, useTransition, useCallback } from 'react';
-import { Transaction, Account, CategoryBudget, Debt, FixedAsset, InvestmentAsset, EmergencyFundTransaction, KprCoaMappingConfig } from '../types';
+import { Transaction, Account, CategoryBudget, Debt, FixedAsset, InvestmentAsset, EmergencyFundTransaction, KprCoaMappingConfig, JournalLine } from '../types';
 import { CategoryNode, DEFAULT_CATEGORY_HIERARCHY } from '../categoryHierarchy';
 import { CoaScanResult } from '../coaUtils';
 import { HierarchicalPivotReport } from './HierarchicalPivotReport';
@@ -95,6 +95,8 @@ import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, Responsive
 interface ReportsTabProps {
   transactions: Transaction[];
   accounts: Account[];
+  journalLines: JournalLine[];
+  coaList: Array<{ code: string; category: string; normalBalance: string }>;
   budgets: CategoryBudget[];
   debts: Debt[];
   investments: InvestmentAsset[];
@@ -118,6 +120,8 @@ interface ReportsTabProps {
 export const ReportsTab: React.FC<ReportsTabProps> = ({
   transactions,
   accounts,
+  journalLines,
+  coaList,
   budgets,
   debts,
   investments,
@@ -418,8 +422,8 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
 
   // --- 2. BALANCE SHEET CALCULATIONS ---
   const balanceSheetData = useMemo(() => {
-    return calculateBalanceSheet(accounts, emergencyTransactions, investments, debts, syncedFixedAssets);
-  }, [accounts, emergencyTransactions, investments, debts, syncedFixedAssets]);
+    return calculateBalanceSheet(accounts, emergencyTransactions, investments, debts, syncedFixedAssets, journalLines, coaList);
+  }, [accounts, emergencyTransactions, investments, debts, syncedFixedAssets, journalLines, coaList]);
 
   // --- 3. BUDGET VS REALIZATION CALCULATIONS (O(M_currentMonth + B) via Map Bucket) ---
   const baseBudgetVsRealization = useMemo(() => {
@@ -1298,6 +1302,7 @@ export const ReportsTab: React.FC<ReportsTabProps> = ({
           <AiLedgerReconciliation
             transactions={transactions}
             accounts={accounts}
+            journalLines={journalLines}
             masterCategories={masterCategories}
             onReconcileFix={(missingCategories) => {
               if (missingCategories.length > 0 && onUpdateMasterCategories) {

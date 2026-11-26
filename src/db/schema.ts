@@ -22,6 +22,8 @@ export const accounts = pgTable('accounts', {
   creditLimit: decimal('credit_limit', { precision: 15, scale: 2 }),
   usedLimit: decimal('used_limit', { precision: 15, scale: 2 }),
   initialDebt: decimal('initial_debt', { precision: 15, scale: 2 }),
+  openingDate: text('opening_date'),
+  openingBalanceEntryId: text('opening_balance_entry_id'),
   dueDay: integer('due_day'),
   interestRate: decimal('interest_rate', { precision: 5, scale: 2 }),
   minPayment: decimal('min_payment', { precision: 15, scale: 2 }),
@@ -49,6 +51,10 @@ export const transactions = pgTable('transactions', {
   unitName: text('unit_name'),
   isAdjustment: boolean('is_adjustment').default(false),
   adjustmentType: text('adjustment_type'),
+  reconciliationEvidenceReference: text('reconciliation_evidence_reference'),
+  reconciliationEvidenceConfirmedAt: text('reconciliation_evidence_confirmed_at'),
+  reconciliationActualBalance: decimal('reconciliation_actual_balance', { precision: 15, scale: 2 }),
+  reconciliationRecordedBalance: decimal('reconciliation_recorded_balance', { precision: 15, scale: 2 }),
   adjustmentPeriodKey: text('adjustment_period_key'),
   adjustmentRatePct: decimal('adjustment_rate_pct', { precision: 6, scale: 2 }),
   adjustmentDurationDays: integer('adjustment_duration_days'),
@@ -57,6 +63,31 @@ export const transactions = pgTable('transactions', {
   coaDebitCode: text('coa_debit_code'),
   coaCreditCode: text('coa_credit_code'),
   linkedKprBreakdown: jsonb('linked_kpr_breakdown'),
+  linkedAccountId: text('linked_account_id'),
+  debtDisbursementMode: text('debt_disbursement_mode'),
+  debtDisbursementCoaCode: text('debt_disbursement_coa_code'),
+});
+
+export const journalEntries = pgTable('journal_entries', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  transactionId: text('transaction_id'),
+  date: text('date').notNull(),
+  description: text('description').notNull(),
+  sourceType: text('source_type').notNull(),
+  evidenceReference: text('evidence_reference'),
+  evidenceConfirmedAt: text('evidence_confirmed_at'),
+  reconciliationActualBalance: decimal('reconciliation_actual_balance', { precision: 15, scale: 2 }),
+});
+
+export const journalLines = pgTable('journal_lines', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  journalEntryId: text('journal_entry_id').notNull().references(() => journalEntries.id, { onDelete: 'cascade' }),
+  lineNumber: integer('line_number').notNull(),
+  coaCode: text('coa_code').notNull(),
+  debit: decimal('debit', { precision: 15, scale: 2 }).notNull().default('0'),
+  credit: decimal('credit', { precision: 15, scale: 2 }).notNull().default('0'),
 });
 
 export const recurringTransactions = pgTable('recurring_transactions', {

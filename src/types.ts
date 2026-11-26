@@ -16,13 +16,20 @@ export interface Transaction {
   linkedFixedAssetId?: string;
   linkedFixedAssetAction?: 'buy';
   linkedEmergencyTxId?: string;
+  linkedAccountId?: string;
+  debtDisbursementMode?: 'cash' | 'direct_asset' | 'direct_expense';
+  debtDisbursementCoaCode?: string;
   // Investment unit detail properties
   unitPrice?: number;
   units?: number;
   unitName?: string;
   // Non-cash Adjusting Entries properties
   isAdjustment?: boolean;
-  adjustmentType?: 'investment_depreciation' | 'debt_interest_accrual' | 'fixed_asset_depreciation';
+  adjustmentType?: 'investment_depreciation' | 'debt_interest_accrual' | 'fixed_asset_depreciation' | 'reconciliation';
+  reconciliationEvidenceReference?: string;
+  reconciliationEvidenceConfirmedAt?: string;
+  reconciliationActualBalance?: number;
+  reconciliationRecordedBalance?: number;
   adjustmentPeriodKey?: string; // e.g., YYYY-MM
   adjustmentRatePct?: number;
   adjustmentDurationDays?: number;
@@ -160,10 +167,33 @@ export interface Account {
   creditLimit?: number;
   usedLimit?: number;
   initialDebt?: number;
+  openingDate?: string;
+  openingBalanceEntryId?: string;
   dueDay?: number; // Hari jatuh tempo bulanan (1-31)
   interestRate?: number; // Suku bunga tahunan % (APR) untuk CC/PayLater
   minPayment?: number; // Cicilan/pembayaran minimum bulanan (Rp) untuk CC/PayLater
   coaCode?: string; // Explicit mapped Master COA Code (e.g. '1200', '1100')
+}
+
+export interface JournalEntry {
+  id: string;
+  date: string;
+  description: string;
+  transactionId?: string;
+  sourceType: 'transaction' | 'opening_balance' | 'adjustment';
+  evidenceReference?: string;
+  evidenceConfirmedAt?: string;
+  reconciliationActualBalance?: number;
+}
+
+export interface JournalLine {
+  id: string;
+  journalEntryId: string;
+  lineNumber: 1 | 2;
+  coaCode: string;
+  debit: number;
+  credit: number;
+  transactionId?: string;
 }
 
 export interface CategoryBudget {

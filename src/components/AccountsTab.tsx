@@ -30,7 +30,8 @@ interface AccountsTabProps {
     initialDebt?: number,
     dueDay?: number,
     interestRate?: number,
-    minPayment?: number
+    minPayment?: number,
+    openingDate?: string
   ) => void;
   onDeleteAccount: (accountId: string) => void;
   onTransferFunds?: (amount: number, fromAccountId: string, toAccountId: string, description: string) => void;
@@ -99,6 +100,7 @@ export const AccountsTab: React.FC<AccountsTabProps> = ({
   const [startingBalance, setStartingBalance] = useState('');
   const [accountNumber, setAccountNumber] = useState('');
   const [initialDebt, setInitialDebt] = useState('');
+  const [openingDate, setOpeningDate] = useState(toLocalYYYYMMDD());
   const [dueDayInput, setDueDayInput] = useState('');
   const [interestRateInput, setInterestRateInput] = useState('');
   const [minPaymentInput, setMinPaymentInput] = useState('');
@@ -175,7 +177,8 @@ export const AccountsTab: React.FC<AccountsTabProps> = ({
       debtVal,
       parsedDueDay,
       parsedInterestRate,
-      parsedMinPayment
+      parsedMinPayment,
+      isSelectedCreditOrPaylater ? openingDate : undefined
     );
     
     // Reset form
@@ -184,6 +187,7 @@ export const AccountsTab: React.FC<AccountsTabProps> = ({
     setStartingBalance('');
     setAccountNumber('');
     setInitialDebt('');
+    setOpeningDate(toLocalYYYYMMDD());
     setDueDayInput('');
     setInterestRateInput('');
     setMinPaymentInput('');
@@ -1035,6 +1039,21 @@ export const AccountsTab: React.FC<AccountsTabProps> = ({
                     </div>
                     <p className="text-[10px] text-slate-400 mt-1">
                       Masukkan jumlah hutang pemakaian berjalan Anda saat ini jika Anda sudah memakai limit ini sebelum pencatatan dimulai.
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-slate-600 uppercase tracking-wider mb-1.5">
+                      Tanggal Awal Pembukuan Kredit
+                    </label>
+                    <input
+                      type="date"
+                      value={openingDate}
+                      onChange={(e) => setOpeningDate(e.target.value)}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-700 font-mono"
+                    />
+                    <p className="text-[10px] text-slate-400 mt-1">
+                      Identitas saldo awal dibuat tetap agar saldo awal utang dan pemakaian limit dapat diaudit terpisah.
                     </p>
                   </div>
 

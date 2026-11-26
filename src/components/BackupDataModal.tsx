@@ -34,6 +34,8 @@ import {
   EmergencyFundTransaction,
   RecurringTransaction,
   SavingsGoal,
+  JournalEntry,
+  JournalLine,
   User
 } from '../types';
 import { CategoryNode } from '../categoryHierarchy';
@@ -51,6 +53,8 @@ interface BackupDataModalProps {
     fixedAssets?: FixedAsset[];
     emergencyConfig: EmergencyFundConfig;
     emergencyTransactions: EmergencyFundTransaction[];
+    journalEntries?: JournalEntry[];
+    journalLines?: JournalLine[];
     masterCategories: CategoryNode[];
     recurringTransactions: RecurringTransaction[];
     savingsGoals: SavingsGoal[];

@@ -24,6 +24,8 @@ CREATE TABLE IF NOT EXISTS accounts (
     credit_limit DECIMAL(15, 2),
     used_limit DECIMAL(15, 2),
     initial_debt DECIMAL(15, 2),
+    opening_date VARCHAR(50),
+    opening_balance_entry_id VARCHAR(255),
     due_day INT,
     interest_rate DECIMAL(5, 2),
     min_payment DECIMAL(15, 2)
@@ -42,7 +44,41 @@ CREATE TABLE IF NOT EXISTS transactions (
     linked_debt_id VARCHAR(255),
     linked_debt_action VARCHAR(50),
     linked_investment_id VARCHAR(255),
-    linked_investment_action VARCHAR(50)
+    linked_investment_action VARCHAR(50),
+    linked_account_id VARCHAR(255),
+    debt_disbursement_mode VARCHAR(50),
+    debt_disbursement_coa_code VARCHAR(50),
+    reconciliation_evidence_reference TEXT,
+    reconciliation_evidence_confirmed_at VARCHAR(50),
+    reconciliation_actual_balance DECIMAL(15, 2),
+    reconciliation_recorded_balance DECIMAL(15, 2)
+);
+
+-- 3a. Double-entry journal entries and debit/credit lines
+CREATE TABLE IF NOT EXISTS journal_entries (
+    id VARCHAR(255) PRIMARY KEY,
+    user_id VARCHAR(255) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    transaction_id VARCHAR(255),
+    date VARCHAR(50) NOT NULL,
+    description TEXT NOT NULL,
+    source_type VARCHAR(50) NOT NULL,
+    evidence_reference TEXT,
+    evidence_confirmed_at VARCHAR(50),
+    reconciliation_actual_balance DECIMAL(15, 2)
+);
+
+CREATE TABLE IF NOT EXISTS journal_lines (
+    id VARCHAR(255) PRIMARY KEY,
+    user_id VARCHAR(255) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    journal_entry_id VARCHAR(255) NOT NULL REFERENCES journal_entries(id) ON DELETE CASCADE,
+    line_number INT NOT NULL,
+    coa_code VARCHAR(50) NOT NULL,
+    debit DECIMAL(15, 2) NOT NULL DEFAULT 0,
+    credit DECIMAL(15, 2) NOT NULL DEFAULT 0,
+    CONSTRAINT journal_lines_one_side_only CHECK (
+        debit >= 0 AND credit >= 0 AND ((debit > 0 AND credit = 0) OR (credit > 0 AND debit = 0) OR (debit = 0 AND credit = 0))
+    ),
+    CONSTRAINT journal_lines_entry_line_unique UNIQUE (journal_entry_id, line_number)
 );
 
 -- 4. Tabel Transaksi Berulang / Terjadwal (Recurring Transactions)
