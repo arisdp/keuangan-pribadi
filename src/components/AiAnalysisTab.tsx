@@ -11,6 +11,7 @@ import { OverlimitTrendChart } from './CreditOverlimitTrendAnalyzer';
 import { AiCategoryExpenseTrendChart } from './AiCategoryExpenseTrendChart';
 import { CashFlowProjectionCard } from './CashFlowProjectionCard';
 import { AnomalySmartCleanupCard } from './AnomalySmartCleanupCard';
+import { CategoryAnomalyTrendChart } from './CategoryAnomalyTrendChart';
 
 interface AiAnalysisTabProps {
   transactions: Transaction[];
@@ -207,6 +208,10 @@ export const AiAnalysisTab: React.FC<AiAnalysisTabProps> = ({
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<AIAnalysisResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [cleanupMonthFilter, setCleanupMonthFilter] = useState<{
+    ym: string;
+    nonce: number;
+  } | null>(null);
 
   // --- ANOMALY DETECTION STATES ---
   const [anomalyLoading, setAnomalyLoading] = useState(false);
@@ -851,12 +856,26 @@ export const AiAnalysisTab: React.FC<AiAnalysisTabProps> = ({
         debts={debts}
       />
 
+      {/* TREN ANOMALI PENGELUARAN PER KATEGORI & HEATMAP KEPARAHAN */}
+      <CategoryAnomalyTrendChart
+        transactions={transactions}
+        budgets={budgets}
+        onSelectMonthForCleanup={(ym) => {
+          setCleanupMonthFilter({ ym, nonce: Date.now() });
+          const targetEl = document.getElementById('anomaly-smart-cleanup-section');
+          if (targetEl) {
+            targetEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          }
+        }}
+      />
+
       {/* DETEKTOR ANOMALI PENGELUARAN (> +30%) & SMART CLEANUP */}
       <AnomalySmartCleanupCard
         transactions={transactions}
         budgets={budgets}
         accounts={accounts}
         masterCategories={masterCategories}
+        externalMonthFilter={cleanupMonthFilter}
         onReassignTransactionCategories={onReassignTransactionCategories}
         onBatchReassignTransactionCategories={onBatchReassignTransactionCategories}
       />

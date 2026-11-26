@@ -2378,12 +2378,22 @@ export default function App() {
       sourceLowerSet.has(String(t.category || '').trim().toLowerCase())
     ).length;
 
+    const changedAt = new Date().toISOString();
     setTransactions((prev) =>
-      prev.map((t) =>
-        sourceLowerSet.has(String(t.category || '').trim().toLowerCase())
-          ? { ...t, category: cleanTarget }
-          : t
-      )
+      prev.map((t) => {
+        const oldCat = String(t.category || '').trim();
+        if (!sourceLowerSet.has(oldCat.toLowerCase())) return t;
+        const nextHistory = [
+          ...(Array.isArray(t.categoryHistory) ? t.categoryHistory : []),
+          {
+            fromCategory: oldCat || 'Tanpa Kategori',
+            toCategory: cleanTarget,
+            changedAt,
+            source: 'Penggabungan Kategori AI',
+          },
+        ];
+        return { ...t, category: cleanTarget, categoryHistory: nextHistory };
+      })
     );
 
     setBudgets((prev) => {
@@ -2484,8 +2494,23 @@ export default function App() {
 
     if (matchedCount === 0) return;
 
+    const changedAt = new Date().toISOString();
     setTransactions((prev) =>
-      prev.map((t) => (idSet.has(t.id) ? { ...t, category: cleanTarget } : t))
+      prev.map((t) => {
+        if (!idSet.has(t.id)) return t;
+        const oldCat = String(t.category || '').trim() || 'Tanpa Kategori';
+        if (oldCat === cleanTarget) return t;
+        const nextHistory = [
+          ...(Array.isArray(t.categoryHistory) ? t.categoryHistory : []),
+          {
+            fromCategory: oldCat,
+            toCategory: cleanTarget,
+            changedAt,
+            source: 'Smart Cleanup',
+          },
+        ];
+        return { ...t, category: cleanTarget, categoryHistory: nextHistory };
+      })
     );
 
     showToast({
@@ -2526,10 +2551,23 @@ export default function App() {
 
     if (movedCount === 0) return;
 
+    const changedAt = new Date().toISOString();
     setTransactions((prev) =>
       prev.map((t) => {
         const nextTarget = txIdToTarget.get(t.id);
-        return nextTarget ? { ...t, category: nextTarget } : t;
+        if (!nextTarget) return t;
+        const oldCat = String(t.category || '').trim() || 'Tanpa Kategori';
+        if (oldCat === nextTarget) return t;
+        const nextHistory = [
+          ...(Array.isArray(t.categoryHistory) ? t.categoryHistory : []),
+          {
+            fromCategory: oldCat,
+            toCategory: nextTarget,
+            changedAt,
+            source: 'Smart Cleanup Massal',
+          },
+        ];
+        return { ...t, category: nextTarget, categoryHistory: nextHistory };
       })
     );
 

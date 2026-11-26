@@ -30,6 +30,7 @@ export interface Transaction {
   previousRateEffectiveDate?: string;
   coaDebitCode?: string;
   coaCreditCode?: string;
+  categoryHistory?: TransactionCategoryHistoryEntry[];
   linkedKprBreakdown?: {
     principalPart?: number;
     interestPart?: number;
@@ -37,6 +38,13 @@ export interface Transaction {
     interestCoaCode?: string;
     interestCategory?: string;
   };
+}
+
+export interface TransactionCategoryHistoryEntry {
+  fromCategory: string;
+  toCategory: string;
+  changedAt: string;
+  source?: string;
 }
 
 export interface RecurringTransaction {
