@@ -26,7 +26,10 @@ import {
   updateAccountMetadataAndStartingBalance,
 } from './utils/accountingEngine';
 import { secureStorage } from './utils/secureStorage';
-import { detectCategorySpendingAnomalies } from './utils/anomalyDetection';
+import {
+  detect7DayFrequencyVelocityAlerts,
+  detectCategorySpendingAnomalies,
+} from './utils/anomalyDetection';
 import { AnomalyTopSummaryTooltip } from './components/AnomalyTopSummaryTooltip';
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { 
@@ -2449,6 +2452,13 @@ export default function App() {
   );
 
   const [dismissedAnomalyKeys, setDismissedAnomalyKeys] = useState<Set<string>>(() => new Set());
+  const [dismissed7dAlertKeys, setDismissed7dAlertKeys] = useState<Set<string>>(() => new Set());
+  const [pendingSmartCleanupTarget, setPendingSmartCleanupTarget] = useState<{
+    category?: string;
+    startDate?: string;
+    endDate?: string;
+    nonce: number;
+  } | null>(null);
 
   const undismissedAnomalies = useMemo(
     () =>
@@ -2468,7 +2478,47 @@ export default function App() {
     });
   };
 
-  const handleOpenAiSmartCleanup = () => {
+  const sevenDayVelocityResult = useMemo(
+    () => detect7DayFrequencyVelocityAlerts({ transactions }),
+    [transactions]
+  );
+
+  const undismissed7dAlerts = useMemo(
+    () =>
+      sevenDayVelocityResult.alerts.filter(
+        (item) => !dismissed7dAlertKeys.has(item.alertKey)
+      ),
+    [sevenDayVelocityResult.alerts, dismissed7dAlertKeys]
+  );
+
+  const handleDismiss7dAlerts = () => {
+    setDismissed7dAlertKeys((prev) => {
+      const next = new Set(prev);
+      sevenDayVelocityResult.alerts.forEach((item) => {
+        next.add(item.alertKey);
+      });
+      return next;
+    });
+  };
+
+  const handleOpenAiSmartCleanup = (target?: {
+    category?: string;
+    startDate?: string;
+    endDate?: string;
+  }) => {
+    if (target && (target.category || (target.startDate && target.endDate))) {
+      setPendingSmartCleanupTarget({
+        category: target.category,
+        startDate: target.startDate,
+        endDate: target.endDate,
+        nonce: Date.now(),
+      });
+    } else {
+      setPendingSmartCleanupTarget({
+        category: undefined,
+        nonce: Date.now(),
+      });
+    }
     setActiveTab('ai-analysis');
     setMobileMenuOpen(false);
     window.setTimeout(() => {
@@ -3247,6 +3297,9 @@ export default function App() {
                     anomalyDetection={anomalyDetectionResult}
                     hasUndismissedAnomalies={undismissedAnomalies.length > 0}
                     onDismissAnomalies={handleDismissAnomalies}
+                    sevenDayVelocityResult={sevenDayVelocityResult}
+                    hasUndismissed7dAlerts={undismissed7dAlerts.length > 0}
+                    onDismiss7dAlerts={handleDismiss7dAlerts}
                     onOpenSmartCleanup={handleOpenAiSmartCleanup}
                     onQuickAction={(tab) => {
                       setActiveTab(tab);
@@ -3430,6 +3483,7 @@ export default function App() {
                     emergencyBalance={totalEmergencyBalance}
                     investments={investments}
                     masterCategories={masterCategories}
+                    externalCleanupTarget={pendingSmartCleanupTarget}
                     onApplyBudgetSuggestion={handleApplyBudgetSuggestion}
                     onConsolidateCategories={handleConsolidateCategories}
                     onReassignTransactionCategories={handleReassignTransactionCategories}

@@ -12,6 +12,8 @@ import { AiCategoryExpenseTrendChart } from './AiCategoryExpenseTrendChart';
 import { CashFlowProjectionCard } from './CashFlowProjectionCard';
 import { AnomalySmartCleanupCard } from './AnomalySmartCleanupCard';
 import { CategoryAnomalyTrendChart } from './CategoryAnomalyTrendChart';
+import { AnomalyDistributionPieChart } from './AnomalyDistributionPieChart';
+import { AnomalyHistoryChatBox } from './AnomalyHistoryChatBox';
 
 interface AiAnalysisTabProps {
   transactions: Transaction[];
@@ -23,6 +25,12 @@ interface AiAnalysisTabProps {
   emergencyBalance: number;
   investments: InvestmentAsset[];
   masterCategories?: CategoryNode[];
+  externalCleanupTarget?: {
+    category?: string;
+    startDate?: string;
+    endDate?: string;
+    nonce: number;
+  } | null;
   onApplyBudgetSuggestion: (category: string, recommendedLimit: number) => void;
   onConsolidateCategories?: (sourceCategories: string[], targetCategory: string) => void;
   onReassignTransactionCategories?: (transactionIds: string[], targetCategory: string) => void;
@@ -194,6 +202,7 @@ export const AiAnalysisTab: React.FC<AiAnalysisTabProps> = ({
   emergencyBalance,
   investments = [],
   masterCategories = [],
+  externalCleanupTarget = null,
   onApplyBudgetSuggestion,
   onConsolidateCategories,
   onReassignTransactionCategories,
@@ -212,6 +221,17 @@ export const AiAnalysisTab: React.FC<AiAnalysisTabProps> = ({
     ym: string;
     nonce: number;
   } | null>(null);
+  const [cleanupCategoryFilter, setCleanupCategoryFilter] = useState<{
+    category?: string;
+    startDate?: string;
+    endDate?: string;
+    nonce: number;
+  } | null>(null);
+
+  React.useEffect(() => {
+    if (!externalCleanupTarget) return;
+    setCleanupCategoryFilter(externalCleanupTarget);
+  }, [externalCleanupTarget]);
 
   // --- ANOMALY DETECTION STATES ---
   const [anomalyLoading, setAnomalyLoading] = useState(false);
@@ -869,6 +889,25 @@ export const AiAnalysisTab: React.FC<AiAnalysisTabProps> = ({
         }}
       />
 
+      {/* DISTRIBUSI PROPORSI ANOMALI BERDASARKAN KATEGORI UTAMA & INSIGHT OTOMATIS */}
+      <AnomalyDistributionPieChart
+        transactions={transactions}
+        masterCategories={masterCategories}
+      />
+
+      {/* CHAT BOX MINIMALIS: TANYA RIWAYAT ANOMALI BERBASIS DATA TRANSAKSI */}
+      <AnomalyHistoryChatBox
+        transactions={transactions}
+        budgets={budgets}
+        onFilterCategoryInCleanup={(category) => {
+          setCleanupCategoryFilter({ category, nonce: Date.now() });
+          const targetEl = document.getElementById('anomaly-smart-cleanup-section');
+          if (targetEl) {
+            targetEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          }
+        }}
+      />
+
       {/* DETEKTOR ANOMALI PENGELUARAN (> +30%) & SMART CLEANUP */}
       <AnomalySmartCleanupCard
         transactions={transactions}
@@ -876,6 +915,7 @@ export const AiAnalysisTab: React.FC<AiAnalysisTabProps> = ({
         accounts={accounts}
         masterCategories={masterCategories}
         externalMonthFilter={cleanupMonthFilter}
+        externalCategoryFilter={cleanupCategoryFilter}
         onReassignTransactionCategories={onReassignTransactionCategories}
         onBatchReassignTransactionCategories={onBatchReassignTransactionCategories}
       />

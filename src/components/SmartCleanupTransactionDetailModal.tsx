@@ -22,6 +22,11 @@ interface SmartCleanupTransactionDetailModalProps {
   anomalyCategory: string;
   recommendedTarget: string;
   selectedTargetCategory: string;
+  aiSuggestion?: {
+    suggestedCategory: string;
+    confidence: 'high' | 'medium' | 'low';
+    rationale: string;
+  };
   account?: Account;
   isSelectedForCleanup: boolean;
   onToggleSelectForCleanup: () => void;
@@ -77,6 +82,7 @@ export const SmartCleanupTransactionDetailModal: React.FC<
   anomalyCategory,
   recommendedTarget,
   selectedTargetCategory,
+  aiSuggestion,
   account,
   isSelectedForCleanup,
   onToggleSelectForCleanup,
@@ -263,6 +269,30 @@ export const SmartCleanupTransactionDetailModal: React.FC<
               </div>
             )}
           </div>
+
+          {aiSuggestion && (
+            <div className="p-3.5 rounded-xl border border-blue-200 dark:border-blue-800/70 bg-blue-50/50 dark:bg-blue-950/20 space-y-1">
+              <div className="flex flex-wrap items-center gap-2 font-bold text-slate-900 dark:text-slate-100">
+                <span>Suggested Category (AI):</span>
+                <span className="text-blue-700 dark:text-blue-300">
+                  {aiSuggestion.suggestedCategory}
+                </span>
+                <span aria-hidden="true" className="text-slate-400">
+                  ·
+                </span>
+                <span className="text-[11px] font-semibold text-slate-600 dark:text-slate-300">
+                  {aiSuggestion.confidence === 'high'
+                    ? 'Keyakinan Tinggi'
+                    : aiSuggestion.confidence === 'low'
+                    ? 'Keyakinan Rendah'
+                    : 'Keyakinan Sedang'}
+                </span>
+              </div>
+              <p className="text-slate-600 dark:text-slate-300 leading-relaxed">
+                {aiSuggestion.rationale}
+              </p>
+            </div>
+          )}
 
           {/* Cleanup Selection & Single-Transaction Action */}
           <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">

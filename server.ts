@@ -1881,6 +1881,576 @@ Tugas:
     }
   });
 
+  // 13. AI Suggested Category for Smart Cleanup Anomalies (gemini-4-hydrogen)
+  app.post("/api/smart-cleanup-suggest-categories", async (req, res) => {
+    try {
+      const { anomalies, availableCategories, budgetHints } = req.body || {};
+
+      if (!Array.isArray(anomalies) || anomalies.length === 0) {
+        return res.status(400).json({
+          error: "Daftar kategori anomali diperlukan untuk meminta saran kategori AI.",
+        });
+      }
+
+      const cleanedCategories: string[] = Array.isArray(availableCategories)
+        ? Array.from(
+            new Set(
+              availableCategories
+                .map((c: unknown) => String(c || "").trim())
+                .filter(Boolean)
+            )
+          )
+        : [];
+
+      if (cleanedCategories.length === 0) {
+        return res.status(400).json({
+          error: "Daftar kategori master tujuan tidak tersedia.",
+        });
+      }
+
+      const apiKey = process.env.GEMINI_API_KEY?.trim();
+      if (!apiKey) {
+        return res.status(503).json({
+          error:
+            "Kunci API Gemini belum terkonfigurasi di server. Tambahkan GEMINI_API_KEY di Settings > Secrets untuk mengaktifkan saran kategori AI.",
+        });
+      }
+
+      const ai = new GoogleGenAI({
+        apiKey,
+        httpOptions: {
+          headers: { "User-Agent": "aistudio-build" },
+        },
+      });
+
+      const compactAnomalies = anomalies.slice(0, 12).map((anom: any) => ({
+        anomalyCategory: String(anom?.anomalyCategory || "").trim(),
+        increasePct: Number(anom?.increasePct) || 0,
+        currentMonthAmount: Number(anom?.currentMonthAmount) || 0,
+        threeMonthAvgAmount: Number(anom?.threeMonthAvgAmount) || 0,
+        transactions: Array.isArray(anom?.transactions)
+          ? anom.transactions.slice(0, 25).map((tx: any) => ({
+              id: String(tx?.id || ""),
+              description: String(tx?.description || "").trim() || "(Tanpa deskripsi)",
+              amount: Number(tx?.amount) || 0,
+              date: String(tx?.date || ""),
+              accountName: String(tx?.accountName || ""),
+            }))
+          : [],
+      }));
+
+      const compactBudgetHints = Array.isArray(budgetHints)
+        ? budgetHints.slice(0, 30).map((b: any) => ({
+            category: String(b?.category || "").trim(),
+            limit: Number(b?.limit) || 0,
+            spent: Number(b?.spent) || 0,
+            headroom: Math.max(0, (Number(b?.limit) || 0) - (Number(b?.spent) || 0)),
+          }))
+        : [];
+
+      const prompt = `Anda adalah asisten klasifikasi akuntansi dan keuangan pribadi Indonesia.
+Tugas Anda adalah menganalisis transaksi pemicu lonjakan pengeluaran (> +30%) di setiap kelompok anomali pada Smart Cleanup, lalu menyarankan kategori tujuan ('Suggested Category') yang PALING TEPAT berdasarkan deskripsi transaksi sebenarnya.
+
+Daftar Kategori Tujuan Resmi yang Diizinkan (PILIH PERSIS salah satu nama di bawah ini dan JANGAN sama dengan anomalyCategory asal):
+${JSON.stringify(cleanedCategories)}
+
+Informasi Pagu & Sisa Budget Kategori (opsional sebagai pertimbangan ruang anggaran):
+${JSON.stringify(compactBudgetHints)}
+
+Kelompok Anomali & Transaksi Pemicu:
+${JSON.stringify(compactAnomalies, null, 2)}
+
+Aturan Ketat:
+1. Untuk setiap \`anomalyCategory\` pada input, pilih TEPAT 1 \`suggestedCategory\` dari daftar Kategori Tujuan Resmi di atas yang paling sesuai secara semantik dengan deskripsi transaksi pemicu (misalnya merchant PLN/PDAM/WiFi -> Utilitas & Tagihan; Gojek/Pertamina/Tol -> Transportasi; Tokopedia/Shopee -> Belanja Online; Apotek/RS/Klinik -> Kesehatan; dsb.).
+2. Jangan memilih kategori yang persis sama dengan \`anomalyCategory\` asal.
+3. Dalam \`recommendedTxIds\`, cantumkan hanya ID transaksi dari kelompok tersebut yang deskripsinya paling cocok untuk dipindahkan ke \`suggestedCategory\` (minimal 1 ID jika ada transaksi).
+4. Tuliskan \`rationale\` singkat (1 kalimat dalam Bahasa Indonesia) yang menyebut contoh kata kunci/deskripsi transaksi nyata yang menjadi dasar saran.
+5. Tentukan \`confidence\` ('high', 'medium', atau 'low').`;
+
+      const response = await ai.models.generateContent({
+        model: "gemini-4-hydrogen",
+        contents: prompt,
+        config: {
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                anomalyCategory: {
+                  type: Type.STRING,
+                  description: "Nama kategori asal dari input kelompok anomali.",
+                },
+                suggestedCategory: {
+                  type: Type.STRING,
+                  description:
+                    "Nama kategori tujuan terbaik yang dipilih persis dari daftar availableCategories.",
+                },
+                confidence: {
+                  type: Type.STRING,
+                  description: "Tingkat keyakinan AI: 'high', 'medium', atau 'low'.",
+                },
+                rationale: {
+                  type: Type.STRING,
+                  description:
+                    "Alasan singkat 1 kalimat Bahasa Indonesia berdasarkan deskripsi transaksi.",
+                },
+                recommendedTxIds: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
+                  description:
+                    "Daftar ID transaksi dari kelompok tersebut yang disarankan dipindahkan.",
+                },
+              },
+              required: [
+                "anomalyCategory",
+                "suggestedCategory",
+                "confidence",
+                "rationale",
+                "recommendedTxIds",
+              ],
+            },
+          },
+        },
+      });
+
+      const rawText = (response.text || "").trim();
+      if (!rawText) {
+        return res.status(502).json({
+          error: "Model AI tidak mengembalikan saran kategori. Silakan coba lagi.",
+        });
+      }
+
+      const parsedRaw = JSON.parse(rawText);
+      const parsedArray = Array.isArray(parsedRaw) ? parsedRaw : [];
+
+      const canonicalCatMap = new Map<string, string>();
+      cleanedCategories.forEach((cat) => canonicalCatMap.set(cat.toLowerCase(), cat));
+
+      const normalizedSuggestions = compactAnomalies.map((inputGroup) => {
+        const inputCatLower = inputGroup.anomalyCategory.toLowerCase();
+        const validTxIdSet = new Set(inputGroup.transactions.map((t) => t.id));
+        const match = parsedArray.find(
+          (item: any) =>
+            String(item?.anomalyCategory || "").trim().toLowerCase() === inputCatLower
+        );
+
+        const rawSuggested = String(match?.suggestedCategory || "").trim();
+        let resolvedSuggested = canonicalCatMap.get(rawSuggested.toLowerCase()) || "";
+
+        if (!resolvedSuggested || resolvedSuggested.toLowerCase() === inputCatLower) {
+          resolvedSuggested =
+            cleanedCategories.find(
+              (c) =>
+                c.toLowerCase() !== inputCatLower &&
+                rawSuggested &&
+                (c.toLowerCase().includes(rawSuggested.toLowerCase()) ||
+                  rawSuggested.toLowerCase().includes(c.toLowerCase()))
+            ) ||
+            cleanedCategories.find((c) => c.toLowerCase() !== inputCatLower) ||
+            cleanedCategories[0];
+        }
+
+        const rawConf = String(match?.confidence || "medium").toLowerCase();
+        const confidence =
+          rawConf === "high" || rawConf === "low" ? rawConf : "medium";
+
+        const filteredTxIds = Array.isArray(match?.recommendedTxIds)
+          ? match.recommendedTxIds
+              .map((id: unknown) => String(id || ""))
+              .filter((id: string) => validTxIdSet.has(id))
+          : [];
+
+        return {
+          anomalyCategory: inputGroup.anomalyCategory,
+          suggestedCategory: resolvedSuggested,
+          confidence,
+          rationale:
+            String(match?.rationale || "").trim() ||
+            `Berdasarkan deskripsi transaksi, kategori "${resolvedSuggested}" paling sesuai untuk pos ini.`,
+          recommendedTxIds:
+            filteredTxIds.length > 0
+              ? filteredTxIds
+              : inputGroup.transactions.slice(0, 1).map((t) => t.id),
+        };
+      });
+
+      return res.json({
+        suggestions: normalizedSuggestions,
+        generatedAt: new Date().toLocaleTimeString("id-ID", {
+          hour: "2-digit",
+          minute: "2-digit",
+        }),
+      });
+    } catch (error: any) {
+      console.error("[AI Smart Cleanup Suggest Categories Error]:", error);
+      const status =
+        typeof error?.status === "number" && error.status >= 400
+          ? error.status
+          : 500;
+      return res.status(status).json({
+        error:
+          error?.message ||
+          "Gagal meminta saran kategori AI dari layanan Gemini.",
+      });
+    }
+  });
+
+  // 14. AI Automatic Insights for Top Problematic Main Anomaly Categories (gemini-4-hydrogen)
+  app.post("/api/anomaly-auto-insights", async (req, res) => {
+    try {
+      const { periodLabel, metricMode, monthCount, topCategories } = req.body || {};
+
+      if (!Array.isArray(topCategories) || topCategories.length === 0) {
+        return res.status(400).json({
+          error: "Data kategori anomali teratas diperlukan untuk membuat Insight Otomatis.",
+        });
+      }
+
+      const apiKey = process.env.GEMINI_API_KEY?.trim();
+      if (!apiKey) {
+        return res.status(503).json({
+          error:
+            "Kunci API Gemini belum terkonfigurasi di server. Tambahkan GEMINI_API_KEY di Settings > Secrets untuk mengaktifkan Insight Otomatis AI.",
+        });
+      }
+
+      const ai = new GoogleGenAI({
+        apiKey,
+        httpOptions: {
+          headers: { "User-Agent": "aistudio-build" },
+        },
+      });
+
+      const compactTopCategories = topCategories.slice(0, 3).map((cat: any) => ({
+        mainCategory: String(cat?.mainCategory || "").trim() || "Lainnya",
+        spikeCount: Math.max(1, Number(cat?.spikeCount) || 1),
+        totalExcessAmount: Math.max(0, Math.round(Number(cat?.totalExcessAmount) || 0)),
+        maxSpikePct: Math.max(0, Math.round(Number(cat?.maxSpikePct) || 0)),
+        sharePct: Math.max(0, Number(cat?.sharePct) || 0),
+        subCategories: Array.isArray(cat?.subCategories)
+          ? cat.subCategories.slice(0, 5).map((sub: any) => ({
+              category: String(sub?.category || "").trim(),
+              spikeCount: Number(sub?.spikeCount) || 0,
+              totalExcessAmount: Math.round(Number(sub?.totalExcessAmount) || 0),
+              peakSpikePct: Math.round(Number(sub?.peakSpikePct) || 0),
+            }))
+          : [],
+        sampleTransactions: Array.isArray(cat?.sampleTransactions)
+          ? cat.sampleTransactions.slice(0, 5).map((tx: any) => ({
+              description: String(tx?.description || "").trim() || "(Tanpa deskripsi)",
+              amount: Math.round(Number(tx?.amount) || 0),
+              category: String(tx?.category || "").trim(),
+              date: String(tx?.date || ""),
+            }))
+          : [],
+      }));
+
+      const resolvedMonths = Math.max(1, Math.min(12, Number(monthCount) || 6));
+      const metricDescription =
+        metricMode === "excess"
+          ? "nominal selisih lonjakan terbesar"
+          : "frekuensi kejadian anomali terbanyak";
+
+      const prompt = `Anda adalah perencana keuangan pribadi profesional di Indonesia.
+Analisis ${compactTopCategories.length} kategori utama pengeluaran yang paling sering mengalami anomali (> +30% di atas rata-rata 3 bulan) pada periode "${String(periodLabel || "6 Bulan Terakhir")}" (diurutkan berdasarkan ${metricDescription}).
+
+Data Kategori Utama Bermasalah:
+${JSON.stringify(compactTopCategories, null, 2)}
+
+Tugas Anda:
+1. Tulis \`executiveSummary\` (1-2 kalimat ringkas dalam Bahasa Indonesia) yang merangkum pola kebocoran utama pada periode ini.
+2. Untuk SETIAP \`mainCategory\` di atas (urutkan tetap sesuai input, maksimal 3 item), hasilkan:
+   - \`mainCategory\`: nama persis dari input.
+   - \`priorityLevel\`: 'high' jika porsi/lonjakannya sangat dominan atau berulang tinggi, atau 'medium' jika moderat.
+   - \`monthlySavingsTarget\`: angka bulat Rupiah yang realistis untuk ditekan per bulan (berkisar 30%-70% dari rata-rata kelebihan bulanan \`totalExcessAmount / ${resolvedMonths}\`, dibulatkan ke kelipatan Rp 10.000, minimal Rp 50.000 jika terdapat lonjakan).
+   - \`rootCauseHint\`: 1 kalimat tajam yang menyebut sub-kategori atau pola deskripsi transaksi nyata pemicu lonjakan.
+   - \`actionSteps\`: tepat 2 atau 3 langkah tindakan praktis & spesifik (bukan nasihat klise) untuk menekan pengeluaran pada kategori tersebut bulan depan.`;
+
+      const response = await ai.models.generateContent({
+        model: "gemini-4-hydrogen",
+        contents: prompt,
+        config: {
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              executiveSummary: {
+                type: Type.STRING,
+                description:
+                  "Ringkasan 1-2 kalimat mengenai kategori paling bermasalah pada periode ini.",
+              },
+              insights: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    mainCategory: {
+                      type: Type.STRING,
+                      description: "Nama kategori utama persis seperti pada input.",
+                    },
+                    priorityLevel: {
+                      type: Type.STRING,
+                      description: "Tingkat prioritas penanganan: 'high' atau 'medium'.",
+                    },
+                    monthlySavingsTarget: {
+                      type: Type.NUMBER,
+                      description:
+                        "Target penghematan bulanan yang realistis dalam angka Rupiah.",
+                    },
+                    rootCauseHint: {
+                      type: Type.STRING,
+                      description:
+                        "1 kalimat identifikasi penyebab berdasarkan sub-kategori dan transaksi pemicu.",
+                    },
+                    actionSteps: {
+                      type: Type.ARRAY,
+                      items: { type: Type.STRING },
+                      description:
+                        "2 sampai 3 langkah aksi konkret untuk menekan pengeluaran kategori ini.",
+                    },
+                  },
+                  required: [
+                    "mainCategory",
+                    "priorityLevel",
+                    "monthlySavingsTarget",
+                    "rootCauseHint",
+                    "actionSteps",
+                  ],
+                },
+              },
+            },
+            required: ["executiveSummary", "insights"],
+          },
+        },
+      });
+
+      const rawText = (response.text || "").trim();
+      if (!rawText) {
+        return res.status(502).json({
+          error: "Model AI tidak mengembalikan Insight Otomatis. Silakan coba lagi.",
+        });
+      }
+
+      const parsed = JSON.parse(rawText);
+      const rawInsights = Array.isArray(parsed?.insights) ? parsed.insights : [];
+
+      const normalizedInsights = compactTopCategories.map((inputCat, idx) => {
+        const match =
+          rawInsights.find(
+            (item: any) =>
+              String(item?.mainCategory || "").trim().toLowerCase() ===
+              inputCat.mainCategory.toLowerCase()
+          ) || rawInsights[idx];
+
+        const rawTarget = Number(match?.monthlySavingsTarget);
+        const avgMonthlyExcess = Math.max(
+          50000,
+          Math.round(inputCat.totalExcessAmount / resolvedMonths)
+        );
+        const fallbackTarget = Math.max(
+          50000,
+          Math.round((avgMonthlyExcess * 0.5) / 10000) * 10000
+        );
+        const monthlySavingsTarget =
+          Number.isFinite(rawTarget) && rawTarget > 0
+            ? Math.max(10000, Math.round(rawTarget / 10000) * 10000)
+            : fallbackTarget;
+
+        const priorityLevel =
+          String(match?.priorityLevel || "").toLowerCase() === "medium" &&
+          idx > 0
+            ? "medium"
+            : idx === 0 || String(match?.priorityLevel || "").toLowerCase() === "high"
+            ? "high"
+            : "medium";
+
+        const actionSteps = Array.isArray(match?.actionSteps)
+          ? match.actionSteps
+              .map((s: unknown) => String(s || "").trim())
+              .filter(Boolean)
+              .slice(0, 3)
+          : [];
+
+        return {
+          mainCategory: inputCat.mainCategory,
+          priorityLevel,
+          monthlySavingsTarget,
+          rootCauseHint:
+            String(match?.rootCauseHint || "").trim() ||
+            `Lonjakan dipicu terutama oleh pos ${
+              inputCat.subCategories[0]?.category || inputCat.mainCategory
+            }.`,
+          actionSteps:
+            actionSteps.length > 0
+              ? actionSteps
+              : [
+                  `Tetapkan batas mingguan khusus untuk ${inputCat.mainCategory} agar pengeluaran tetap terkendali.`,
+                  "Tinjau ulang transaksi berulang atau pembelian impulsif di atas rata-rata 3 bulan.",
+                ],
+        };
+      });
+
+      return res.json({
+        executiveSummary:
+          String(parsed?.executiveSummary || "").trim() ||
+          `Kategori ${compactTopCategories[0].mainCategory} menjadi penyumbang anomali tertinggi pada periode ${String(
+            periodLabel || "terpilih"
+          )}.`,
+        insights: normalizedInsights,
+        generatedAt: new Date().toLocaleTimeString("id-ID", {
+          hour: "2-digit",
+          minute: "2-digit",
+        }),
+      });
+    } catch (error: any) {
+      console.error("[AI Anomaly Auto Insights Error]:", error);
+      const status =
+        typeof error?.status === "number" && error.status >= 400
+          ? error.status
+          : 500;
+      return res.status(status).json({
+        error:
+          error?.message ||
+          "Gagal menghasilkan Insight Otomatis AI dari layanan Gemini.",
+      });
+    }
+  });
+
+  // 15. AI Historical Anomaly Investigation Chat (gemini-4-hydrogen)
+  app.post("/api/anomaly-history-chat", async (req, res) => {
+    try {
+      const { messages, historyContext } = req.body || {};
+
+      if (!Array.isArray(messages) || messages.length === 0) {
+        return res.status(400).json({
+          error: "Pertanyaan percakapan diperlukan untuk menganalisis riwayat anomali.",
+        });
+      }
+
+      const apiKey = process.env.GEMINI_API_KEY?.trim();
+      if (!apiKey) {
+        return res.status(503).json({
+          error:
+            "Kunci API Gemini belum terkonfigurasi di server. Tambahkan GEMINI_API_KEY di Settings > Secrets untuk mengaktifkan chat analisis historis AI.",
+        });
+      }
+
+      const ai = new GoogleGenAI({
+        apiKey,
+        httpOptions: {
+          headers: { "User-Agent": "aistudio-build" },
+        },
+      });
+
+      const recentMessages = messages.slice(-8).map((m: any) => ({
+        role: m?.role === "assistant" ? "assistant" : "user",
+        text: String(m?.text || "").trim().slice(0, 1200),
+      }));
+
+      const latestUserMessage =
+        [...recentMessages].reverse().find((m) => m.role === "user")?.text || "";
+      if (!latestUserMessage) {
+        return res.status(400).json({
+          error: "Pesan pertanyaan tidak boleh kosong.",
+        });
+      }
+
+      const safeContext = historyContext && typeof historyContext === "object"
+        ? historyContext
+        : { categoryProfiles: [], active7DayAlerts: [] };
+
+      const systemInstruction = `Anda adalah analis keuangan pribadi Indonesia yang menjawab pertanyaan pengguna tentang alasan terjadinya anomali pengeluaran (> +30% dibanding rata-rata 3 bulan) dan lonjakan 7 hari terakhir.
+
+Aturan Ketat:
+1. Jawab HANYA berdasarkan data historis transaksi pengguna yang diberikan di bawah ini. JANGAN mengarang angka, tanggal, atau nama merchant yang tidak ada di data.
+2. Jika pengguna menanyakan kategori yang tidak mengalami anomali atau datanya tidak mencukupi dalam riwayat, sampaikan secara jujur berdasarkan data historis yang tercatat.
+3. Sertakan bukti spesifik dalam jawaban (sebutkan bulan terjadinya lonjakan, persentase lonjakan, rata-rata 3 bulan vs nominal aktual, nama deskripsi/merchant yang sering berulang, dan perbandingan dengan pagu anggaran jika ada).
+4. Tulis jawaban ringkas, tajam, dan terstruktur dalam Bahasa Indonesia (maksimal 3-5 kalimat atau poin singkat yang mudah dipindai; hindari basa-basi panjang).`;
+
+      const contentsPayload = `Konteks Historis Transaksi Pengguna (12 Bulan Terakhir & Peringatan 7 Hari):
+${JSON.stringify(safeContext, null, 2)}
+
+Riwayat Percakapan Terkini:
+${recentMessages
+  .map((m) => `${m.role === "user" ? "Pengguna" : "Analis AI"}: ${m.text}`)
+  .join("\n")}
+
+Jawab pertanyaan terbaru pengguna secara akurat dan berbasis bukti historis di atas.`;
+
+      const response = await ai.models.generateContent({
+        model: "gemini-4-hydrogen",
+        contents: contentsPayload,
+        config: {
+          systemInstruction,
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              answer: {
+                type: Type.STRING,
+                description:
+                  "Penjelasan berbasis data historis transaksi dalam Bahasa Indonesia yang ringkas, jelas, dan faktual.",
+              },
+              citedCategories: {
+                type: Type.ARRAY,
+                items: { type: Type.STRING },
+                description:
+                  "Daftar nama kategori yang dibahas dalam jawaban persis sesuai data historis.",
+              },
+            },
+            required: ["answer", "citedCategories"],
+          },
+        },
+      });
+
+      const rawText = (response.text || "").trim();
+      if (!rawText) {
+        return res.status(502).json({
+          error: "Model AI tidak mengembalikan jawaban. Silakan coba lagi.",
+        });
+      }
+
+      const parsed = JSON.parse(rawText);
+      const answer = String(parsed?.answer || "").trim();
+      if (!answer) {
+        return res.status(502).json({
+          error: "Jawaban AI kosong. Silakan ulangi pertanyaan Anda.",
+        });
+      }
+
+      const citedCategories = Array.isArray(parsed?.citedCategories)
+        ? parsed.citedCategories
+            .map((c: unknown) => String(c || "").trim())
+            .filter(Boolean)
+            .slice(0, 5)
+        : [];
+
+      return res.json({
+        answer,
+        citedCategories,
+        timestamp: new Date().toLocaleTimeString("id-ID", {
+          hour: "2-digit",
+          minute: "2-digit",
+        }),
+      });
+    } catch (error: any) {
+      console.error("[AI Anomaly History Chat Error]:", error);
+      const status =
+        typeof error?.status === "number" && error.status >= 400
+          ? error.status
+          : 500;
+      return res.status(status).json({
+        error:
+          error?.message ||
+          "Gagal memproses pertanyaan riwayat anomali melalui layanan Gemini.",
+      });
+    }
+  });
+
   // Vite integration
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({

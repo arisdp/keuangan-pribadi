@@ -6,8 +6,9 @@ import { TaxCalculatorCard } from './TaxCalculatorCard';
 import { DashboardFinancialHealthPanel } from './DashboardFinancialHealthPanel';
 import { DashboardHealthScannerCard } from './DashboardHealthScannerCard';
 import { DashboardAnomalyAlertBanner } from './DashboardAnomalyAlertBanner';
+import { Dashboard7DayVelocityAlertBanner } from './Dashboard7DayVelocityAlertBanner';
 import { SavingsAchievementCard } from './SavingsAchievementCard';
-import { CategoryAnomalyDetectionResult } from '../utils/anomalyDetection';
+import { CategoryAnomalyDetectionResult, SevenDayVelocityAlertResult } from '../utils/anomalyDetection';
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell, ReferenceLine } from 'recharts';
 import { TrendingUp, TrendingDown, Wallet, ShieldAlert, CreditCard, PiggyBank, ArrowRight, CheckCircle2, AlertTriangle, Calendar, ChevronLeft, ChevronRight, ChevronDown, ArrowUpRight, ArrowDownRight, Info, Eye, EyeOff, Percent, ArrowDown, Sparkles, Lightbulb, Target, Plus, Trash2, Edit2, Clock, Bell, DollarSign, X, RefreshCw, Activity, BarChart3, Table, GitCommit, Scale, FileCheck, ShieldCheck, Building2 } from 'lucide-react';
 import {
@@ -1638,7 +1639,14 @@ interface DashboardTabProps {
   anomalyDetection?: CategoryAnomalyDetectionResult;
   hasUndismissedAnomalies?: boolean;
   onDismissAnomalies?: () => void;
-  onOpenSmartCleanup?: () => void;
+  sevenDayVelocityResult?: SevenDayVelocityAlertResult;
+  hasUndismissed7dAlerts?: boolean;
+  onDismiss7dAlerts?: () => void;
+  onOpenSmartCleanup?: (target?: {
+    category?: string;
+    startDate?: string;
+    endDate?: string;
+  }) => void;
 }
 
 export const DashboardTab: React.FC<DashboardTabProps> = ({
@@ -1661,6 +1669,9 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
   anomalyDetection,
   hasUndismissedAnomalies = false,
   onDismissAnomalies,
+  sevenDayVelocityResult,
+  hasUndismissed7dAlerts = false,
+  onDismiss7dAlerts,
   onOpenSmartCleanup,
 }) => {
   // Dynamically calculate actual date from system
@@ -2986,6 +2997,30 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
           </button>
         </div>
       </motion.div>
+
+      {/* PERINGATAN DINI: PENINGKATAN FREKUENSI ANOMALI 7 HARI TERAKHIR */}
+      {hasUndismissed7dAlerts &&
+        sevenDayVelocityResult &&
+        sevenDayVelocityResult.alerts.length > 0 && (
+          <motion.div variants={cardVariants}>
+            <Dashboard7DayVelocityAlertBanner
+              velocityResult={sevenDayVelocityResult}
+              isFocusMode={isFocusMode}
+              onOpenCategoryInSmartCleanup={(category) => {
+                if (onOpenSmartCleanup) {
+                  onOpenSmartCleanup({
+                    category,
+                    startDate: sevenDayVelocityResult.windowStartDate,
+                    endDate: sevenDayVelocityResult.windowEndDate,
+                  });
+                } else {
+                  onQuickAction('ai-analysis');
+                }
+              }}
+              onDismiss={() => onDismiss7dAlerts?.()}
+            />
+          </motion.div>
+        )}
 
       {/* BANNER PERINGATAN ANOMALI PENGELUARAN (>30% DI ATAS RATA-RATA 3 BULAN) */}
       {hasUndismissedAnomalies && anomalyDetection && anomalyDetection.anomalies.length > 0 && (

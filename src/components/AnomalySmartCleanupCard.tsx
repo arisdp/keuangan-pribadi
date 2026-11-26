@@ -12,27 +12,44 @@ import {
   Info,
   Calendar,
   RotateCcw,
+  Loader2,
+  Wand2,
+  X,
+  LayoutGrid,
+  List,
 } from 'lucide-react';
 import { CategoryNode } from '../categoryHierarchy';
 import { Account, CategoryBudget, Transaction } from '../types';
 import {
   AnomalyDateRangeFilter,
+  Category30DaySparklineSummary,
   DetectedCategoryAnomaly,
   TriggerTransactionItem,
+  buildCategory30DaySparkline,
   detectCategorySpendingAnomalies,
   formatAnomalyMonthLabelID,
   getAvailableExpenseMonths,
   getMasterExpenseCategoryNames,
   getMonthDateRange,
   getQuarterDateRange,
+  resolveSparklineAnchorDate,
 } from '../utils/anomalyDetection';
 import { toLocalYYYYMMDD } from '../utils/accountingEngine';
 import { formatterIDR } from '../utils/formatters';
+import { CategorySpikeSparkline } from './CategorySpikeSparkline';
 import { SmartCleanupTransactionDetailModal } from './SmartCleanupTransactionDetailModal';
 
 interface BatchCategoryAssignment {
   transactionIds: string[];
   targetCategory: string;
+}
+
+interface AiCategorySuggestion {
+  suggestedCategory: string;
+  confidence: 'high' | 'medium' | 'low';
+  rationale: string;
+  recommendedTxIds: string[];
+  generatedAt: string;
 }
 
 type SmartCleanupPeriodMode = 'latest' | 'month' | 'quarter' | 'custom';
@@ -43,6 +60,12 @@ interface AnomalySmartCleanupCardProps {
   accounts?: Account[];
   masterCategories?: CategoryNode[];
   externalMonthFilter?: { ym: string; nonce: number } | null;
+  externalCategoryFilter?: {
+    category?: string;
+    startDate?: string;
+    endDate?: string;
+    nonce: number;
+  } | null;
   onReassignTransactionCategories?: (
     transactionIds: string[],
     targetCategory: string
@@ -123,6 +146,7 @@ export const AnomalySmartCleanupCard: React.FC<AnomalySmartCleanupCardProps> = (
   accounts = [],
   masterCategories = [],
   externalMonthFilter = null,
+  externalCategoryFilter = null,
   onReassignTransactionCategories,
   onBatchReassignTransactionCategories,
 }) => {
@@ -150,22 +174,42 @@ export const AnomalySmartCleanupCard: React.FC<AnomalySmartCleanupCardProps> = (
   const [customEndDate, setCustomEndDate] = useState<string>(
     getMonthDateRange(defaultLatestYM).endDate
   );
+  const [activeCategoryFilter, setActiveCategoryFilter] = useState<string | null>(null);
 
   const [selectedTxMap, setSelectedTxMap] = useState<Record<string, Set<string>>>({});
   const [targetCategoryMap, setTargetCategoryMap] = useState<Record<string, string>>({});
   const [expandedCategories, setExpandedCategories] = useState<Set<string>>(new Set());
   const [sortByCategory, setSortByCategory] = useState<Record<string, SmartCleanupSortConfig>>({});
+  const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
   const [detailTarget, setDetailTarget] = useState<{
     category: string;
     txId: string;
     recommendedTarget: string;
   } | null>(null);
+  const [aiSuggestionsByKey, setAiSuggestionsByKey] = useState<
+    Record<string, AiCategorySuggestion>
+  >({});
+  const [aiLoadingAll, setAiLoadingAll] = useState<boolean>(false);
+  const [aiLoadingCategoryKey, setAiLoadingCategoryKey] = useState<string | null>(null);
+  const [aiError, setAiError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!externalMonthFilter?.ym) return;
     setFilterMode('month');
     setSelectedMonth(externalMonthFilter.ym);
   }, [externalMonthFilter]);
+
+  useEffect(() => {
+    if (!externalCategoryFilter) return;
+    if (externalCategoryFilter.startDate && externalCategoryFilter.endDate) {
+      setFilterMode('custom');
+      setCustomStartDate(externalCategoryFilter.startDate);
+      setCustomEndDate(externalCategoryFilter.endDate);
+    }
+    setActiveCategoryFilter(
+      externalCategoryFilter.category ? externalCategoryFilter.category.trim() : null
+    );
+  }, [externalCategoryFilter]);
 
   const availableYears = useMemo(() => {
     const yearSet = new Set<number>([defaultYear]);
@@ -219,6 +263,7 @@ export const AnomalySmartCleanupCard: React.FC<AnomalySmartCleanupCardProps> = (
     const defaultRange = getMonthDateRange(defaultLatestYM);
     setCustomStartDate(defaultRange.startDate);
     setCustomEndDate(defaultRange.endDate);
+    setActiveCategoryFilter(null);
   };
 
   const accountById = useMemo(() => {
@@ -233,6 +278,7 @@ export const AnomalySmartCleanupCard: React.FC<AnomalySmartCleanupCardProps> = (
   );
 
   const {
+    referenceYM,
     periodLabel,
     baselineLabel,
     isMultiMonthNormalized,
@@ -248,6 +294,23 @@ export const AnomalySmartCleanupCard: React.FC<AnomalySmartCleanupCardProps> = (
       }),
     [transactions, budgets, accounts, masterCategories, activeDateRange]
   );
+
+  const sparklinesByCategory = useMemo(() => {
+    const anchorEndDate = resolveSparklineAnchorDate(referenceYM, activeDateRange);
+    const map = new Map<string, Category30DaySparklineSummary>();
+    anomalies.forEach((anom) => {
+      map.set(
+        anom.category,
+        buildCategory30DaySparkline({
+          transactions,
+          category: anom.category,
+          threeMonthAvgAmount: anom.threeMonthAvgAmount,
+          anchorEndDate,
+        })
+      );
+    });
+    return map;
+  }, [anomalies, transactions, referenceYM, activeDateRange]);
 
   const activePeriodKey = activeDateRange
     ? `${activeDateRange.startDate}..${activeDateRange.endDate}`
@@ -422,6 +485,130 @@ export const AnomalySmartCleanupCard: React.FC<AnomalySmartCleanupCardProps> = (
     };
   }, [detailTarget, anomalies]);
 
+  const requestAiCategorySuggestions = async (
+    targetAnomalies: DetectedCategoryAnomaly[],
+    scope: 'all' | string
+  ) => {
+    if (targetAnomalies.length === 0) return;
+    setAiError(null);
+    if (scope === 'all') {
+      setAiLoadingAll(true);
+    } else {
+      setAiLoadingCategoryKey(scope);
+    }
+
+    try {
+      const budgetHints = budgets
+        .filter((b) => b.type === 'expense' && b.limit > 0)
+        .map((b) => {
+          const matchingAnom = anomalies.find(
+            (a) => a.category.toLowerCase() === b.category.trim().toLowerCase()
+          );
+          return {
+            category: b.category.trim(),
+            limit: b.limit,
+            spent: matchingAnom ? matchingAnom.currentMonthAmount : 0,
+          };
+        });
+
+      const response = await fetch('/api/smart-cleanup-suggest-categories', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          anomalies: targetAnomalies.map((anom) => ({
+            anomalyCategory: anom.category,
+            increasePct: anom.increasePct,
+            currentMonthAmount: anom.currentMonthAmount,
+            threeMonthAvgAmount: anom.threeMonthAvgAmount,
+            transactions: anom.triggers.map((t) => ({
+              id: t.tx.id,
+              description: t.tx.description?.trim() || anom.category,
+              amount: t.absAmount,
+              date: t.normalizedDate,
+              accountName: t.accountName,
+            })),
+          })),
+          availableCategories: masterExpenseCategories,
+          budgetHints,
+        }),
+      });
+
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(
+          data?.error || 'Gagal meminta saran kategori AI untuk Smart Cleanup.'
+        );
+      }
+
+      const returnedSuggestions: Array<{
+        anomalyCategory: string;
+        suggestedCategory: string;
+        confidence: 'high' | 'medium' | 'low';
+        rationale: string;
+        recommendedTxIds: string[];
+      }> = Array.isArray(data?.suggestions) ? data.suggestions : [];
+
+      const generatedAt = String(data?.generatedAt || '').trim();
+      const nextSuggestionEntries: Record<string, AiCategorySuggestion> = {};
+      const nextTargets: Record<string, string> = {};
+      const nextSelections: Record<string, Set<string>> = {};
+
+      targetAnomalies.forEach((anom) => {
+        const match = returnedSuggestions.find(
+          (s) =>
+            String(s.anomalyCategory || '').trim().toLowerCase() ===
+            anom.category.trim().toLowerCase()
+        );
+        if (!match || !match.suggestedCategory) return;
+
+        nextSuggestionEntries[anom.anomalyKey] = {
+          suggestedCategory: match.suggestedCategory,
+          confidence: match.confidence || 'medium',
+          rationale: match.rationale,
+          recommendedTxIds: Array.isArray(match.recommendedTxIds)
+            ? match.recommendedTxIds
+            : [],
+          generatedAt,
+        };
+        nextTargets[anom.category] = match.suggestedCategory;
+
+        if (Array.isArray(match.recommendedTxIds) && match.recommendedTxIds.length > 0) {
+          const validIds = new Set(anom.triggers.map((t) => t.tx.id));
+          const aiIds = match.recommendedTxIds.filter((id) => validIds.has(id));
+          if (aiIds.length > 0) {
+            nextSelections[anom.category] = new Set(aiIds);
+          }
+        }
+      });
+
+      setAiSuggestionsByKey((prev) => ({ ...prev, ...nextSuggestionEntries }));
+      if (Object.keys(nextTargets).length > 0) {
+        setTargetCategoryMap((prev) => ({ ...prev, ...nextTargets }));
+      }
+      if (Object.keys(nextSelections).length > 0) {
+        setSelectedTxMap((prev) => ({ ...prev, ...nextSelections }));
+      }
+    } catch (err: any) {
+      setAiError(
+        err?.message || 'Terjadi kendala saat meminta saran kategori AI.'
+      );
+    } finally {
+      if (scope === 'all') {
+        setAiLoadingAll(false);
+      } else {
+        setAiLoadingCategoryKey(null);
+      }
+    }
+  };
+
+  const displayedAnomalies = useMemo(() => {
+    if (!activeCategoryFilter) return anomalies;
+    const targetLower = activeCategoryFilter.trim().toLowerCase();
+    return anomalies.filter((a) => a.category.toLowerCase() === targetLower);
+  }, [anomalies, activeCategoryFilter]);
+
+  const hasAnyAiSuggestions = anomalies.some((a) => Boolean(aiSuggestionsByKey[a.anomalyKey]));
+
   const renderSortIcon = (
     activeConfig: SmartCleanupSortConfig,
     columnKey: SmartCleanupSortKey
@@ -476,6 +663,31 @@ export const AnomalySmartCleanupCard: React.FC<AnomalySmartCleanupCardProps> = (
               : 'Tidak Ada Anomali'}
           </span>
 
+          {anomalies.length > 0 && (
+            <button
+              type="button"
+              disabled={aiLoadingAll}
+              onClick={() => requestAiCategorySuggestions(anomalies, 'all')}
+              className="px-3.5 py-2 rounded-lg text-xs font-bold border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-950/40 hover:bg-indigo-100 dark:hover:bg-indigo-900/50 text-indigo-700 dark:text-indigo-300 disabled:opacity-60 transition cursor-pointer disabled:cursor-wait whitespace-nowrap shrink-0 inline-flex items-center gap-1.5"
+            >
+              {aiLoadingAll ? (
+                <>
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  <span>Menganalisis Deskripsi...</span>
+                </>
+              ) : (
+                <>
+                  <Wand2 className="h-3.5 w-3.5" />
+                  <span>
+                    {hasAnyAiSuggestions
+                      ? 'Perbarui Suggested Category AI'
+                      : 'Suggested Category AI'}
+                  </span>
+                </>
+              )}
+            </button>
+          )}
+
           {anomalies.length > 0 &&
             (onBatchReassignTransactionCategories || onReassignTransactionCategories) && (
               <button
@@ -490,6 +702,37 @@ export const AnomalySmartCleanupCard: React.FC<AnomalySmartCleanupCardProps> = (
             )}
         </div>
       </div>
+
+      {aiError && (
+        <div
+          role="alert"
+          className="p-3.5 rounded-xl border border-rose-200 dark:border-rose-800 bg-rose-50/70 dark:bg-rose-950/30 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
+        >
+          <div className="flex items-start gap-2.5 text-rose-800 dark:text-rose-200">
+            <AlertTriangle className="h-4 w-4 text-rose-600 dark:text-rose-400 shrink-0 mt-0.5" />
+            <span>{aiError}</span>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            {anomalies.length > 0 && (
+              <button
+                type="button"
+                onClick={() => requestAiCategorySuggestions(anomalies, 'all')}
+                className="px-3 py-1.5 rounded-lg font-bold bg-white dark:bg-slate-900 border border-rose-300 dark:border-rose-700 text-rose-700 dark:text-rose-300 hover:bg-rose-50 dark:hover:bg-rose-950/50 transition cursor-pointer whitespace-nowrap shrink-0"
+              >
+                Coba Lagi
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setAiError(null)}
+              aria-label="Tutup pesan error saran AI"
+              className="p-1.5 rounded-lg text-rose-500 hover:bg-rose-100 dark:hover:bg-rose-900/40 transition cursor-pointer"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Period Date-Range Filter Toolbar */}
       <div className="p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/40 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
@@ -609,37 +852,107 @@ export const AnomalySmartCleanupCard: React.FC<AnomalySmartCleanupCardProps> = (
               <span>Reset</span>
             </button>
           )}
+
+          {/* Global View Mode Toggle: Tabel vs Grid Ringkas */}
+          <div
+            role="group"
+            aria-label="Mode tampilan daftar transaksi Smart Cleanup"
+            className="flex items-center gap-1 p-1 bg-slate-200/70 dark:bg-slate-900 rounded-lg shrink-0"
+          >
+            <button
+              type="button"
+              onClick={() => setViewMode('table')}
+              aria-pressed={viewMode === 'table'}
+              className={`px-3 py-1.5 rounded-md text-xs font-semibold transition cursor-pointer whitespace-nowrap shrink-0 inline-flex items-center gap-1.5 ${
+                viewMode === 'table'
+                  ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 shadow-xs'
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+              }`}
+            >
+              <List className="h-3.5 w-3.5" />
+              <span>Tabel</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setViewMode('grid')}
+              aria-pressed={viewMode === 'grid'}
+              className={`px-3 py-1.5 rounded-md text-xs font-semibold transition cursor-pointer whitespace-nowrap shrink-0 inline-flex items-center gap-1.5 ${
+                viewMode === 'grid'
+                  ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 shadow-xs'
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+              }`}
+            >
+              <LayoutGrid className="h-3.5 w-3.5" />
+              <span>Grid Ringkas</span>
+            </button>
+          </div>
         </div>
       </div>
 
-      {anomalies.length === 0 ? (
+      {/* Active Category Deep-Link Filter Indicator */}
+      {activeCategoryFilter && (
+        <div className="px-4 py-2.5 rounded-xl border border-blue-200 dark:border-blue-800/80 bg-blue-50/70 dark:bg-blue-950/30 flex flex-wrap items-center justify-between gap-2 text-xs">
+          <div className="flex flex-wrap items-center gap-1.5 text-blue-900 dark:text-blue-200">
+            <span>Menampilkan anomali khusus kategori:</span>
+            <strong className="font-extrabold">{activeCategoryFilter}</strong>
+            {anomalies.length > displayedAnomalies.length && (
+              <span className="text-blue-700 dark:text-blue-300">
+                · ({anomalies.length - displayedAnomalies.length} kategori lain disembunyikan)
+              </span>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={() => setActiveCategoryFilter(null)}
+            className="px-3 py-1 rounded-lg font-bold bg-white dark:bg-slate-900 border border-blue-300 dark:border-blue-700 text-blue-700 dark:text-blue-300 hover:bg-blue-50 dark:hover:bg-blue-900/40 transition cursor-pointer whitespace-nowrap shrink-0"
+          >
+            Tampilkan Semua Kategori
+          </button>
+        </div>
+      )}
+
+      {displayedAnomalies.length === 0 ? (
         <div className="p-5 rounded-xl border border-emerald-200 dark:border-emerald-800/70 bg-emerald-50/50 dark:bg-emerald-950/20 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
           <div className="flex items-center gap-3">
             <CheckCircle2 className="h-5 w-5 text-emerald-600 dark:text-emerald-400 shrink-0" />
             <div>
               <p className="font-bold text-emerald-900 dark:text-emerald-200">
-                Pola Pengeluaran {periodLabel} Terkendali
+                {activeCategoryFilter
+                  ? `Tidak Ada Lonjakan > 30% untuk "${activeCategoryFilter}" pada Periode ${periodLabel}`
+                  : `Pola Pengeluaran ${periodLabel} Terkendali`}
               </p>
               <p className="text-emerald-800 dark:text-emerald-300 mt-0.5">
-                Tidak ada kategori operasional yang mengalami lonjakan &gt; 30% dibandingkan{' '}
-                {baselineLabel.toLowerCase()}.
+                {activeCategoryFilter
+                  ? `Kategori "${activeCategoryFilter}" tidak melampaui ambang batas +30% dibandingkan ${baselineLabel.toLowerCase()} pada rentang tanggal terpilih.`
+                  : `Tidak ada kategori operasional yang mengalami lonjakan > 30% dibandingkan ${baselineLabel.toLowerCase()}.`}
               </p>
             </div>
           </div>
 
-          {filterMode !== 'latest' && (
-            <button
-              type="button"
-              onClick={resetDateFilter}
-              className="px-3.5 py-2 rounded-lg text-xs font-bold bg-white dark:bg-slate-900 border border-emerald-300 dark:border-emerald-700 text-emerald-800 dark:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-emerald-950/40 transition cursor-pointer whitespace-nowrap shrink-0"
-            >
-              Kembali ke Bulan Terkini
-            </button>
-          )}
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            {activeCategoryFilter && (
+              <button
+                type="button"
+                onClick={() => setActiveCategoryFilter(null)}
+                className="px-3.5 py-2 rounded-lg text-xs font-bold bg-white dark:bg-slate-900 border border-emerald-300 dark:border-emerald-700 text-emerald-800 dark:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-emerald-950/40 transition cursor-pointer whitespace-nowrap shrink-0"
+              >
+                Tampilkan Semua Kategori
+              </button>
+            )}
+            {filterMode !== 'latest' && (
+              <button
+                type="button"
+                onClick={resetDateFilter}
+                className="px-3.5 py-2 rounded-lg text-xs font-bold bg-white dark:bg-slate-900 border border-emerald-300 dark:border-emerald-700 text-emerald-800 dark:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-emerald-950/40 transition cursor-pointer whitespace-nowrap shrink-0"
+              >
+                Kembali ke Bulan Terkini
+              </button>
+            )}
+          </div>
         </div>
       ) : (
         <div className="space-y-4">
-          {anomalies.map((anom) => {
+          {displayedAnomalies.map((anom) => {
             const checkedIds = selectedTxMap[anom.category] || new Set<string>();
             const selectedCount = checkedIds.size;
             const allTriggerCount = anom.triggers.length;
@@ -660,7 +973,10 @@ export const AnomalySmartCleanupCard: React.FC<AnomalySmartCleanupCardProps> = (
               .reduce((s, t) => s + t.absAmount, 0);
             const targetCat = targetCategoryMap[anom.category] || anom.recommendedTarget;
             const isExpanded = expandedCategories.has(anom.category);
-            const visibleTriggers = isExpanded ? sortedTriggers : sortedTriggers.slice(0, 4);
+            const collapsedLimit = viewMode === 'grid' ? 8 : 4;
+            const visibleTriggers = isExpanded
+              ? sortedTriggers
+              : sortedTriggers.slice(0, collapsedLimit);
 
             const targetOptions = masterExpenseCategories.filter(
               (c) => c.toLowerCase() !== anom.category.toLowerCase()
@@ -679,9 +995,9 @@ export const AnomalySmartCleanupCard: React.FC<AnomalySmartCleanupCardProps> = (
                 key={anom.anomalyKey}
                 className="p-5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/40 dark:bg-slate-800/20 space-y-4"
               >
-                {/* Anomaly Metrics Header */}
-                <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
-                  <div>
+                {/* Anomaly Metrics Header + 30-Day Spike Frequency Sparkline */}
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                  <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
                       <AlertTriangle
                         className={`h-4 w-4 shrink-0 ${
@@ -726,209 +1042,411 @@ export const AnomalySmartCleanupCard: React.FC<AnomalySmartCleanupCardProps> = (
                       </span>
                     </div>
                   </div>
+
+                  {sparklinesByCategory.get(anom.category) && (
+                    <CategorySpikeSparkline
+                      category={anom.category}
+                      summary={sparklinesByCategory.get(anom.category)!}
+                    />
+                  )}
                 </div>
 
-                {/* Smart Cleanup Recommendation & Action Bar */}
-                <div className="p-3.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
-                  <div className="space-y-1 text-xs">
-                    <div className="font-bold text-slate-900 dark:text-slate-100 flex items-center gap-1.5">
-                      <span>Saran Smart Cleanup</span>
-                      <ArrowRight className="h-3.5 w-3.5 text-slate-400" />
-                      <span className="text-blue-700 dark:text-blue-300">
-                        Pindahkan ke {targetCat}
-                      </span>
+                {/* Smart Cleanup Recommendation & AI Suggested Category Bar */}
+                {(() => {
+                  const aiSuggestion = aiSuggestionsByKey[anom.anomalyKey];
+                  const isAnalyzingThis =
+                    aiLoadingAll || aiLoadingCategoryKey === anom.anomalyKey;
+                  const matchesAiChoice =
+                    Boolean(aiSuggestion) &&
+                    targetCat.toLowerCase() ===
+                      aiSuggestion.suggestedCategory.toLowerCase();
+
+                  return (
+                    <div className="p-3.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+                      <div className="space-y-1 text-xs min-w-0">
+                        <div className="font-bold text-slate-900 dark:text-slate-100 flex flex-wrap items-center gap-1.5">
+                          <span>
+                            {aiSuggestion
+                              ? 'Suggested Category (AI)'
+                              : 'Saran Smart Cleanup'}
+                          </span>
+                          <ArrowRight className="h-3.5 w-3.5 text-slate-400 shrink-0" />
+                          <span
+                            className={
+                              aiSuggestion
+                                ? 'text-indigo-700 dark:text-indigo-300'
+                                : 'text-blue-700 dark:text-blue-300'
+                            }
+                          >
+                            {aiSuggestion && !matchesAiChoice
+                              ? `${aiSuggestion.suggestedCategory} (dipilih: ${targetCat})`
+                              : `Pindahkan ke ${targetCat}`}
+                          </span>
+                          {aiSuggestion && (
+                            <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+                              ·{' '}
+                              {aiSuggestion.confidence === 'high'
+                                ? 'Keyakinan Tinggi'
+                                : aiSuggestion.confidence === 'low'
+                                ? 'Keyakinan Rendah'
+                                : 'Keyakinan Sedang'}
+                              {aiSuggestion.generatedAt
+                                ? ` · ${aiSuggestion.generatedAt}`
+                                : ''}
+                            </span>
+                          )}
+                          {aiSuggestion && !matchesAiChoice && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setTargetCategoryMap((prev) => ({
+                                  ...prev,
+                                  [anom.category]: aiSuggestion.suggestedCategory,
+                                }))
+                              }
+                              className="text-[11px] font-bold text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer whitespace-nowrap ml-1"
+                            >
+                              Gunakan Saran AI
+                            </button>
+                          )}
+                        </div>
+                        <p className="text-slate-500 dark:text-slate-400">
+                          {aiSuggestion
+                            ? aiSuggestion.rationale
+                            : anom.recommendationReason}
+                        </p>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2 shrink-0">
+                        <button
+                          type="button"
+                          disabled={isAnalyzingThis}
+                          onClick={() =>
+                            requestAiCategorySuggestions([anom], anom.anomalyKey)
+                          }
+                          className="px-3 py-2 rounded-lg text-xs font-bold border border-indigo-200 dark:border-indigo-800 bg-indigo-50/80 dark:bg-indigo-950/30 hover:bg-indigo-100 dark:hover:bg-indigo-900/40 text-indigo-700 dark:text-indigo-300 disabled:opacity-60 transition cursor-pointer disabled:cursor-wait whitespace-nowrap shrink-0 inline-flex items-center gap-1.5"
+                        >
+                          {isAnalyzingThis ? (
+                            <>
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                              <span>Menganalisis...</span>
+                            </>
+                          ) : (
+                            <>
+                              <Wand2 className="h-3.5 w-3.5" />
+                              <span>{aiSuggestion ? 'Analisis Ulang AI' : 'Saran AI'}</span>
+                            </>
+                          )}
+                        </button>
+
+                        <select
+                          value={targetCat}
+                          onChange={(e) =>
+                            setTargetCategoryMap((prev) => ({
+                              ...prev,
+                              [anom.category]: e.target.value,
+                            }))
+                          }
+                          aria-label={`Pilih kategori budget tujuan untuk ${anom.category}`}
+                          className="px-3 py-2 rounded-lg text-xs font-semibold border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 cursor-pointer"
+                        >
+                          {targetOptions.map((opt) => (
+                            <option key={opt} value={opt}>
+                              {opt}
+                            </option>
+                          ))}
+                        </select>
+
+                        {onReassignTransactionCategories && (
+                          <button
+                            type="button"
+                            disabled={selectedCount === 0}
+                            onClick={() => handleApplyCleanup(anom)}
+                            className="px-3.5 py-2 rounded-lg text-xs font-bold bg-slate-900 dark:bg-slate-700 hover:bg-slate-800 dark:hover:bg-slate-600 disabled:bg-slate-200 dark:disabled:bg-slate-800 disabled:text-slate-400 text-white transition cursor-pointer disabled:cursor-not-allowed whitespace-nowrap shrink-0"
+                          >
+                            Terapkan Kategori Ini ({selectedCount})
+                          </button>
+                        )}
+                      </div>
                     </div>
-                    <p className="text-slate-500 dark:text-slate-400">
-                      {anom.recommendationReason}
-                    </p>
-                  </div>
+                  );
+                })()}
 
-                  <div className="flex flex-wrap items-center gap-2 shrink-0">
-                    <select
-                      value={targetCat}
-                      onChange={(e) =>
-                        setTargetCategoryMap((prev) => ({
-                          ...prev,
-                          [anom.category]: e.target.value,
-                        }))
-                      }
-                      aria-label={`Pilih kategori budget tujuan untuk ${anom.category}`}
-                      className="px-3 py-2 rounded-lg text-xs font-semibold border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 cursor-pointer"
-                    >
-                      {targetOptions.map((opt) => (
-                        <option key={opt} value={opt}>
-                          {opt}
-                        </option>
-                      ))}
-                    </select>
-
-                    {onReassignTransactionCategories && (
-                      <button
-                        type="button"
-                        disabled={selectedCount === 0}
-                        onClick={() => handleApplyCleanup(anom)}
-                        className="px-3.5 py-2 rounded-lg text-xs font-bold bg-slate-900 dark:bg-slate-700 hover:bg-slate-800 dark:hover:bg-slate-600 disabled:bg-slate-200 dark:disabled:bg-slate-800 disabled:text-slate-400 text-white transition cursor-pointer disabled:cursor-not-allowed whitespace-nowrap shrink-0"
-                      >
-                        Terapkan Kategori Ini ({selectedCount})
-                      </button>
-                    )}
-                  </div>
-                </div>
-
-                {/* Trigger Transactions Table with Sortable Headers, Select-All & Click-for-Detail */}
-                <div className="overflow-x-auto border border-slate-200 dark:border-slate-800 rounded-xl bg-white dark:bg-slate-900">
-                  <table className="w-full text-left border-collapse text-xs">
-                    <thead>
-                      <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-800/60 text-[11px] font-bold text-slate-500 dark:text-slate-400">
-                        <th className="py-2 px-3 w-10">
+                {/* Trigger Transactions Table or Compact Grid */}
+                <div className="border border-slate-200 dark:border-slate-800 rounded-xl bg-white dark:bg-slate-900 overflow-hidden">
+                  {viewMode === 'table' ? (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left border-collapse text-xs">
+                        <thead>
+                          <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-800/60 text-[11px] font-bold text-slate-500 dark:text-slate-400">
+                            <th className="py-2 px-3 w-10">
+                              <SelectAllCheckbox
+                                allSelected={allSelected}
+                                someSelected={someSelected}
+                                onToggle={() => toggleSelectAllForCategory(anom)}
+                                ariaLabel={`Pilih semua transaksi pada ${anom.category}`}
+                              />
+                            </th>
+                            <th
+                              aria-sort={
+                                activeSort.key === 'date'
+                                  ? activeSort.direction === 'asc'
+                                    ? 'ascending'
+                                    : 'descending'
+                                  : 'none'
+                              }
+                              className="py-2 px-3 whitespace-nowrap"
+                            >
+                              <button
+                                type="button"
+                                onClick={() => handleSortColumn(anom.category, 'date')}
+                                className={`inline-flex items-center gap-1 hover:text-slate-900 dark:hover:text-slate-100 transition cursor-pointer whitespace-nowrap shrink-0 ${
+                                  activeSort.key === 'date'
+                                    ? 'text-blue-700 dark:text-blue-300 font-extrabold'
+                                    : ''
+                                }`}
+                              >
+                                <span>Tanggal</span>
+                                {renderSortIcon(activeSort, 'date')}
+                              </button>
+                            </th>
+                            <th
+                              aria-sort={
+                                activeSort.key === 'description'
+                                  ? activeSort.direction === 'asc'
+                                    ? 'ascending'
+                                    : 'descending'
+                                  : 'none'
+                              }
+                              className="py-2 px-3"
+                            >
+                              <button
+                                type="button"
+                                onClick={() => handleSortColumn(anom.category, 'description')}
+                                className={`inline-flex items-center gap-1 hover:text-slate-900 dark:hover:text-slate-100 transition cursor-pointer whitespace-nowrap shrink-0 ${
+                                  activeSort.key === 'description'
+                                    ? 'text-blue-700 dark:text-blue-300 font-extrabold'
+                                    : ''
+                                }`}
+                              >
+                                <span>Deskripsi Transaksi Pemicu</span>
+                                {renderSortIcon(activeSort, 'description')}
+                              </button>
+                            </th>
+                            <th className="py-2 px-3 whitespace-nowrap">Akun</th>
+                            <th
+                              aria-sort={
+                                activeSort.key === 'amount'
+                                  ? activeSort.direction === 'asc'
+                                    ? 'ascending'
+                                    : 'descending'
+                                  : 'none'
+                              }
+                              className="py-2 px-3 text-right whitespace-nowrap"
+                            >
+                              <button
+                                type="button"
+                                onClick={() => handleSortColumn(anom.category, 'amount')}
+                                className={`inline-flex items-center justify-end gap-1 hover:text-slate-900 dark:hover:text-slate-100 transition cursor-pointer whitespace-nowrap shrink-0 ml-auto ${
+                                  activeSort.key === 'amount'
+                                    ? 'text-blue-700 dark:text-blue-300 font-extrabold'
+                                    : ''
+                                }`}
+                              >
+                                <span>Nominal</span>
+                                {renderSortIcon(activeSort, 'amount')}
+                              </button>
+                            </th>
+                            <th className="py-2 px-3 text-right whitespace-nowrap w-16">
+                              Rincian
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 dark:divide-slate-800/80">
+                          {visibleTriggers.map((item) => {
+                            const isChecked = checkedIds.has(item.tx.id);
+                            return (
+                              <tr
+                                key={item.tx.id}
+                                onClick={() =>
+                                  setDetailTarget({
+                                    category: anom.category,
+                                    txId: item.tx.id,
+                                    recommendedTarget: anom.recommendedTarget,
+                                  })
+                                }
+                                className={`cursor-pointer transition-colors ${
+                                  isChecked
+                                    ? 'bg-blue-50/40 dark:bg-blue-950/20 hover:bg-blue-50/70 dark:hover:bg-blue-950/30'
+                                    : 'hover:bg-slate-50/80 dark:hover:bg-slate-800/40'
+                                }`}
+                              >
+                                <td
+                                  className="py-2 px-3"
+                                  onClick={(e) => e.stopPropagation()}
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={isChecked}
+                                    onChange={() => toggleTriggerTx(anom.category, item.tx.id)}
+                                    aria-label={`Pilih transaksi ${item.tx.description || anom.category}`}
+                                    className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
+                                  />
+                                </td>
+                                <td className="py-2 px-3 font-mono tabular-nums text-slate-600 dark:text-slate-300 whitespace-nowrap">
+                                  {item.normalizedDate}
+                                </td>
+                                <td className="py-2 px-3 font-medium text-slate-900 dark:text-slate-100 max-w-[260px] truncate">
+                                  {item.tx.description?.trim() || anom.category}
+                                </td>
+                                <td className="py-2 px-3 text-slate-600 dark:text-slate-300 whitespace-nowrap">
+                                  {item.accountName}
+                                </td>
+                                <td className="py-2 px-3 text-right font-mono tabular-nums font-bold text-slate-900 dark:text-slate-100 whitespace-nowrap">
+                                  {formatterIDR.format(item.absAmount)}
+                                </td>
+                                <td className="py-2 px-3 text-right whitespace-nowrap">
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setDetailTarget({
+                                        category: anom.category,
+                                        txId: item.tx.id,
+                                        recommendedTarget: anom.recommendedTarget,
+                                      });
+                                    }}
+                                    aria-label={`Lihat detail transaksi ${item.tx.description || anom.category}`}
+                                    className="inline-flex items-center gap-1 text-[11px] font-semibold text-blue-600 dark:text-blue-400 hover:underline cursor-pointer"
+                                  >
+                                    <Info className="h-3.5 w-3.5" />
+                                    <span>Detail</span>
+                                  </button>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <div>
+                      {/* Compact Grid Header Bar (Select-All + Sort Controls) */}
+                      <div className="px-3 py-2 border-b border-slate-200 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-800/60 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                        <label className="inline-flex items-center gap-2 font-bold text-slate-600 dark:text-slate-300 cursor-pointer">
                           <SelectAllCheckbox
                             allSelected={allSelected}
                             someSelected={someSelected}
                             onToggle={() => toggleSelectAllForCategory(anom)}
                             ariaLabel={`Pilih semua transaksi pada ${anom.category}`}
                           />
-                        </th>
-                        <th
-                          aria-sort={
-                            activeSort.key === 'date'
-                              ? activeSort.direction === 'asc'
-                                ? 'ascending'
-                                : 'descending'
-                              : 'none'
-                          }
-                          className="py-2 px-3 whitespace-nowrap"
-                        >
-                          <button
-                            type="button"
-                            onClick={() => handleSortColumn(anom.category, 'date')}
-                            className={`inline-flex items-center gap-1 hover:text-slate-900 dark:hover:text-slate-100 transition cursor-pointer whitespace-nowrap shrink-0 ${
-                              activeSort.key === 'date'
-                                ? 'text-blue-700 dark:text-blue-300 font-extrabold'
-                                : ''
-                            }`}
-                          >
-                            <span>Tanggal</span>
-                            {renderSortIcon(activeSort, 'date')}
-                          </button>
-                        </th>
-                        <th
-                          aria-sort={
-                            activeSort.key === 'description'
-                              ? activeSort.direction === 'asc'
-                                ? 'ascending'
-                                : 'descending'
-                              : 'none'
-                          }
-                          className="py-2 px-3"
-                        >
-                          <button
-                            type="button"
-                            onClick={() => handleSortColumn(anom.category, 'description')}
-                            className={`inline-flex items-center gap-1 hover:text-slate-900 dark:hover:text-slate-100 transition cursor-pointer whitespace-nowrap shrink-0 ${
-                              activeSort.key === 'description'
-                                ? 'text-blue-700 dark:text-blue-300 font-extrabold'
-                                : ''
-                            }`}
-                          >
-                            <span>Deskripsi Transaksi Pemicu</span>
-                            {renderSortIcon(activeSort, 'description')}
-                          </button>
-                        </th>
-                        <th className="py-2 px-3 whitespace-nowrap">Akun</th>
-                        <th
-                          aria-sort={
-                            activeSort.key === 'amount'
-                              ? activeSort.direction === 'asc'
-                                ? 'ascending'
-                                : 'descending'
-                              : 'none'
-                          }
-                          className="py-2 px-3 text-right whitespace-nowrap"
-                        >
-                          <button
-                            type="button"
-                            onClick={() => handleSortColumn(anom.category, 'amount')}
-                            className={`inline-flex items-center justify-end gap-1 hover:text-slate-900 dark:hover:text-slate-100 transition cursor-pointer whitespace-nowrap shrink-0 ml-auto ${
-                              activeSort.key === 'amount'
-                                ? 'text-blue-700 dark:text-blue-300 font-extrabold'
-                                : ''
-                            }`}
-                          >
-                            <span>Nominal</span>
-                            {renderSortIcon(activeSort, 'amount')}
-                          </button>
-                        </th>
-                        <th className="py-2 px-3 text-right whitespace-nowrap w-16">
-                          Rincian
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100 dark:divide-slate-800/80">
-                      {visibleTriggers.map((item) => {
-                        const isChecked = checkedIds.has(item.tx.id);
-                        return (
-                          <tr
-                            key={item.tx.id}
-                            onClick={() =>
-                              setDetailTarget({
-                                category: anom.category,
-                                txId: item.tx.id,
-                                recommendedTarget: anom.recommendedTarget,
-                              })
-                            }
-                            className={`cursor-pointer transition-colors ${
-                              isChecked
-                                ? 'bg-blue-50/40 dark:bg-blue-950/20 hover:bg-blue-50/70 dark:hover:bg-blue-950/30'
-                                : 'hover:bg-slate-50/80 dark:hover:bg-slate-800/40'
-                            }`}
-                          >
-                            <td
-                              className="py-2 px-3"
-                              onClick={(e) => e.stopPropagation()}
+                          <span>Pilih Semua ({allTriggerCount})</span>
+                        </label>
+
+                        <div className="flex flex-wrap items-center gap-2 text-slate-500 dark:text-slate-400">
+                          <span className="font-semibold">Urutkan:</span>
+                          {(
+                            [
+                              { key: 'amount', label: 'Nominal' },
+                              { key: 'date', label: 'Tanggal' },
+                              { key: 'description', label: 'Deskripsi' },
+                            ] as const
+                          ).map((col) => (
+                            <button
+                              key={col.key}
+                              type="button"
+                              onClick={() => handleSortColumn(anom.category, col.key)}
+                              className={`inline-flex items-center gap-1 px-2 py-1 rounded hover:bg-white dark:hover:bg-slate-800 transition cursor-pointer whitespace-nowrap shrink-0 ${
+                                activeSort.key === col.key
+                                  ? 'text-blue-700 dark:text-blue-300 font-extrabold bg-white dark:bg-slate-800'
+                                  : 'font-semibold hover:text-slate-900 dark:hover:text-slate-100'
+                              }`}
                             >
-                              <input
-                                type="checkbox"
-                                checked={isChecked}
-                                onChange={() => toggleTriggerTx(anom.category, item.tx.id)}
-                                aria-label={`Pilih transaksi ${item.tx.description || anom.category}`}
-                                className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
-                              />
-                            </td>
-                            <td className="py-2 px-3 font-mono tabular-nums text-slate-600 dark:text-slate-300 whitespace-nowrap">
-                              {item.normalizedDate}
-                            </td>
-                            <td className="py-2 px-3 font-medium text-slate-900 dark:text-slate-100 max-w-[260px] truncate">
-                              {item.tx.description?.trim() || anom.category}
-                            </td>
-                            <td className="py-2 px-3 text-slate-600 dark:text-slate-300 whitespace-nowrap">
-                              {item.accountName}
-                            </td>
-                            <td className="py-2 px-3 text-right font-mono tabular-nums font-bold text-slate-900 dark:text-slate-100 whitespace-nowrap">
-                              {formatterIDR.format(item.absAmount)}
-                            </td>
-                            <td className="py-2 px-3 text-right whitespace-nowrap">
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
+                              <span>{col.label}</span>
+                              {renderSortIcon(activeSort, col.key)}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Responsive Compact Grid Cards */}
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-2.5 p-3">
+                        {visibleTriggers.map((item) => {
+                          const isChecked = checkedIds.has(item.tx.id);
+                          const displayDesc =
+                            item.tx.description?.trim() || anom.category;
+                          return (
+                            <div
+                              key={item.tx.id}
+                              role="button"
+                              tabIndex={0}
+                              onClick={() =>
+                                setDetailTarget({
+                                  category: anom.category,
+                                  txId: item.tx.id,
+                                  recommendedTarget: anom.recommendedTarget,
+                                })
+                              }
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter' || e.key === ' ') {
+                                  e.preventDefault();
                                   setDetailTarget({
                                     category: anom.category,
                                     txId: item.tx.id,
                                     recommendedTarget: anom.recommendedTarget,
                                   });
-                                }}
-                                aria-label={`Lihat detail transaksi ${item.tx.description || anom.category}`}
-                                className="inline-flex items-center gap-1 text-[11px] font-semibold text-blue-600 dark:text-blue-400 hover:underline cursor-pointer"
+                                }
+                              }}
+                              className={`p-3 rounded-xl border text-left transition-colors cursor-pointer flex flex-col justify-between gap-2 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 ${
+                                isChecked
+                                  ? 'border-blue-300 dark:border-blue-700 bg-blue-50/45 dark:bg-blue-950/25 hover:bg-blue-50/75 dark:hover:bg-blue-950/35'
+                                  : 'border-slate-200 dark:border-slate-800 bg-slate-50/40 dark:bg-slate-800/20 hover:bg-slate-100/70 dark:hover:bg-slate-800/50'
+                              }`}
+                            >
+                              {/* Top Row: Checkbox + Nominal */}
+                              <div className="flex items-center justify-between gap-2">
+                                <div
+                                  className="flex items-center"
+                                  onClick={(e) => e.stopPropagation()}
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={isChecked}
+                                    onChange={() =>
+                                      toggleTriggerTx(anom.category, item.tx.id)
+                                    }
+                                    aria-label={`Pilih transaksi ${displayDesc}`}
+                                    className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
+                                  />
+                                </div>
+                                <span className="text-xs font-mono tabular-nums font-extrabold text-slate-900 dark:text-slate-100 whitespace-nowrap">
+                                  {formatterIDR.format(item.absAmount)}
+                                </span>
+                              </div>
+
+                              {/* Middle: Deskripsi */}
+                              <p
+                                title={displayDesc}
+                                className="text-xs font-semibold text-slate-800 dark:text-slate-100 truncate"
                               >
-                                <Info className="h-3.5 w-3.5" />
-                                <span>Detail</span>
-                              </button>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
+                                {displayDesc}
+                              </p>
+
+                              {/* Bottom Row: Tanggal + Detail cue */}
+                              <div className="flex items-center justify-between gap-2 text-[11px]">
+                                <span className="font-mono tabular-nums text-slate-500 dark:text-slate-400">
+                                  {item.normalizedDate}
+                                </span>
+                                <span className="font-semibold text-blue-600 dark:text-blue-400">
+                                  Detail
+                                </span>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
 
                   <div className="px-3 py-2 border-t border-slate-100 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/30 flex flex-wrap items-center justify-between gap-2 text-xs">
                     <span className="text-slate-500 dark:text-slate-400">
@@ -939,7 +1457,7 @@ export const AnomalySmartCleanupCard: React.FC<AnomalySmartCleanupCardProps> = (
                       </strong>
                     </span>
 
-                    {anom.triggers.length > 4 && (
+                    {anom.triggers.length > collapsedLimit && (
                       <button
                         type="button"
                         onClick={() => toggleExpandCategory(anom.category)}
@@ -978,6 +1496,7 @@ export const AnomalySmartCleanupCard: React.FC<AnomalySmartCleanupCardProps> = (
             targetCategoryMap[activeDetailItem.anomaly.category] ||
             activeDetailItem.anomaly.recommendedTarget
           }
+          aiSuggestion={aiSuggestionsByKey[activeDetailItem.anomaly.anomalyKey]}
           account={accountById.get(activeDetailItem.item.tx.accountId)}
           isSelectedForCleanup={(
             selectedTxMap[activeDetailItem.anomaly.category] || new Set<string>()
