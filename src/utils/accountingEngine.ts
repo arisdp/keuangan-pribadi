@@ -8,6 +8,7 @@ import {
   FixedAssetAdjustment,
   InvestmentAsset,
   KprCoaMappingConfig,
+  JournalLine,
   Transaction,
 } from '../types';
 
@@ -1319,9 +1320,13 @@ export function normalizeAbsAmount(value: unknown): number {
 }
 
 export function getTransactionAccountDelta(
-  tx: Pick<Transaction, 'type' | 'amount' | 'isAdjustment'>
+  tx: Pick<Transaction, 'type' | 'amount' | 'isAdjustment' | 'linkedDebtAction' | 'debtDisbursementMode'>
 ): number {
   if (!tx || tx.isAdjustment) return 0;
+  if (
+    tx.linkedDebtAction === 'create' &&
+    (tx.debtDisbursementMode === 'direct_asset' || tx.debtDisbursementMode === 'direct_expense')
+  ) return 0;
   const amount = normalizeAbsAmount(tx.amount);
   if (amount === 0) return 0;
   return tx.type === 'income' ? amount : -amount;
@@ -1440,6 +1445,7 @@ export function createAccountRecord(params: {
   dueDay?: number;
   interestRate?: number;
   minPayment?: number;
+  openingDate?: string;
 }): Account {
   const safeStart = normalizeAbsAmount(params.startingBalance);
   const creditAccount = isCreditAccount({ type: params.type });
@@ -1455,6 +1461,8 @@ export function createAccountRecord(params: {
     creditLimit: creditAccount ? safeStart : undefined,
     usedLimit: creditAccount ? 0 : undefined,
     initialDebt: safeInitialDebt,
+    openingDate: params.openingDate || toLocalYYYYMMDD(),
+    openingBalanceEntryId: `opening-${params.id}`,
     dueDay: creditAccount ? params.dueDay : undefined,
     interestRate: creditAccount ? params.interestRate : undefined,
     minPayment: creditAccount ? params.minPayment : undefined,
@@ -1748,7 +1756,21 @@ export function calculateAccountGLBalance(
   let txCount = 0;
 
   (transactions || []).forEach((tx) => {
-    if (!tx || tx.isAdjustment) return;
+    if (!tx) return;
+    if (tx.isAdjustment) {
+      if (
+        tx.adjustmentType === 'reconciliation' &&
+        tx.accountId === acc.id &&
+        tx.reconciliationEvidenceReference?.trim() &&
+        tx.reconciliationEvidenceConfirmedAt?.trim()
+      ) {
+        txCount += 1;
+        calculatedDelta += tx.type === 'income'
+          ? normalizeAbsAmount(tx.amount)
+          : -normalizeAbsAmount(tx.amount);
+      }
+      return;
+    }
     if (tx.accountId === acc.id) {
       txCount += 1;
       calculatedDelta += getTransactionAccountDelta(tx);
@@ -2177,8 +2199,12 @@ export function calculateIncomeStatementSummary(
         }
         break;
       case 'debt_proceeds':
-        if (tx.type === 'income') debtProceedsIn += amt;
-        else debtProceedsOut += amt;
+        if (tx.debtDisbursementMode === 'direct_expense') {
+          operatingExpense += amt;
+        } else if (tx.debtDisbursementMode !== 'direct_asset') {
+          if (tx.type === 'income') debtProceedsIn += amt;
+          else debtProceedsOut += amt;
+        }
         break;
       case 'investment_buy':
         investmentPurchases += amt;
@@ -2194,7 +2220,12 @@ export function calculateIncomeStatementSummary(
         else emergencyAdditions += amt;
         break;
       case 'non_cash_adjustment':
-        nonCashAdjustments += amt;
+        if (tx.adjustmentType === 'reconciliation') {
+          if (tx.type === 'income') operatingIncome += amt;
+          else operatingExpense += amt;
+        } else {
+          nonCashAdjustments += amt;
+        }
         break;
       default:
         break;
@@ -2286,8 +2317,12 @@ export function calculateCashFlowStatement(
         }
         break;
       case 'debt_proceeds':
-        if (tx.type === 'income') debtProceedsInflows += amt;
-        else if (!isCreditCharge) debtPaymentOutflows += amt;
+        if (tx.debtDisbursementMode === 'direct_asset' || tx.debtDisbursementMode === 'direct_expense') {
+          break;
+        }
+        if (tx.type === 'income') {
+          debtProceedsInflows += amt;
+        } else if (!isCreditCharge) debtPaymentOutflows += amt;
         break;
       case 'investment_buy':
         if (isCreditCharge) nonCashCreditOutflows += amt;
@@ -2355,6 +2390,8 @@ export interface BalanceSheetSummary {
   totalLiabilities: number;
   equity: number;
   isBalanced: boolean;
+  totalDebits?: number;
+  totalCredits?: number;
 }
 
 export function calculateBalanceSheet(
@@ -2362,8 +2399,63 @@ export function calculateBalanceSheet(
   emergencyTransactions: EmergencyFundTransaction[],
   investments: InvestmentAsset[],
   debts: Debt[],
-  fixedAssets: FixedAsset[] = []
+  fixedAssets: FixedAsset[] = [],
+  journalLines?: JournalLine[],
+  coaList?: Array<{ code: string; category: string; normalBalance: string }>
 ): BalanceSheetSummary {
+  if (journalLines && coaList) {
+    const balances = new Map<string, number>();
+    let totalDebits = 0;
+    let totalCredits = 0;
+    journalLines.forEach((line) => {
+      const debit = normalizeAbsAmount(line.debit);
+      const credit = normalizeAbsAmount(line.credit);
+      totalDebits += debit;
+      totalCredits += credit;
+      balances.set(line.coaCode, (balances.get(line.coaCode) || 0) +
+        (coaList.find((coa) => coa.code === line.coaCode)?.normalBalance === 'Kredit'
+          ? credit - debit
+          : debit - credit));
+    });
+
+    const amountFor = (predicate: (coa: (typeof coaList)[number]) => boolean) =>
+      coaList.reduce((sum, coa) => sum + (predicate(coa) ? balances.get(coa.code) || 0 : 0), 0);
+    const assets = amountFor((coa) => coa.category === 'Asset');
+    const liabilities = amountFor((coa) => coa.category === 'Liability');
+    const equityAccounts = amountFor((coa) => coa.category === 'Equity');
+    const income = amountFor((coa) => coa.category === 'Income');
+    const expenses = amountFor((coa) => coa.category === 'Expense');
+    const emergencyAssets = balances.get('1400') || 0;
+    const investmentAssets = (balances.get('1500') || 0) + (balances.get('1590') || 0);
+    const fixedAssetsBasis = (balances.get('1600') || 0) + (balances.get('1610') || 0);
+    const fixedAssetsNetAdjustment = balances.get('1690') || 0;
+    const fixedAssetsValue = fixedAssetsBasis + fixedAssetsNetAdjustment;
+    const liquidAssets = amountFor((coa) => coa.category === 'Asset' && ['1100', '1200', '1300'].includes(coa.code));
+    const creditCardPaylaterBills = amountFor((coa) => ['2100', '2200'].includes(coa.code));
+    const activeDebtsBalance = liabilities - creditCardPaylaterBills;
+    const totalLiabilities = liabilities;
+    const equity = equityAccounts + income - expenses;
+    const isBalanced = Math.abs(totalDebits - totalCredits) < 0.005;
+
+    return {
+      liquidAssets,
+      emergencyAssets,
+      investmentAssets,
+      fixedAssetsBasis,
+      fixedAssetsNetAdjustment,
+      fixedAssetsValue,
+      combinedInvestmentAndFixedAssets: investmentAssets + fixedAssetsValue,
+      totalAssets: assets,
+      creditCardPaylaterBills,
+      activeDebtsBalance,
+      totalLiabilities,
+      equity,
+      isBalanced,
+      totalDebits,
+      totalCredits,
+    };
+  }
+
   const liquidAssets = calculateTotalLiquidCash(accounts);
   const emergencyAssets = calculateTotalEmergencyFund(emergencyTransactions);
   const combinedWealth = calculateCombinedPortfolioWealth(investments, fixedAssets, debts);

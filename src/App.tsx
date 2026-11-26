@@ -51,6 +51,7 @@ import {
   KprPreset,
   KprCoaMappingConfig
 } from './types';
+import { buildJournalLedger } from './utils/accountingLedger';
 import {
   DEFAULT_KPR_COA_MAPPING,
   DEFAULT_KPR_PRESETS,
@@ -181,6 +182,10 @@ export default function App() {
   const [kprPresets, setKprPresets] = useState<KprPreset[]>(DEFAULT_KPR_PRESETS);
   const [kprCoaMapping, setKprCoaMapping] = useState<KprCoaMappingConfig>(DEFAULT_KPR_COA_MAPPING);
   const [investmentGoals, setInvestmentGoals] = useState<InvestmentGoal[]>([]);
+  const journalLedger = useMemo(
+    () => buildJournalLedger(transactions, accounts, coaList),
+    [transactions, accounts, coaList]
+  );
 
   useEffect(() => {
     saveStoredCategories(masterCategories);
@@ -505,7 +510,7 @@ export default function App() {
 
   const applySyncPackage = (pkg: SyncDataPackage & Record<string, any>) => {
     const nextTransactions = Array.isArray(pkg.transactions) ? pkg.transactions : [];
-    const nextAccounts = Array.isArray(pkg.accounts) ? pkg.accounts : [];
+    const rawAccounts = Array.isArray(pkg.accounts) ? pkg.accounts : [];
     const nextBudgets = Array.isArray(pkg.budgets) ? pkg.budgets : [];
     const nextDebts = Array.isArray(pkg.debts) ? pkg.debts : [];
     const nextInvestments = Array.isArray(pkg.investments) ? pkg.investments : [];
@@ -534,6 +539,52 @@ export default function App() {
       Array.isArray(pkg.coaList) && pkg.coaList.length > 0
         ? pkg.coaList
         : [...DEFAULT_COA_LIST];
+    const earliestTransactionDateByAccount = new Map<string, string>();
+    nextTransactions.forEach((transaction) => {
+      if (!transaction.accountId || !transaction.date) return;
+      const current = earliestTransactionDateByAccount.get(transaction.accountId);
+      if (!current || transaction.date < current) {
+        earliestTransactionDateByAccount.set(transaction.accountId, transaction.date);
+      }
+    });
+    const nextAccounts = rawAccounts.map((account) => {
+      const openingMetadata = {
+        openingDate:
+          account.openingDate ||
+          earliestTransactionDateByAccount.get(account.id) ||
+          toLocalYYYYMMDD(),
+        openingBalanceEntryId: account.openingBalanceEntryId || `opening-${account.id}`,
+      };
+      if (!isCreditAccount(account)) return { ...account, ...openingMetadata };
+      const currentBalance = Number(account.currentBalance);
+      const limit = normalizeAbsAmount(account.creditLimit ?? account.startingBalance);
+      const recordedAvailableLimit = Number.isFinite(currentBalance)
+        ? currentBalance
+        : Math.max(0, limit - normalizeAbsAmount(account.usedLimit));
+      const historicalBalanceMovement = nextTransactions.reduce((movement, transaction) => {
+        if (transaction.accountId === account.id) {
+          return movement + getTransactionAccountDelta(transaction);
+        }
+        if (
+          transaction.linkedDebtAction === 'pay' &&
+          transaction.linkedDebtId === `acc-debt-${account.id}`
+        ) {
+          return movement + getTransactionAccountDelta({ type: 'income', amount: transaction.amount });
+        }
+        return movement;
+      }, 0);
+      const legacyInitialDebt = Math.max(0, limit + historicalBalanceMovement - recordedAvailableLimit);
+      return {
+        ...account,
+        ...openingMetadata,
+        initialDebt:
+          account.initialDebt != null && Number.isFinite(Number(account.initialDebt))
+            ? normalizeAbsAmount(account.initialDebt)
+            : legacyInitialDebt,
+        usedLimit: Math.max(0, limit - recordedAvailableLimit),
+      };
+    });
+    const nextJournalLedger = buildJournalLedger(nextTransactions, nextAccounts, nextCoaList);
     const nextChangeLogs = Array.isArray(pkg.masterChangeLogs) ? pkg.masterChangeLogs : [];
     const nextInvestmentGoals = Array.isArray(pkg.investmentGoals) ? pkg.investmentGoals : [];
 
@@ -577,6 +628,8 @@ export default function App() {
       kprCoaMapping: nextKprCoaMapping,
       masterChangeLogs: getMasterChangeLogs(),
       investmentGoals: nextInvestmentGoals,
+      journalEntries: nextJournalLedger.entries,
+      journalLines: nextJournalLedger.lines,
     };
   };
 
@@ -704,7 +757,10 @@ export default function App() {
           userFullName: currentUser.fullName,
           username: currentUser.username,
         };
-        lastPgSyncSignatureRef.current = `${activeUserId}:${JSON.stringify(hydratedPayload)}`;
+        lastPgSyncSignatureRef.current =
+          Array.isArray(pgData.journalEntries) && Array.isArray(pgData.journalLines)
+            ? `${activeUserId}:${JSON.stringify(hydratedPayload)}`
+            : '';
         setIsPgHydrated(true);
       } catch (err: any) {
         if (!cancelled) {
@@ -745,6 +801,8 @@ export default function App() {
         kprCoaMapping,
         masterChangeLogs,
         investmentGoals,
+        journalEntries: journalLedger.entries,
+        journalLines: journalLedger.lines,
         userFullName: currentUser.fullName,
         username: currentUser.username
       };
@@ -779,6 +837,7 @@ export default function App() {
     kprCoaMapping,
     masterChangeLogs,
     investmentGoals,
+    journalLedger,
     currentUser,
     loadingPg,
     isPgHydrated,
@@ -802,6 +861,8 @@ export default function App() {
               fixedAssets,
               emergencyConfig,
               emergencyTransactions,
+              journalEntries: journalLedger.entries,
+              journalLines: journalLedger.lines,
             };
             if (detectDataConflict(currentPgPkg, cloudData)) {
               setConflictState({
@@ -922,6 +983,8 @@ export default function App() {
       minPayment: number;
       purpose: 'productive' | 'consumptive';
       category: string;
+      disbursementMode: 'cash' | 'direct_asset' | 'direct_expense';
+      disbursementCoaCode?: string;
     };
     newInvestmentDetails?: {
       name: string;
@@ -1116,6 +1179,8 @@ export default function App() {
       linkedFixedAssetId: newTx.linkedFixedAssetId,
       linkedFixedAssetAction: newTx.linkedFixedAssetAction,
       linkedEmergencyTxId: resolvedEmergencyTxId,
+      debtDisbursementMode: newTx.debtDisbursementMode,
+      debtDisbursementCoaCode: newTx.debtDisbursementCoaCode,
       unitPrice: txUnitPrice,
       units: txUnits,
       unitName: txUnitName,
@@ -1709,7 +1774,8 @@ export default function App() {
     initialDebt: number = 0,
     dueDay?: number,
     interestRate?: number,
-    minPayment?: number
+    minPayment?: number,
+    openingDate?: string
   ) => {
     const newAcc = createAccountRecord({
       id: `acc-${Date.now()}`,
@@ -1721,6 +1787,7 @@ export default function App() {
       dueDay,
       interestRate,
       minPayment,
+      openingDate,
     });
     setAccounts((prev) => [...prev, newAcc]);
   };
@@ -3452,6 +3519,8 @@ export default function App() {
                   <ReportsTab
                     transactions={transactions}
                     accounts={accounts}
+                    journalLines={journalLedger.lines}
+                    coaList={coaList}
                     budgets={budgets}
                     debts={debts}
                     investments={investments}
@@ -3620,6 +3689,8 @@ export default function App() {
             fixedAssets,
             emergencyConfig,
             emergencyTransactions,
+            journalEntries: journalLedger.entries,
+            journalLines: journalLedger.lines,
             masterCategories,
             recurringTransactions,
             savingsGoals,
@@ -3714,6 +3785,8 @@ export default function App() {
                 kprCoaMapping,
                 masterChangeLogs,
                 investmentGoals,
+                journalEntries: journalLedger.entries,
+                journalLines: journalLedger.lines,
                 userFullName: currentUser.fullName,
                 username: currentUser.username
               }, activeUserId);

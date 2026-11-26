@@ -43,6 +43,8 @@ interface TransactionsTabProps {
       minPayment: number;
       purpose: 'productive' | 'consumptive';
       category: string;
+      disbursementMode: 'cash' | 'direct_asset' | 'direct_expense';
+      disbursementCoaCode?: string;
     };
     newInvestmentDetails?: {
       name: string;
@@ -669,6 +671,9 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
   const [newDebtMinPayment, setNewDebtMinPayment] = useState<string>('');
   const [newDebtPurpose, setNewDebtPurpose] = useState<'productive' | 'consumptive'>('consumptive');
   const [newDebtCategory, setNewDebtCategory] = useState<string>('Pinjaman Bank');
+  const [newDebtDisbursementMode, setNewDebtDisbursementMode] =
+    useState<'cash' | 'direct_asset' | 'direct_expense'>('cash');
+  const [newDebtDisbursementCoaCode, setNewDebtDisbursementCoaCode] = useState('1610');
 
   const [newInvestmentName, setNewInvestmentName] = useState<string>('');
   const [newInvestmentCategory, setNewInvestmentCategory] = useState<string>('Saham');
@@ -1107,6 +1112,9 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
       unitName: isInvestmentContext ? effectiveUnitName : undefined,
       linkedDebtId: isDebtPay ? linkedDebtId : undefined,
       linkedDebtAction: isDebtPay ? 'pay' : (isDebtCreate ? 'create' : undefined),
+      debtDisbursementMode: isDebtCreate ? newDebtDisbursementMode : undefined,
+      debtDisbursementCoaCode:
+        isDebtCreate && newDebtDisbursementMode !== 'cash' ? newDebtDisbursementCoaCode : undefined,
       linkedInvestmentId: isInvSell ? linkedInvestmentId : undefined,
       linkedInvestmentAction: isInvBuy ? 'buy' : (isInvSell ? 'sell' : undefined),
       newDebtDetails: isDebtCreate ? {
@@ -1115,6 +1123,8 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
         minPayment: parseFloat(newDebtMinPayment) || (parsedAmount * 0.05),
         purpose: newDebtPurpose,
         category: newDebtCategory,
+        disbursementMode: newDebtDisbursementMode,
+        disbursementCoaCode: newDebtDisbursementMode === 'cash' ? undefined : newDebtDisbursementCoaCode,
       } : undefined,
       newInvestmentDetails: isInvBuy ? {
         name: newInvestmentName || description || "Aset Investasi",
@@ -1133,6 +1143,8 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
     setHasManuallySelectedCategory(false);
     setNewDebtName('');
     setNewDebtMinPayment('');
+    setNewDebtDisbursementMode('cash');
+    setNewDebtDisbursementCoaCode('1610');
     setNewInvestmentName('');
     setLinkedDebtId('');
     setLinkedInvestmentId('');
@@ -2178,6 +2190,46 @@ export const TransactionsTab: React.FC<TransactionsTabProps> = ({
                       </select>
                     </div>
                   </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
+                      Tujuan Pencairan
+                    </label>
+                    <select
+                      value={newDebtDisbursementMode}
+                      onChange={(e) => {
+                        const mode = e.target.value as 'cash' | 'direct_asset' | 'direct_expense';
+                        setNewDebtDisbursementMode(mode);
+                        setNewDebtDisbursementCoaCode(mode === 'direct_asset' ? '1610' : '5900');
+                      }}
+                      className="w-full bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-700"
+                    >
+                      <option value="cash">Diterima ke kas / bank</option>
+                      <option value="direct_asset">Langsung untuk aset</option>
+                      <option value="direct_expense">Diteruskan untuk biaya</option>
+                    </select>
+                  </div>
+                  {newDebtDisbursementMode !== 'cash' && (
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
+                        Akun COA Tujuan
+                      </label>
+                      <select
+                        value={newDebtDisbursementCoaCode}
+                        onChange={(e) => setNewDebtDisbursementCoaCode(e.target.value)}
+                        className="w-full bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-700"
+                      >
+                        {getStoredCoaList()
+                          .filter((coa) =>
+                            coa.category === (newDebtDisbursementMode === 'direct_asset' ? 'Asset' : 'Expense') &&
+                            coa.normalBalance === 'Debet' &&
+                            (newDebtDisbursementMode !== 'direct_asset' || !['1100', '1200', '1300'].includes(coa.code))
+                          )
+                          .map((coa) => (
+                            <option key={coa.code} value={coa.code}>{coa.code} · {coa.name}</option>
+                          ))}
+                      </select>
+                    </div>
+                  )}
                 </div>
               </div>
             )}

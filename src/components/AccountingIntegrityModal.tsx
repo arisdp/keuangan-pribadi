@@ -45,11 +45,8 @@ import {
 } from 'lucide-react';
 
 import {
-  applyAccountBalanceChange,
   auditLedgerIntegrity,
   calculateAccountGLBalance,
-  getAccountCreditBill,
-  getTransactionAccountDelta,
   isCreditAccount,
   previewSafeAnomalyCleanupImpact,
 } from '../utils/accountingEngine';
@@ -87,6 +84,8 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
 }) => {
   const [activeTab, setActiveTab] = useState<'audit' | 'auto-reconcile' | 'manual-reconcile' | 'change-log'>(defaultTab);
   const [customActualBalances, setCustomActualBalances] = useState<Record<string, number>>({});
+  const [reconciliationConfirmed, setReconciliationConfirmed] = useState(false);
+  const [reconciliationEvidenceNote, setReconciliationEvidenceNote] = useState('');
   const [reconciliationSuccessMessage, setReconciliationSuccessMessage] = useState<string | null>(null);
   const [orphanTargetAccounts, setOrphanTargetAccounts] = useState<Record<number, string>>({});
   const [orphanActionModes, setOrphanActionModes] = useState<Record<number, 'reassign' | 'delete'>>({});
@@ -146,13 +145,30 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
 
   // 1. ACCOUNT BALANCES INTEGRITY AUDIT (Menggunakan Mesin GL Terpusat termasuk initialDebt)
   const accountAudit = useMemo(() => {
-    return accounts.map((acc) => {
+    return accounts.filter((acc) => !isCreditAccount(acc)).map((acc) => {
       const gl = calculateAccountGLBalance(acc, transactions);
+      const lastReconciliation = transactions.reduce<Transaction | undefined>((latest, transaction) => {
+        if (
+          transaction.accountId !== acc.id ||
+          transaction.adjustmentType !== 'reconciliation' ||
+          !transaction.reconciliationEvidenceReference?.trim() ||
+          !transaction.reconciliationEvidenceConfirmedAt?.trim() ||
+          transaction.reconciliationActualBalance == null ||
+          transaction.reconciliationRecordedBalance == null
+        ) return latest;
+        if (!latest || (transaction.reconciliationEvidenceConfirmedAt || '') >
+          (latest.reconciliationEvidenceConfirmedAt || '')) return transaction;
+        return latest;
+      }, undefined);
+      const reconciledActualBalance = lastReconciliation
+        ? Number(lastReconciliation.reconciliationActualBalance) +
+          gl.recordedBalance - Number(lastReconciliation.reconciliationRecordedBalance)
+        : gl.recordedBalance;
 
       // Actual cash balance (user input override or recorded current balance)
       const actualCashBalance = customActualBalances[acc.id] !== undefined
         ? customActualBalances[acc.id]
-        : gl.recordedBalance;
+        : reconciledActualBalance;
 
       const difference = actualCashBalance - gl.glCalculatedBalance;
 
@@ -182,22 +198,13 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
       amount: number;
       debitCreditNote: string;
       difference: number;
-      currentBalance: number;
-      projectedBalance: number;
-      isCredit: boolean;
-      currentBill: number;
-      projectedBill: number;
+      actualBalance: number;
+      recordedBalance: number;
     }> = [];
 
     accountAudit.forEach((acc) => {
       const absDiff = Math.abs(acc.difference);
       if (absDiff > 0) {
-        const accountObj = accounts.find((a) => a.id === acc.id);
-        const entryType: 'income' | 'expense' = acc.difference < 0 ? 'expense' : 'income';
-        const delta = getTransactionAccountDelta({ type: entryType, amount: absDiff });
-        const projectedAcc = accountObj ? applyAccountBalanceChange(accountObj, delta) : null;
-        const isCredit = accountObj ? isCreditAccount(accountObj) : false;
-
         if (acc.difference < 0) {
           // Cash shortfall / missing cash
           entries.push({
@@ -209,11 +216,8 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
             amount: absDiff,
             debitCreditNote: `Debet: Beban Penyesuaian (${formatterIDR.format(absDiff)}) | Kredit: ${acc.name} (${formatterIDR.format(absDiff)})`,
             difference: acc.difference,
-            currentBalance: accountObj?.currentBalance ?? acc.recordedBalance,
-            projectedBalance: projectedAcc ? projectedAcc.currentBalance : acc.recordedBalance + delta,
-            isCredit,
-            currentBill: accountObj && isCredit ? getAccountCreditBill(accountObj) : 0,
-            projectedBill: projectedAcc && isCredit ? getAccountCreditBill(projectedAcc) : 0,
+            actualBalance: acc.actualCashBalance,
+            recordedBalance: acc.recordedBalance,
           });
         } else {
           // Cash surplus
@@ -226,11 +230,8 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
             amount: absDiff,
             debitCreditNote: `Debet: ${acc.name} (${formatterIDR.format(absDiff)}) | Kredit: Pendapatan Penyesuaian (${formatterIDR.format(absDiff)})`,
             difference: acc.difference,
-            currentBalance: accountObj?.currentBalance ?? acc.recordedBalance,
-            projectedBalance: projectedAcc ? projectedAcc.currentBalance : acc.recordedBalance + delta,
-            isCredit,
-            currentBill: accountObj && isCredit ? getAccountCreditBill(accountObj) : 0,
-            projectedBill: projectedAcc && isCredit ? getAccountCreditBill(projectedAcc) : 0,
+            actualBalance: acc.actualCashBalance,
+            recordedBalance: acc.recordedBalance,
           });
         }
       }
@@ -1116,18 +1117,42 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
     }
 
     if (!onApplyAdjustmentEntries) return;
+    if (!reconciliationConfirmed) {
+      showToast({
+        type: 'warning',
+        title: 'Konfirmasi Bukti Rekonsiliasi',
+        message: 'Tinjau saldo terhadap bukti rekening dan konfirmasi hasilnya sebelum membuat jurnal penyesuaian.',
+      });
+      return;
+    }
 
     const todayStr = toLocalYYYYMMDD();
-    const newTxEntries: Omit<Transaction, 'id'>[] = proposedAdjustmentEntries.map((e) => ({
-      date: todayStr,
-      accountId: e.accountId,
-      type: e.type,
-      category: e.category,
-      description: e.description,
-      amount: e.amount,
-    }));
+    const evidenceReference =
+      reconciliationEvidenceNote.trim() || `Saldo fisik ditinjau dan dikonfirmasi pengguna pada ${todayStr}`;
+    const newTxEntries: Omit<Transaction, 'id'>[] = proposedAdjustmentEntries.map((e) => {
+      const account = accounts.find((item) => item.id === e.accountId);
+      const accountCode = account ? getAccountCoaMapping(account, activeCoaList).code : '1200';
+      return {
+        date: todayStr,
+        accountId: e.accountId,
+        type: e.type,
+        category: e.category,
+        description: e.description,
+        amount: e.amount,
+        isAdjustment: true,
+        adjustmentType: 'reconciliation',
+        reconciliationEvidenceReference: evidenceReference,
+        reconciliationEvidenceConfirmedAt: new Date().toISOString(),
+        reconciliationActualBalance: e.actualBalance,
+        reconciliationRecordedBalance: e.recordedBalance,
+        coaDebitCode: e.type === 'income' ? accountCode : '5900',
+        coaCreditCode: e.type === 'income' ? '4400' : accountCode,
+      };
+    });
 
     onApplyAdjustmentEntries(newTxEntries);
+    setReconciliationConfirmed(false);
+    setReconciliationEvidenceNote('');
 
     setReconciliationSuccessMessage(
       `Berhasil mengeksekusi ${newTxEntries.length} Jurnal Penyesuaian (Adjustment Entries)! Saldo Buku Besar (GL) dan Kas Fisik kini 100% tersinkronisasi.`
@@ -1546,9 +1571,12 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
                 <h4 className="text-xs font-black uppercase tracking-wider text-slate-700 dark:text-slate-300 flex items-center justify-between">
                   <span className="flex items-center gap-2">
                     <ListChecks className="h-4 w-4 text-blue-500" />
-                    <span>Audit Saldo Buku Besar (GL) & Log Transaksi ({accounts.length} Akun)</span>
+                    <span>Audit Saldo Buku Besar (GL) & Log Transaksi ({accountAudit.length} Akun Kas)</span>
                   </span>
                 </h4>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                  Auto-reconcile kas hanya berlaku untuk kas, bank, dan e-wallet. Saldo kartu kredit/paylater dicatat terpisah sebagai kewajiban.
+                </p>
 
                 <div className="overflow-x-auto border border-slate-200 dark:border-slate-800 rounded-xl">
                   <table className="w-full text-left text-xs font-medium">
@@ -1623,7 +1651,7 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
                       <tr>
                         <th className="py-2.5 px-3">Nama Rekening</th>
                         <th className="py-2.5 px-3 font-mono text-right">Saldo GL Terhitung</th>
-                        <th className="py-2.5 px-3 font-mono text-right">Saldo Kas Sebenarnya (Rp)</th>
+                        <th className="py-2.5 px-3 font-mono text-right">Saldo Aktual Kas/Bank/E-Wallet (Rp)</th>
                         <th className="py-2.5 px-3 font-mono text-right">Selisih (Variance)</th>
                         <th className="py-2.5 px-3 text-center">Status</th>
                       </tr>
@@ -1675,6 +1703,33 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
                 </div>
               </div>
 
+              {proposedAdjustmentEntries.length > 0 && (
+                <div className="space-y-2 rounded-xl border border-amber-200 bg-amber-50/70 p-3 dark:border-amber-800 dark:bg-amber-950/20">
+                  <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-600 dark:text-slate-300">
+                    Catatan bukti pemeriksaan (opsional)
+                  </label>
+                  <input
+                    type="text"
+                    value={reconciliationEvidenceNote}
+                    onChange={(e) => setReconciliationEvidenceNote(e.target.value)}
+                    placeholder="Contoh: mutasi bank tanggal 30/11 telah diperiksa"
+                    className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+                  />
+                  <label className="flex items-start gap-2 text-xs font-semibold text-slate-700 dark:text-slate-200">
+                    <input
+                      type="checkbox"
+                      checked={reconciliationConfirmed}
+                      onChange={(e) => setReconciliationConfirmed(e.target.checked)}
+                      className="mt-0.5 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                    />
+                    <span>Saya telah memeriksa saldo terhadap bukti rekening dan mengonfirmasi selisih ini.</span>
+                  </label>
+                  <p className="text-[10px] text-slate-500 dark:text-slate-400">
+                    Konfirmasi hanya membuat jurnal penyesuaian; saldo rekening tidak diubah otomatis.
+                  </p>
+                </div>
+              )}
+
               {/* Proposed Adjustment Entries Section */}
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
@@ -1687,6 +1742,7 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
                     <button
                       type="button"
                       onClick={handleExecuteAutoReconciliation}
+                      disabled={!reconciliationConfirmed}
                       className="px-4 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 text-white rounded-xl font-extrabold text-xs shadow-md hover:brightness-110 transition flex items-center gap-2 cursor-pointer"
                     >
                       <Sparkles className="h-4 w-4 text-amber-300" />
@@ -1730,7 +1786,7 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
                         <div className="p-2 bg-slate-100 dark:bg-slate-800 rounded-xl text-[10px] font-mono text-slate-600 dark:text-slate-400 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1">
                           <span>{e.debitCreditNote}</span>
                           <span className="font-bold text-slate-800 dark:text-slate-200 tabular-nums">
-                            {e.isCredit ? 'Sisa Limit:' : 'Proyeksi Saldo:'} {formatterIDR.format(e.currentBalance)} &rarr; {formatterIDR.format(e.projectedBalance)}
+                            Saldo aplikasi tidak diubah; bukti saldo akhir: {formatterIDR.format(e.actualBalance)}
                           </span>
                         </div>
                       </div>
@@ -2218,6 +2274,7 @@ export const AccountingIntegrityModal: React.FC<AccountingIntegrityModalProps> =
               <button
                 type="button"
                 onClick={handleExecuteAutoReconciliation}
+                disabled={!reconciliationConfirmed}
                 className="flex-1 sm:flex-initial px-5 py-2.5 bg-gradient-to-r from-emerald-600 to-teal-600 text-white rounded-xl font-extrabold text-xs shadow-md hover:brightness-110 transition flex items-center justify-center gap-2 cursor-pointer"
               >
                 <Sparkles className="h-4 w-4 text-amber-300" />

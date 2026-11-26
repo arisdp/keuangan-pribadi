@@ -5,7 +5,7 @@ import {
   users, accounts, transactions, investments, 
   budgets, debts, fixedAssets, recurringTransactions, savingsGoals,
   emergencyFundConfigs, emergencyFundTransactions, investmentPriceHistory, debtPayments,
-  userMasterConfigs
+  userMasterConfigs, journalEntries, journalLines
 } from '../db/schema';
 import { dbLogger } from '../utils/dbLogger';
 
@@ -60,6 +60,8 @@ export async function ensureTablesExist(): Promise<boolean> {
           min_payment numeric(15, 2)
         )`,
         `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS coa_code text`,
+        `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS opening_date text`,
+        `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS opening_balance_entry_id text`,
         `CREATE TABLE IF NOT EXISTS transactions (
           id text PRIMARY KEY,
           user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -106,6 +108,41 @@ export async function ensureTablesExist(): Promise<boolean> {
         `ALTER TABLE transactions ADD COLUMN IF NOT EXISTS coa_debit_code text`,
         `ALTER TABLE transactions ADD COLUMN IF NOT EXISTS coa_credit_code text`,
         `ALTER TABLE transactions ADD COLUMN IF NOT EXISTS linked_kpr_breakdown jsonb`,
+        `ALTER TABLE transactions ADD COLUMN IF NOT EXISTS linked_account_id text`,
+        `ALTER TABLE transactions ADD COLUMN IF NOT EXISTS debt_disbursement_mode text`,
+        `ALTER TABLE transactions ADD COLUMN IF NOT EXISTS debt_disbursement_coa_code text`,
+        `ALTER TABLE transactions ADD COLUMN IF NOT EXISTS reconciliation_evidence_reference text`,
+        `ALTER TABLE transactions ADD COLUMN IF NOT EXISTS reconciliation_evidence_confirmed_at text`,
+        `ALTER TABLE transactions ADD COLUMN IF NOT EXISTS reconciliation_actual_balance numeric(15, 2)`,
+        `ALTER TABLE transactions ADD COLUMN IF NOT EXISTS reconciliation_recorded_balance numeric(15, 2)`,
+        `CREATE TABLE IF NOT EXISTS journal_entries (
+          id text PRIMARY KEY,
+          user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          transaction_id text,
+          date text NOT NULL,
+          description text NOT NULL,
+          source_type text NOT NULL,
+          evidence_reference text,
+          evidence_confirmed_at text,
+          reconciliation_actual_balance numeric(15, 2)
+        )`,
+        `ALTER TABLE journal_entries ADD COLUMN IF NOT EXISTS reconciliation_actual_balance numeric(15, 2)`,
+        `CREATE INDEX IF NOT EXISTS journal_entries_user_date_idx ON journal_entries(user_id, date)`,
+        `CREATE INDEX IF NOT EXISTS journal_entries_transaction_idx ON journal_entries(user_id, transaction_id)`,
+        `CREATE TABLE IF NOT EXISTS journal_lines (
+          id text PRIMARY KEY,
+          user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          journal_entry_id text NOT NULL REFERENCES journal_entries(id) ON DELETE CASCADE,
+          line_number integer NOT NULL,
+          coa_code text NOT NULL,
+          debit numeric(15, 2) NOT NULL DEFAULT 0,
+          credit numeric(15, 2) NOT NULL DEFAULT 0,
+          CONSTRAINT journal_lines_one_side_only CHECK (
+            debit >= 0 AND credit >= 0 AND ((debit > 0 AND credit = 0) OR (credit > 0 AND debit = 0) OR (debit = 0 AND credit = 0))
+          ),
+          CONSTRAINT journal_lines_entry_line_unique UNIQUE (journal_entry_id, line_number)
+        )`,
+        `CREATE INDEX IF NOT EXISTS journal_lines_user_coa_idx ON journal_lines(user_id, coa_code)`,
         `CREATE TABLE IF NOT EXISTS recurring_transactions (
           id text PRIMARY KEY,
           user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -896,7 +933,9 @@ apiRouter.get('/sync', async (req, res) => {
       allSavingsGoals,
       efConfigs,
       allEfTxs,
-      masterConfigRows
+      masterConfigRows,
+      allJournalEntries,
+      allJournalLines
     ] = await Promise.all([
       db.select().from(accounts).where(eq(accounts.userId, userId)),
       db.select().from(transactions).where(eq(transactions.userId, userId)),
@@ -908,7 +947,9 @@ apiRouter.get('/sync', async (req, res) => {
       db.select().from(savingsGoals).where(eq(savingsGoals.userId, userId)),
       db.select().from(emergencyFundConfigs).where(eq(emergencyFundConfigs.userId, userId)),
       db.select().from(emergencyFundTransactions).where(eq(emergencyFundTransactions.userId, userId)),
-      db.select().from(userMasterConfigs).where(eq(userMasterConfigs.userId, userId))
+      db.select().from(userMasterConfigs).where(eq(userMasterConfigs.userId, userId)),
+      db.select().from(journalEntries).where(eq(journalEntries.userId, userId)),
+      db.select().from(journalLines).where(eq(journalLines.userId, userId))
     ]);
 
     const userInvestmentIds = allInvestments.map(i => i.id);
@@ -929,7 +970,7 @@ apiRouter.get('/sync', async (req, res) => {
       'dividendsOrInterest', 'previousUnitPrice', 'changePercentage', 'limitAmount',
       'propertyPrice', 'downPayment', 'fixedRate', 'floatingRate', 'purchasePrice',
       'annualRatePct', 'kprPaidPrincipalLock', 'amountPaid', 'monthlyExpense',
-      'targetAmount', 'currentAmount'
+      'targetAmount', 'currentAmount', 'debit', 'credit'
     ]);
 
     const mapToNum = (obj: any) => {
@@ -992,6 +1033,8 @@ apiRouter.get('/sync', async (req, res) => {
       savingsGoals: allSavingsGoals.map(mapToNum),
       emergencyConfig: efConfigs.length > 0 ? mapToNum(efConfigs[0]) : { jobStability: 'medium', dependents: 0, monthlyExpense: 0 },
       emergencyTransactions: allEfTxs.map(mapToNum),
+      journalEntries: allJournalEntries.map(mapToNum),
+      journalLines: allJournalLines.map(mapToNum),
       coaList: Array.isArray(masterCfg?.coaList) ? masterCfg.coaList : null,
       masterCategories: Array.isArray(masterCfg?.masterCategories) ? masterCfg.masterCategories : null,
       kprPresets: Array.isArray(masterCfg?.kprPresets) ? masterCfg.kprPresets : null,
@@ -1085,6 +1128,11 @@ apiRouter.post('/sync', async (req, res) => {
            OR (account_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM accounts WHERE accounts.id = transactions.account_id));
       `);
 
+      const hasJournalPayload = Array.isArray(body.journalEntries) && Array.isArray(body.journalLines);
+      if (hasJournalPayload) {
+        await tx.delete(journalEntries).where(eq(journalEntries.userId, userId));
+      }
+
       // 2. Delete recurring transactions
       await tx.execute(sql`
         DELETE FROM recurring_transactions 
@@ -1153,6 +1201,8 @@ apiRouter.post('/sync', async (req, res) => {
         creditLimit: safeNullableNumberString(a.creditLimit),
         usedLimit: safeNullableNumberString(a.usedLimit),
         initialDebt: safeNullableNumberString(a.initialDebt),
+        openingDate: a.openingDate ? String(a.openingDate) : null,
+        openingBalanceEntryId: a.openingBalanceEntryId ? String(a.openingBalanceEntryId) : null,
         dueDay: safeNullableInt(a.dueDay),
         interestRate: safeNullableNumberString(a.interestRate),
         minPayment: safeNullableNumberString(a.minPayment),
@@ -1201,6 +1251,11 @@ apiRouter.post('/sync', async (req, res) => {
             unitName: t.unitName ? String(t.unitName) : null,
             isAdjustment: Boolean(t.isAdjustment),
             adjustmentType: t.adjustmentType ? String(t.adjustmentType) : null,
+            reconciliationEvidenceReference: t.reconciliationEvidenceReference ? String(t.reconciliationEvidenceReference) : null,
+            reconciliationEvidenceConfirmedAt: t.reconciliationEvidenceConfirmedAt ? String(t.reconciliationEvidenceConfirmedAt) : null,
+            reconciliationActualBalance: t.reconciliationActualBalance != null ? Number(t.reconciliationActualBalance) : null,
+            reconciliationRecordedBalance:
+              t.reconciliationRecordedBalance != null ? Number(t.reconciliationRecordedBalance) : null,
             adjustmentPeriodKey: t.adjustmentPeriodKey ? String(t.adjustmentPeriodKey) : null,
             adjustmentRatePct: safeNullableNumberString(t.adjustmentRatePct),
             adjustmentDurationDays: safeNullableInt(t.adjustmentDurationDays),
@@ -1209,11 +1264,45 @@ apiRouter.post('/sync', async (req, res) => {
             coaDebitCode: t.coaDebitCode ? String(t.coaDebitCode) : null,
             coaCreditCode: t.coaCreditCode ? String(t.coaCreditCode) : null,
             linkedKprBreakdown: t.linkedKprBreakdown && typeof t.linkedKprBreakdown === 'object' ? t.linkedKprBreakdown : null,
+            linkedAccountId: t.linkedAccountId ? ensureUserScopedId(t.linkedAccountId, 'acc', 0) : null,
+            debtDisbursementMode: t.debtDisbursementMode ? String(t.debtDisbursementMode) : null,
+            debtDisbursementCoaCode: t.debtDisbursementCoaCode ? String(t.debtDisbursementCoaCode) : null,
           };
         });
         const uniqueTransactions = deduplicateById(mappedTransactions);
         if (uniqueTransactions.length > 0) {
           await tx.insert(transactions).values(uniqueTransactions as any).onConflictDoNothing();
+        }
+
+        if (hasJournalPayload) {
+          const mappedEntries = deduplicateById((body.journalEntries as any[]).map((entry, idx) => ({
+            id: ensureUserScopedId(entry.id, 'journal', idx),
+            userId,
+            transactionId: entry.transactionId ? ensureUserScopedId(entry.transactionId, 'tx', 0) : null,
+            date: String(entry.date || ''),
+            description: String(entry.description || ''),
+            sourceType: String(entry.sourceType || 'transaction'),
+            evidenceReference: entry.evidenceReference ? String(entry.evidenceReference) : null,
+            evidenceConfirmedAt: entry.evidenceConfirmedAt ? String(entry.evidenceConfirmedAt) : null,
+            reconciliationActualBalance:
+              entry.reconciliationActualBalance != null ? Number(entry.reconciliationActualBalance) : null,
+          })));
+          const entryIds = new Set(mappedEntries.map((entry) => entry.id));
+          const mappedLines = deduplicateById((body.journalLines as any[]).map((line, idx) => ({
+            id: ensureUserScopedId(line.id, 'journal-line', idx),
+            userId,
+            journalEntryId: ensureUserScopedId(line.journalEntryId, 'journal', 0),
+            lineNumber: safeInt(line.lineNumber, 0),
+            coaCode: String(line.coaCode || ''),
+            debit: safeNumberString(line.debit, '0'),
+            credit: safeNumberString(line.credit, '0'),
+          }))).filter((line) => entryIds.has(line.journalEntryId));
+          if (mappedEntries.length > 0) {
+            await tx.insert(journalEntries).values(mappedEntries as any).onConflictDoNothing();
+          }
+          if (mappedLines.length > 0) {
+            await tx.insert(journalLines).values(mappedLines as any).onConflictDoNothing();
+          }
         }
       }
 

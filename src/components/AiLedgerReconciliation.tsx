@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
-import { Transaction, Account } from '../types';
+import { Transaction, Account, JournalLine } from '../types';
 import { CategoryNode } from '../categoryHierarchy';
+import { areJournalLinesBalanced } from '../utils/accountingLedger';
 import { 
   Sparkles, 
   CheckCircle2, 
@@ -18,6 +19,7 @@ import {
 interface AiLedgerReconciliationProps {
   transactions: Transaction[];
   accounts: Account[];
+  journalLines: JournalLine[];
   masterCategories: CategoryNode[];
   onReconcileFix?: (missingCategories: string[]) => void;
 }
@@ -31,6 +33,7 @@ const formatterIDR = new Intl.NumberFormat('id-ID', {
 export const AiLedgerReconciliation: React.FC<AiLedgerReconciliationProps> = ({
   transactions,
   accounts,
+  journalLines,
   masterCategories,
   onReconcileFix,
 }) => {
@@ -154,13 +157,18 @@ export const AiLedgerReconciliation: React.FC<AiLedgerReconciliationProps> = ({
     }
 
     // Debit / Credit Equilibrium Calculation
-    const totalDebits = filteredTxs
-      .filter((tx) => tx.type === 'expense' || tx.type === 'saving' || tx.type === 'investment')
-      .reduce((sum, tx) => sum + tx.amount, 0);
-
-    const totalCredits = filteredTxs
-      .filter((tx) => tx.type === 'income')
-      .reduce((sum, tx) => sum + tx.amount, 0);
+    const filteredTransactionIds = new Set(filteredTxs.map((tx) => tx.id));
+    const filteredJournalLines = journalLines.filter(
+      (line) => line.transactionId && filteredTransactionIds.has(line.transactionId)
+    );
+    const totalDebits = filteredJournalLines.reduce((sum, line) => sum + Number(line.debit || 0), 0);
+    const totalCredits = filteredJournalLines.reduce((sum, line) => sum + Number(line.credit || 0), 0);
+    const journalLineCounts = new Map<string, number>();
+    filteredJournalLines.forEach((line) => {
+      if (line.transactionId) {
+        journalLineCounts.set(line.transactionId, (journalLineCounts.get(line.transactionId) || 0) + 1);
+      }
+    });
 
     return {
       totalTxsScanned: filteredTxs.length,
@@ -168,9 +176,12 @@ export const AiLedgerReconciliation: React.FC<AiLedgerReconciliationProps> = ({
       totalCredits,
       anomalies,
       unmappedCatMap,
-      isBalanced: anomalies.filter((a) => a.type === 'critical').length === 0,
+      isBalanced: filteredTxs.length === 0 || (
+        filteredTxs.every((tx) => (journalLineCounts.get(tx.id) || 0) >= 2) &&
+        areJournalLinesBalanced(filteredJournalLines)
+      ),
     };
-  }, [transactions, accounts, selectedMonth, allMasterCategoryNames]);
+  }, [transactions, accounts, journalLines, selectedMonth, allMasterCategoryNames]);
 
   const handleRunReconciliation = () => {
     setIsReconciling(true);
@@ -207,7 +218,7 @@ export const AiLedgerReconciliation: React.FC<AiLedgerReconciliationProps> = ({
               </span>
             </h3>
             <p className="text-xs text-slate-500 dark:text-slate-400 font-medium">
-              Verifikasi otomatis kepatuhan entri jurnal terhadap prinsip dual-entry, integritas COA, dan perimbangan arus dana.
+              Audit jurnal berpasangan dan integritas COA; status seimbang dihitung dari total debit dan kredit.
             </p>
           </div>
         </div>
@@ -244,22 +255,22 @@ export const AiLedgerReconciliation: React.FC<AiLedgerReconciliationProps> = ({
 
         <div className="p-4 bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 rounded-xl space-y-1">
           <span className="text-[10px] font-extrabold text-slate-400 uppercase tracking-wider block">
-            Total Debet (Pengeluaran/Aset)
+            Total Debit Jurnal
           </span>
           <span className="text-xl font-black text-rose-600 dark:text-rose-400 font-mono block">
             {formatterIDR.format(auditResult.totalDebits)}
           </span>
-          <span className="text-[10px] text-slate-500 font-medium">Alokasi Kas Keluar</span>
+          <span className="text-[10px] text-slate-500 font-medium">Dari journal lines</span>
         </div>
 
         <div className="p-4 bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 rounded-xl space-y-1">
           <span className="text-[10px] font-extrabold text-slate-400 uppercase tracking-wider block">
-            Total Kredit (Pemasukan)
+            Total Kredit Jurnal
           </span>
           <span className="text-xl font-black text-emerald-600 dark:text-emerald-400 font-mono block">
             {formatterIDR.format(auditResult.totalCredits)}
           </span>
-          <span className="text-[10px] text-slate-500 font-medium">Alokasi Kas Masuk</span>
+          <span className="text-[10px] text-slate-500 font-medium">Dari journal lines</span>
         </div>
 
         <div className="p-4 bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 rounded-xl space-y-1">
